@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 翻箱 FanBox — 本地文件指挥中心后端
+ * FanBox — 本地文件指挥中心后端
  *
  * 纯 Node 内置模块，零依赖。只绑定 127.0.0.1，浏览器界面是唯一入口。
  * 这是一个本地个人工具：你的机器、你的文件，服务只在本机回环地址监听。
@@ -456,7 +456,7 @@ function trashPath(p) {
       let msg = err.message;
       // Finder 自动化未授权（-1743/-600）给人话
       if (PLATFORM === 'darwin' && /-1743|-600|not allowed|authoriz/i.test(msg)) {
-        msg = '需在「系统设置 → 隐私与安全性 → 自动化」里允许翻箱控制 Finder（首次删除会弹授权）';
+        msg = '需在「系统设置 → 隐私与安全性 → 自动化」里允许 FanBox 控制 Finder（首次删除会弹授权）';
       }
       resolve({ ok: false, error: msg });
     });
@@ -1972,7 +1972,7 @@ const server = http.createServer(async (req, res) => {
 
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
-    console.error(`\n  ⚠️  端口 ${PORT} 已被占用——翻箱很可能已经在运行了。`);
+    console.error(`\n  ⚠️  端口 ${PORT} 已被占用——FanBox 很可能已经在运行了。`);
     console.error(`      直接打开浏览器访问  http://localhost:${PORT}  就行；`);
     console.error(`      想另开一个，换端口：FANBOX_PORT=8080 node server.js\n`);
   } else {
@@ -1983,7 +1983,7 @@ server.on('error', (err) => {
 
 server.listen(PORT, '127.0.0.1', () => {
   const link = `http://localhost:${PORT}`;
-  console.log('\n  📦  翻箱 FanBox 已启动');
+  console.log('\n  📦  FanBox 已启动');
   console.log(`  🔗  ${link}`);
   console.log('  🏠  根目录:', HOME);
   console.log('\n  按 Ctrl+C 退出\n');

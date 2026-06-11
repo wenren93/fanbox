@@ -1,4 +1,4 @@
-/* 翻箱 FanBox 前端 */
+/* FanBox 前端 */
 'use strict';
 
 const $ = (s) => document.querySelector(s);
@@ -1811,7 +1811,7 @@ function maybeShowGuide() {
   ov.className = 'guide-overlay';
   ov.innerHTML = `<div class="guide-card">
     <div class="guide-logo">${svgWrap(SVG.box, 'currentColor', 46, true)}</div>
-    <h2>欢迎用翻箱 FanBox</h2>
+    <h2>欢迎用 FanBox</h2>
     <p>vibe coding 的驾驶舱——找文件、跑 agent、看它改、随手改，都在一个窗口：</p>
     <ul>
       <li><b>⌘K</b> 全局搜文件和文件夹；<b>⌘↵</b> 把项目直接在编辑器整包打开；<code>内容:关键词</code> 搜文件里的字</li>

@@ -1,6 +1,6 @@
 'use strict';
 /**
- * 翻箱 FanBox — Electron 主进程
+ * FanBox — Electron 主进程
  *
  * 复用零依赖后端 server.js（文件能力），叠加 node-pty 内嵌终端，
  * 让 TUI coding agent（Claude Code / Codex / Aider…）在界面里直接跑起来。
@@ -77,7 +77,7 @@ app.whenReady().then(() => {
   if (process.platform === 'darwin' && app.dock) {
     try { app.dock.setIcon(nativeImage.createFromPath(path.join(__dirname, '..', 'build', 'icon.png'))); } catch { /* */ }
   }
-  app.setName('翻箱 FanBox');
+  app.setName('FanBox');
   buildMenu();
   createWindow();
   startShotWatch();
@@ -192,13 +192,13 @@ ipcMain.handle('update:get', () => pendingUpdate);
 function buildMenu() {
   const isMac = process.platform === 'darwin';
   const template = [
-    ...(isMac ? [{ label: '翻箱 FanBox', submenu: [
-      { role: 'about', label: '关于 翻箱 FanBox' },
+    ...(isMac ? [{ label: 'FanBox', submenu: [
+      { role: 'about', label: '关于 FanBox' },
       { label: '检查更新…', click: () => checkUpdate({ manual: true }) },
       { type: 'separator' },
-      { role: 'hide', label: '隐藏 翻箱 FanBox' }, { role: 'hideOthers', label: '隐藏其他' }, { role: 'unhide', label: '全部显示' },
+      { role: 'hide', label: '隐藏 FanBox' }, { role: 'hideOthers', label: '隐藏其他' }, { role: 'unhide', label: '全部显示' },
       { type: 'separator' },
-      { role: 'quit', label: '退出 翻箱 FanBox' },
+      { role: 'quit', label: '退出 FanBox' },
     ] }] : []),
     { label: '文件', submenu: [
       ...(isMac ? [] : [{ label: '检查更新…', click: () => checkUpdate({ manual: true }) }, { type: 'separator' }]),

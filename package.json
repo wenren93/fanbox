@@ -1,7 +1,7 @@
 {
   "name": "fanbox",
   "version": "1.6.0",
-  "description": "翻箱 FanBox — vibe coding 的驾驶舱。浏览/搜索/预览/轻改本机文件，内嵌终端直接指挥 coding agent。",
+  "description": "FanBox — the cockpit for vibe coding. Browse/search/preview/edit local files, command coding agents from the built-in terminal.",
   "bin": {
     "fanbox": "server.js"
   },
@@ -18,7 +18,7 @@
   },
   "build": {
     "appId": "com.huashu.fanbox",
-    "productName": "翻箱 FanBox",
+    "productName": "FanBox",
     "directories": {
       "buildResources": "build",
       "output": "dist"
@@ -44,7 +44,7 @@
       ]
     },
     "dmg": {
-      "title": "翻箱 FanBox",
+      "title": "FanBox",
       "writeUpdateInfo": false
     }
   },
