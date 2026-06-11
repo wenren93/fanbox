@@ -2544,6 +2544,10 @@ const term = {
         s.status = 'idle';
         this.renderTabs();
         this.refreshCwd(s); // 干完一段活，标题对齐终端真实目录
+        // 阶段性收工不报喜：底部状态行还挂着后台任务（「1 shell, 1 monitor still running」/「· 1 shell ·」），
+        // agent 跑完会被自动唤醒接着干——这会儿弹「完成」是误报。圆点照常变空闲，提醒全部按下，等真收工再响
+        const foot = this.tailText(s, 8);
+        if (/\bstill running\b/i.test(foot) || /·\s*\d+\s+(shells?|monitors?|tasks?|agents?)\b/i.test(foot)) return;
         const ask = dur > 600 && TERM_ASK_RE.test(tail); // 停在审批/确认界面：等你拍板（不设 4s 门槛，审批常来得很快）
         if (ask || dur > 1500) this.awaitGlow();
         if (ask) {
