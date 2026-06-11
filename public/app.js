@@ -2437,13 +2437,15 @@ const term = {
             if (!inner.includes('/') && !/\.[A-Za-z0-9]{1,8}$/.test(inner)) continue;
             push(m.index + 1, m.index + 1 + inner.length, inner, '');
           }
-          // 2. 斜杠路径：候选先送服务端 stat 验证（含行尾空格扩展），验证得到才配下划线——
-          // 否则中文散文里的「分发/产品演示——……」整句都会被误标成可点路径
-          const reP = /(?<![\w:/.~\-])(?:~|\.{1,2})?\/[^\s'"`:()]+/gu;
+          // 2. 含斜杠的 token：宽进严出——整个 token 都收（.claude/x、写作/01-xx、/abs、~/x 全覆盖），
+          // 配不配下划线交给服务端 stat 验证（散文里的「分发/产品演示——……」会被验证刷掉）
+          const reP = /[^\s'"`:()（）「」【】<>]*\/[^\s'"`:()（）「」【】<>]*/g;
           const r2 = [];
           while ((m = reP.exec(t)) !== null) {
-            const raw = m[0].replace(/[)\],.:;。，]+$/, '');
-            if (raw.length < 3 || overlaps(m.index, m.index + raw.length)) continue;
+            // 全角标点几乎不出现在路径里，却常把路径和后续散文粘成一个 token：切到第一个为止
+            const raw = m[0].split(/[，。、？！…—]+/)[0].replace(/[)\],.:;]+$/, '');
+            if (raw.length < 3 || !raw.includes('/') || /^https?:\/\//.test(raw)) continue;
+            if (overlaps(m.index, m.index + raw.length)) continue;
             const tail = t.slice(m.index + raw.length).split(/['"`]/)[0].slice(0, 160);
             r2.push({ s: m.index, e: m.index + raw.length, cand: raw, tail });
           }
