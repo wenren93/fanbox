@@ -2,6 +2,10 @@
 
 # 📦 FanBox
 
+<img src="assets/promo-banner.png" alt="FanBox · Coding Agent 的驾驶舱" width="100%">
+
+<br><br>
+
 > *"AI 帮你一个下午起十个项目，然后它们就再也找不到了。FanBox 帮你把它们找回来。"*
 > *"AI spins up ten projects in an afternoon. FanBox helps you find them again."*
 
