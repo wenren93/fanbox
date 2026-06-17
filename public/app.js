@@ -511,6 +511,26 @@ async function dropFilesInto(fileList, dir) {
   toast(saved === 1 ? `已存入${where} ${baseOf(lastPath)}` : `已存入${where} ${saved} 个文件`);
   if (dir === state.cwd && !state.recentMode) { await refresh(); if (lastPath) applySelection(lastPath); }
 }
+// 拖入 app 内/外部的图片（微信收到的图、预览里的图等都是 <img>，拖动带的是图片 URL 而非系统文件）：
+// 取 URL → fetch 出字节 → 存进目标目录。只收图片，非图片忽略。
+async function dropUrlInto(url, dir) {
+  if (!window.fanboxDrop || !dir) { toast('该环境不支持拖入保存', true); return; }
+  url = (String(url || '').split(/[\r\n]/).find((l) => l && !l.trim().startsWith('#')) || '').trim(); // uri-list 可能多行/含 # 注释
+  if (!url) return;
+  let blob;
+  try { const r = await fetch(url); if (!r.ok) throw 0; blob = await r.blob(); }
+  catch { toast('读不到拖入的图片', true); return; }
+  if (!/^image\//.test(blob.type)) { toast('目前只支持拖入图片', true); return; }
+  const e = ((blob.type.split('/')[1] || 'png').toLowerCase().replace('jpeg', 'jpg').replace(/[^a-z0-9]/g, '')) || 'png';
+  let name = '';
+  try { name = baseOf(decodeURIComponent(new URL(url, location.href).pathname)); } catch { /* blob:/data: 无 pathname */ }
+  if (!name || !/\.[a-z0-9]+$/i.test(name)) name = `image-${Date.now()}.${e}`;
+  const r = await window.fanboxDrop.saveInto(dir, name, await blob.arrayBuffer()).catch(() => null);
+  if (!r || !r.ok) { toast('存入失败', true); return; }
+  const where = dir === state.cwd ? '' : '「' + baseOf(dir) + '」';
+  toast(`已存入${where} ${baseOf(r.path)}`);
+  if (dir === state.cwd && !state.recentMode) { await refresh(); if (r.path) applySelection(r.path); }
+}
 // 让任意元素可拖拽出一个路径（侧栏目录/收藏 → 终端）
 function makeDraggablePath(el, p) {
   el.draggable = true;
@@ -2264,11 +2284,13 @@ function bindEvents() {
   $('#file-area').addEventListener('dblclick', blankMenu);
   $('#file-area').addEventListener('contextmenu', blankMenu);
   // 拖入文件区 = 存进当前目录；拖到某文件夹图标上 = 存进那个文件夹（截图浮窗、Finder 文件都行）。
-  // 只接「外部文件」拖入（dataTransfer 里有 Files）；fanbox 内部拖拽不带 Files，不受影响。
+  // 接两类：①「外部文件」拖入（dataTransfer 里有 Files）；② app 内/外部图片拖入（带 text/uri-list 的 <img>，如微信收到的图、预览里的图）。
+  // fanbox 内部路径拖拽（带 application/x-fanbox-path，拖去终端用）排除在外，不受影响。
   const fileArea = $('#file-area');
+  const droppableTypes = (t) => t.includes('Files') || (t.includes('text/uri-list') && !t.includes('application/x-fanbox-path'));
   const clearDropHi = () => { fileArea.classList.remove('area-drop'); fileArea.querySelectorAll('.item.drop-into').forEach((x) => x.classList.remove('drop-into')); };
   fileArea.addEventListener('dragover', (ev) => {
-    if (state.skillsMode || !ev.dataTransfer.types.includes('Files')) return;
+    if (state.skillsMode || !droppableTypes(ev.dataTransfer.types)) return;
     ev.preventDefault(); ev.dataTransfer.dropEffect = 'copy';
     const item = ev.target.closest('.item');
     const idx = item ? Number(item.dataset.idx) : -1;
@@ -2278,12 +2300,17 @@ function bindEvents() {
   });
   fileArea.addEventListener('dragleave', (ev) => { if (!fileArea.contains(ev.relatedTarget)) clearDropHi(); });
   fileArea.addEventListener('drop', async (ev) => {
-    if (state.skillsMode || !ev.dataTransfer.files || !ev.dataTransfer.files.length) return;
+    const dt = ev.dataTransfer;
+    const hasFiles = dt.files && dt.files.length;
+    const url = (!hasFiles && dt.types.includes('text/uri-list') && !dt.types.includes('application/x-fanbox-path')) ? dt.getData('text/uri-list') : '';
+    if (state.skillsMode || (!hasFiles && !url)) return;
     ev.preventDefault(); clearDropHi();
     const item = ev.target.closest('.item');
     const idx = item ? Number(item.dataset.idx) : -1;
     const over = idx >= 0 ? state.visible[idx] : null;
-    await dropFilesInto(ev.dataTransfer.files, over && over.isDir ? over.path : state.cwd);
+    const dir = over && over.isDir ? over.path : state.cwd;
+    if (hasFiles) await dropFilesInto(dt.files, dir);
+    else await dropUrlInto(url, dir);
   });
   $('#content').addEventListener('contextmenu', (e) => { if (!e.target.closest('#file-area')) blankMenu(e); });
   document.addEventListener('click', (e) => { if (!e.target.closest('#context-menu')) closeContextMenu(); });
