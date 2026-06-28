@@ -132,6 +132,13 @@ kbd {
 
 .nav-section { margin-bottom: 18px; }
 .nav-title { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 1px; padding: 0 8px 6px; display: flex; align-items: center; gap: 5px; }
+.nav-title-row { justify-content: space-between; }
+.nav-title-btn {
+  width: 22px; height: 22px; border: 0; border-radius: 6px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; color: var(--text-faint); cursor: pointer;
+}
+.nav-title-btn:hover { background: var(--bg-3); color: var(--accent); }
 .nav-title svg { flex-shrink: 0; }
 .brand .logo { display: inline-flex; }
 .ct-label { display: inline-flex; align-items: center; gap: 7px; }
@@ -147,6 +154,14 @@ kbd {
 .nav-list li .label { overflow: hidden; text-overflow: ellipsis; }
 .nav-list li .unfav { margin-left: auto; opacity: 0; font-size: 11px; }
 .nav-list li:hover .unfav { opacity: 0.6; }
+.nav-list li .nav-remove {
+  margin-left: auto; flex-shrink: 0; width: 20px; height: 20px; border: 0; border-radius: 5px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; color: var(--text-faint); cursor: pointer;
+  opacity: 0; transition: opacity 0.12s, background-color 0.12s, color 0.12s;
+}
+.nav-list li:hover .nav-remove, .nav-list li .nav-remove:focus-visible { opacity: 0.7; }
+.nav-list li .nav-remove:hover { opacity: 1; color: #b5483a; background: var(--bg-3); }
 .nav-empty { padding: 4px 8px; font-size: 12px; color: var(--text-faint); }
 /* 侧栏目录树：展开箭头 + 子级缩进 */
 .nav-list li .twirl { flex-shrink: 0; width: 13px; margin-right: -4px; text-align: center; font-size: 9px; color: var(--text-faint); border-radius: 3px; }

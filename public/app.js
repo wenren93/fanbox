@@ -192,6 +192,7 @@ const state = {
   showHidden: localStorage.getItem('fb_hidden') === '1',
   filter: '', selected: null, cursor: -1, cols: 1, visible: [],
   favorites: [], recentOpened: [], recentMode: false, skillsMode: false,
+  roots: [],
   previewW: Number(localStorage.getItem('fb_preview_w')) || 0, // 0 = 用户还没拖过，走 1:2 比例默认
   previewH: Number(localStorage.getItem('fb_preview_h')) || 0,
   sidebarCollapsed: localStorage.getItem('fb_sidebar_collapsed') === '1',
@@ -1767,9 +1768,10 @@ function popupMenu(ev, items) {
 
 // ---------- 侧边栏 ----------
 // 侧栏目录树：目录项带展开箭头，点箭头逐级懒加载子目录（只列文件夹），点行本身仍是跳转
-function navDirLi(name, p) {
+function navDirLi(name, p, opts = {}) {
   const li = document.createElement('li');
   li.dataset.path = p;
+  if (opts.custom) li.dataset.customRoot = '1';
   const twirl = document.createElement('span');
   twirl.className = 'twirl';
   twirl.textContent = '▸';
@@ -1783,6 +1785,14 @@ function navDirLi(name, p) {
   label.textContent = name;
   label.title = p;
   li.append(twirl, ico, label);
+  if (opts.custom && typeof opts.onRemove === 'function') {
+    const rm = document.createElement('button');
+    rm.className = 'nav-remove';
+    rm.title = '从快速入口移除';
+    rm.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+    rm.onclick = (ev) => { ev.stopPropagation(); opts.onRemove(p); };
+    li.appendChild(rm);
+  }
   li.onclick = () => navigate(p);
   makeDraggablePath(li, p);
   return li;
@@ -1806,9 +1816,28 @@ async function loadRoots() {
   state.home = data.home;
   state.platform = data.platform;
   state.sep = data.sep || '/';
+  state.roots = data.roots || [];
   const ul = $('#roots-list');
   ul.innerHTML = '';
-  data.roots.forEach((r) => ul.appendChild(navDirLi(r.name, r.path)));
+  state.roots.forEach((r) => ul.appendChild(navDirLi(r.name, r.path, { custom: true, onRemove: removeQuickRoot })));
+}
+async function addCurrentQuickRoot() {
+  const p = state.cwd || state.home;
+  if (!p) { toast('当前没有可加入的文件夹', true); return; }
+  const r = await apiPost('/api/roots/add', { path: p });
+  if (!r.ok) { toast('加入失败：' + (r.error || ''), true); return; }
+  state.roots = r.roots || [];
+  await loadRoots();
+  renderRootsActive();
+  toast(r.duplicate ? '已在快速入口' : '已加入快速入口');
+}
+async function removeQuickRoot(p) {
+  const r = await apiPost('/api/roots/remove', { path: p });
+  if (!r.ok) { toast('移除失败：' + (r.error || ''), true); return; }
+  state.roots = r.roots || [];
+  await loadRoots();
+  renderRootsActive();
+  toast('已从快速入口移除');
 }
 function renderRootsActive() {
   // 快速入口 / 收藏 / agent 项目 三个列表统一高亮「当前所在目录」，让用户清楚自己点开/身处哪一项
@@ -2399,6 +2428,7 @@ function bindEvents() {
   // ←/↑ 顶栏按钮已删（与面包屑功能重复、且和 macOS 红绿灯冲突）；后退/上一级保留 ⌘[ 和 Backspace 快捷键
   $('#preview-close').onclick = closePreview;
   $('#cmdk-trigger').onclick = () => cmdk.open();
+  $('#quick-root-add').onclick = addCurrentQuickRoot;
   $('#btn-recent').onclick = showRecent;
   $('#btn-changes').onclick = () => toggleChangesPanel();
   $('#term-wechat').onclick = () => wechatView.toggle();

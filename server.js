@@ -1143,7 +1143,89 @@ function defaultRoots() {
   ];
   return candidates
     .filter(([, p]) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } })
-    .map(([name, p]) => ({ name, path: p }));
+    .map(([name, p]) => ({ name, path: p, custom: false }));
+}
+
+function rootKey(p) {
+  return path.resolve(resolvePath(p));
+}
+
+function safeRootKey(p) {
+  try { return rootKey(p); } catch { return ''; }
+}
+
+function dirExists(p) {
+  try { return fs.statSync(p).isDirectory(); } catch { return false; }
+}
+
+async function quickRoots() {
+  const cfg = await readConfig();
+  const hidden = new Set((Array.isArray(cfg.hiddenDefaultRoots) ? cfg.hiddenDefaultRoots : []).map(safeRootKey).filter(Boolean));
+  const defaults = defaultRoots().filter((r) => !hidden.has(rootKey(r.path)));
+  const seen = new Set(defaults.map((r) => rootKey(r.path)));
+  const custom = [];
+  for (const item of Array.isArray(cfg.quickRoots) ? cfg.quickRoots : []) {
+    if (!item || !item.path) continue;
+    let p;
+    try { p = resolvePath(item.path); } catch { continue; }
+    const key = rootKey(p);
+    if (seen.has(key) || !dirExists(p)) continue;
+    seen.add(key);
+    custom.push({
+      name: String(item.name || path.basename(p) || p).trim() || p,
+      path: p,
+      custom: true,
+    });
+  }
+  return [...defaults, ...custom];
+}
+
+async function addQuickRoot(body) {
+  if (!body || !body.path) return { ok: false, error: '缺少路径' };
+  const p = resolvePath(body && body.path);
+  if (!dirExists(p)) return { ok: false, error: '不是可用文件夹' };
+  const key = rootKey(p);
+  const defaults = defaultRoots();
+  if (defaults.some((r) => rootKey(r.path) === key)) {
+    let restored = false;
+    await updateConfig((c) => {
+      const before = Array.isArray(c.hiddenDefaultRoots) ? c.hiddenDefaultRoots : [];
+      c.hiddenDefaultRoots = before.filter((x) => safeRootKey(x) !== key);
+      restored = c.hiddenDefaultRoots.length !== before.length;
+    });
+    return { ok: true, duplicate: !restored, roots: await quickRoots() };
+  }
+  const name = String((body && body.name) || path.basename(p) || p).trim() || p;
+  let added = false;
+  await updateConfig((c) => {
+    const items = Array.isArray(c.quickRoots) ? c.quickRoots : [];
+    if (!items.some((r) => r && r.path && safeRootKey(r.path) === key)) {
+      items.push({ name, path: p });
+      added = true;
+    }
+    c.quickRoots = items;
+  });
+  return { ok: true, duplicate: !added, roots: await quickRoots() };
+}
+
+async function removeQuickRoot(body) {
+  if (!body || !body.path) return { ok: false, error: '缺少路径' };
+  const p = resolvePath(body && body.path);
+  const key = rootKey(p);
+  const defaults = defaultRoots();
+  if (defaults.some((r) => rootKey(r.path) === key)) {
+    await updateConfig((c) => {
+      const hidden = Array.isArray(c.hiddenDefaultRoots) ? c.hiddenDefaultRoots : [];
+      if (!hidden.some((x) => safeRootKey(x) === key)) hidden.push(p);
+      c.hiddenDefaultRoots = hidden;
+    });
+    return { ok: true, roots: await quickRoots() };
+  }
+  await updateConfig((c) => {
+    c.quickRoots = (Array.isArray(c.quickRoots) ? c.quickRoots : [])
+      .filter((r) => !(r && r.path && safeRootKey(r.path) === key));
+  });
+  return { ok: true, roots: await quickRoots() };
 }
 
 // ---------- 静态资源 ----------
@@ -1978,7 +2060,13 @@ const server = http.createServer(async (req, res) => {
 
   try {
     if (p === '/api/roots') {
-      return sendJSON(res, 200, { home: HOME, platform: PLATFORM, sep: path.sep, roots: defaultRoots() });
+      return sendJSON(res, 200, { home: HOME, platform: PLATFORM, sep: path.sep, roots: await quickRoots() });
+    }
+    if (p === '/api/roots/add' && req.method === 'POST') {
+      return sendJSON(res, 200, await addQuickRoot(await readBody(req)));
+    }
+    if (p === '/api/roots/remove' && req.method === 'POST') {
+      return sendJSON(res, 200, await removeQuickRoot(await readBody(req)));
     }
     if (p === '/api/list') {
       return sendJSON(res, 200, await listDir(qp.get('path') || HOME));
