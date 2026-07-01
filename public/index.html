@@ -20,10 +20,16 @@
         </div>
       </div>
 
-      <button id="cmdk-trigger" class="cmdk-trigger">
-        <span class="ct-label"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> 搜索全部文件</span>
-        <kbd>⌘K</kbd>
-      </button>
+      <div class="cmdk-trigger">
+        <button id="cmdk-trigger" class="cmdk-open" title="搜索全部文件 (⌘K)">
+          <span class="ct-label"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> 搜索全部文件</span>
+        </button>
+        <div class="cmdk-tools">
+          <button id="nav-back" class="nav-step" title="后退 (⌘[)" disabled><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+          <button id="nav-forward" class="nav-step" title="前进 (⌘])" disabled><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></button>
+          <kbd>⌘K</kbd>
+        </div>
+      </div>
 
       <nav class="nav-section">
         <div class="nav-title nav-title-row">

@@ -185,7 +185,7 @@ window.__svgVideo = richIcon({ name: '_.mp4', kind: 'video' }, 40);
 const state = {
   cwd: null, home: null, platform: 'darwin', sep: '/',
   theme: localStorage.getItem('fb_theme') || 'warm',
-  entries: [], project: null, history: [],
+  entries: [], project: null, history: [], forwardHistory: [],
   view: localStorage.getItem('fb_view') || 'grid',
   gridSize: localStorage.getItem('fb_gridsize') || 'sm',
   sort: localStorage.getItem('fb_sort') || 'name',
@@ -271,12 +271,20 @@ const isMdName = (n) => /\.(md|markdown)$/i.test(String(n || ''));
 
 // ---------- 导航 ----------
 async function navigate(p, pushHistory = true) {
-  if (!await guardDirty()) return;
+  if (!await guardDirty()) return false;
+  const navMode = pushHistory === 'back' || pushHistory === 'forward' ? pushHistory : (pushHistory ? 'push' : 'replace');
   if (pushHistory && !follow.navving) restoreFileAreaIfHidden(); // 用户主动导航时，终端铺满/全铺就退出，让文件区回来
   try {
     const data = await api('/api/list?path=' + encodeURIComponent(p));
-    if (data.error) { toast('无法打开：' + data.error, true); return; }
-    if (pushHistory && state.cwd) state.history.push(state.cwd);
+    if (data.error) { toast('无法打开：' + data.error, true); return false; }
+    if (navMode === 'push' && state.cwd && state.cwd !== data.path) {
+      state.history.push(state.cwd);
+      state.forwardHistory = [];
+    } else if (navMode === 'back' && state.cwd && state.cwd !== data.path) {
+      state.forwardHistory.push(state.cwd);
+    } else if (navMode === 'forward' && state.cwd && state.cwd !== data.path) {
+      state.history.push(state.cwd);
+    }
     state.cwd = data.path;
     try { window.fanboxWechat && window.fanboxWechat.setCwd(state.cwd); } catch { /* 微信 ClawBot 的 agent 工作目录跟随当前项目 */ }
     state.entries = data.entries;
@@ -287,12 +295,14 @@ async function navigate(p, pushHistory = true) {
     state.skillsMode = false;
     state.cursor = -1;
     render();
+    syncNavHistoryButtons();
     renderRootsActive();
     // 联动：监听此目录 + 各终端项目目录的文件变化（agent 改文件→自动刷新）
     updateWatches();
     // 手动跳目录 = 接管浏览，文件跟随让位（跟随自己发起的导航除外）
     if (follow.on && !follow.navving) setFileFollow(false, '手动接管，文件跟随已停');
-  } catch (e) { toast('打开失败', true); }
+    return true;
+  } catch (e) { toast('打开失败', true); return false; }
 }
 // 汇总当前要监听的目录：浏览目录 + 每个终端会话的项目目录，发给主进程做增量监听
 function updateWatches() {
@@ -305,7 +315,24 @@ function updateWatches() {
 }
 // shell 单引号转义（用于把路径塞进终端 cd 命令）
 function shQuote(s) { return `'${String(s).replace(/'/g, `'\\''`)}'`; }
-function goBack() { if (state.history.length) navigate(state.history.pop(), false); }
+function syncNavHistoryButtons() {
+  const back = $('#nav-back');
+  const forward = $('#nav-forward');
+  if (back) back.disabled = !state.history.length;
+  if (forward) forward.disabled = !state.forwardHistory.length;
+}
+async function goBack() {
+  if (!state.history.length) return;
+  const p = state.history[state.history.length - 1];
+  if (await navigate(p, 'back')) state.history.pop();
+  syncNavHistoryButtons();
+}
+async function goForward() {
+  if (!state.forwardHistory.length) return;
+  const p = state.forwardHistory[state.forwardHistory.length - 1];
+  if (await navigate(p, 'forward')) state.forwardHistory.pop();
+  syncNavHistoryButtons();
+}
 function goUp() { if (state.parent && state.parent !== state.cwd) navigate(state.parent); }
 
 // ---------- 渲染 ----------
@@ -1772,6 +1799,7 @@ function navDirLi(name, p, opts = {}) {
   const li = document.createElement('li');
   li.dataset.path = p;
   if (opts.custom) li.dataset.customRoot = '1';
+  li._navOpts = opts;
   const twirl = document.createElement('span');
   twirl.className = 'twirl';
   twirl.textContent = '▸';
@@ -1793,9 +1821,27 @@ function navDirLi(name, p, opts = {}) {
     rm.onclick = (ev) => { ev.stopPropagation(); opts.onRemove(p); };
     li.appendChild(rm);
   }
+  if (opts.folderMenu) {
+    li.oncontextmenu = (ev) => quickRootContextMenu(ev, name, p);
+  }
   li.onclick = () => navigate(p);
   makeDraggablePath(li, p);
   return li;
+}
+function quickRootMenuItems(name, p) {
+  return [
+    { label: '打开', fn: () => navigate(p) },
+    { label: 'AI 整理…', fn: () => organizeLaunch(p) },
+    { label: '磁盘占用透视', fn: () => diskPanel(p) },
+    { label: '在终端打开', fn: () => term.openInDir(p) },
+    { label: '在编辑器打开', fn: () => openWith(p, 'editor') },
+    { label: '在 Finder 显示', fn: () => openWith(p, 'reveal') },
+    { label: '复制路径', fn: () => copyPath(p) },
+  ];
+}
+function quickRootContextMenu(ev, name, p) {
+  ev.preventDefault();
+  popupMenu(ev, quickRootMenuItems(name, p));
 }
 async function toggleNavSub(li, dirPath, twirl) {
   const old = li.nextElementSibling;
@@ -1808,7 +1854,7 @@ async function toggleNavSub(li, dirPath, twirl) {
     const data = await api('/api/list?path=' + encodeURIComponent(dirPath));
     const dirs = (data.entries || []).filter((e) => e.isDir && !e.hidden);
     if (!dirs.length) { ul.innerHTML = '<div class="nav-empty">没有子文件夹</div>'; return; }
-    dirs.forEach((e) => ul.appendChild(navDirLi(e.name, e.path)));
+    dirs.forEach((e) => ul.appendChild(navDirLi(e.name, e.path, li._navOpts || {})));
   } catch { ul.remove(); twirl.textContent = '▸'; }
 }
 async function loadRoots() {
@@ -1819,7 +1865,7 @@ async function loadRoots() {
   state.roots = data.roots || [];
   const ul = $('#roots-list');
   ul.innerHTML = '';
-  state.roots.forEach((r) => ul.appendChild(navDirLi(r.name, r.path, { custom: true, onRemove: removeQuickRoot })));
+  state.roots.forEach((r) => ul.appendChild(navDirLi(r.name, r.path, { custom: true, onRemove: removeQuickRoot, folderMenu: true })));
 }
 async function addCurrentQuickRoot() {
   const p = state.cwd || state.home;
@@ -1838,6 +1884,7 @@ async function removeQuickRoot(p) {
   await loadRoots();
   renderRootsActive();
   toast('已从快速入口移除');
+
 }
 function renderRootsActive() {
   // 快速入口 / 收藏 / agent 项目 三个列表统一高亮「当前所在目录」，让用户清楚自己点开/身处哪一项
@@ -2429,6 +2476,9 @@ function bindEvents() {
   $('#preview-close').onclick = closePreview;
   $('#cmdk-trigger').onclick = () => cmdk.open();
   $('#quick-root-add').onclick = addCurrentQuickRoot;
+  $('#nav-back').onclick = (ev) => { ev.stopPropagation(); goBack(); };
+  $('#nav-forward').onclick = (ev) => { ev.stopPropagation(); goForward(); };
+  syncNavHistoryButtons();
   $('#btn-recent').onclick = showRecent;
   $('#btn-changes').onclick = () => toggleChangesPanel();
   $('#term-wechat').onclick = () => wechatView.toggle();
@@ -2594,6 +2644,7 @@ function bindEvents() {
     if (e.key === 'Escape' && inInput) { document.activeElement.blur(); return; }
     if (e.key === 'Escape' && !$('#preview').classList.contains('hidden')) { closePreview(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key === '[') { e.preventDefault(); goBack(); return; }
+    if ((e.metaKey || e.ctrlKey) && e.key === ']') { e.preventDefault(); goForward(); return; }
     if ((e.metaKey || e.ctrlKey) && (e.key === 'b' || e.key === 'B') && !inInput) { e.preventDefault(); toggleSidebar(); return; }
     if (inInput) return;
     // 主区键盘导航

@@ -125,6 +125,18 @@ body {
   color: var(--text-dim); cursor: pointer; font-size: 13px; transition: 0.15s;
 }
 .cmdk-trigger:hover { border-color: var(--accent); color: var(--text); }
+.cmdk-open {
+  flex: 1 1 auto; min-width: 0; border: 0; background: transparent; color: inherit;
+  display: flex; align-items: center; padding: 0; font: inherit; cursor: pointer; text-align: left;
+}
+.cmdk-tools { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; }
+.cmdk-tools .nav-step {
+  width: 23px; height: 23px; border: 1px solid var(--border); border-radius: 6px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--bg); color: var(--text-dim); cursor: pointer; padding: 0;
+}
+.cmdk-tools .nav-step:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+.cmdk-tools .nav-step:disabled { opacity: 0.32; cursor: default; }
 kbd {
   font-family: ui-monospace, monospace; font-size: 11px; padding: 2px 6px;
   background: var(--bg); border: 1px solid var(--border); border-radius: 5px; color: var(--text-faint);
