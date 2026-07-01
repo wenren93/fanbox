@@ -2491,6 +2491,17 @@ function bindEvents() {
   shotTray.init();
   $('#skills-entry').onclick = () => skillsView.show();
   $('#term-newtab').onclick = () => { wechatView.close(); term.newTab(); };
+  $('#term-split').onclick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    wechatView.close();
+    popupMenu(e, [
+      { label: '向右拆分', fn: () => term.split('right') },
+      { label: '向下拆分', fn: () => term.split('down') },
+      { label: '向左拆分', fn: () => term.split('left') },
+      { label: '向上拆分', fn: () => term.split('up') },
+    ]);
+  };
   $('#term-max').onclick = () => term.toggleMax();
   // 双击终端顶栏空白处（避开标签/按钮/输入框）= 铺满终端：agent 交互窗口最重要，给它一键放到最大
   $('.term-head').addEventListener('dblclick', (ev) => {
@@ -2508,8 +2519,8 @@ function bindEvents() {
   $('#file-follow').onclick = () => setFileFollow(!follow.on);
   // 定位文件按钮已撤（双击终端 tab 即可定位，见 term.locateCwd / renderTabs 的 ondblclick）
   // 终端随窗口尺寸变化重排，避免 TUI 错位
-  window.addEventListener('resize', () => term.fitActive());
-  if (window.ResizeObserver) new ResizeObserver(() => term.fitActive()).observe($('#xterm-host'));
+  window.addEventListener('resize', () => term.fitVisible());
+  if (window.ResizeObserver) new ResizeObserver(() => term.fitVisible()).observe($('#xterm-host'));
   bindTerminalResizer();
   // 拖拽文件/文件夹到终端 → 插入路径
   const tp = $('#terminal-panel');
@@ -3019,6 +3030,8 @@ function fmtStamp() {
 const TERM_ASK_RE = /(Do you want to (proceed|continue|make this edit|allow|use this)|Would you like to proceed|Ready to code\?|created or one you trust\?|tell (Claude|Codex) what to do differently|Yes, and don't ask again|Allow Codex to (run|apply|create)|Codex wants to|[❯›][ \t]*1\.[ \t]*Yes)/;
 const term = {
   sessions: [], seq: 0, active: null, maximized: false,
+  groups: [], groupSeq: 0, activeGroup: null,
+  panes: [], paneSeq: 0, activePane: null, layout: null,
   dock: localStorage.getItem('fb_term_dock') || 'right',
   available() { return !!(window.fanboxPty && window.Terminal && !window.__noXterm); },
   // 每套皮肤一整套手调 ANSI 主题——暗皮肤暗终端、亮皮肤亮终端，不再出现「暖纸里嵌黑块」
@@ -3040,6 +3053,358 @@ const term = {
     },
   },
   theme() { return this.themes[state.theme] || this.themes.terminal; },
+  currentGroup() { return this.groups.find((g) => g.id === this.activeGroup) || null; },
+  groupForSession(id) {
+    const sess = this.sessions.find((s) => s.id === id);
+    return sess ? this.groups.find((g) => g.id === sess.groupId) || null : null;
+  },
+  sessionsInGroup(groupId) { return this.sessions.filter((s) => s.groupId === groupId); },
+  createGroup() {
+    const group = { id: 'g' + (++this.groupSeq), active: null, title: 'shell', layout: null, activePane: null };
+    this.groups.push(group);
+    return group;
+  },
+  saveActiveGroup() {
+    const group = this.currentGroup();
+    if (!group) return;
+    group.layout = this.layout;
+    group.activePane = this.activePane;
+    group.active = this.active;
+  },
+  loadGroup(group) {
+    if (!group) return;
+    this.activeGroup = group.id;
+    this.layout = group.layout;
+    this.activePane = group.activePane;
+    this.active = group.active;
+  },
+  activateGroup(groupId) {
+    const group = this.groups.find((g) => g.id === groupId);
+    if (!group) return;
+    if (this.activeGroup !== group.id) {
+      this.saveActiveGroup();
+      this.loadGroup(group);
+    }
+    if (!this.active) {
+      const first = this.sessionsInGroup(group.id)[0];
+      if (first) this.active = first.id;
+    }
+    this.renderLayout();
+    this.renderTabs();
+    this.fitVisible();
+    const s = this.sessions.find((x) => x.id === this.active);
+    if (s) setTimeout(() => s.xterm.focus(), 0);
+  },
+  syncGroupMeta(sess) {
+    const group = sess ? this.groupForSession(sess.id) : null;
+    if (!group) return;
+    group.active = group.active || sess.id;
+    if (group.active === sess.id || !group.title || group.title === 'shell') group.title = sess.title || group.title;
+  },
+  visiblePaneIds() {
+    const ids = [];
+    const walk = (n) => {
+      if (!n) return;
+      if (n.type === 'leaf') ids.push(n.paneId);
+      else (n.children || []).forEach(walk);
+    };
+    walk(this.layout);
+    return ids;
+  },
+  paneById(id) { return this.panes.find((p) => p.id === id) || null; },
+  paneForSession(id) { return this.panes.find((p) => p.sessionId === id) || null; },
+  createPane(sessionId, groupId) {
+    const pane = { id: 'p' + (++this.paneSeq), groupId: groupId || this.activeGroup, sessionId: sessionId || null };
+    this.panes.push(pane);
+    return pane;
+  },
+  ensurePaneForSession(sessionId) {
+    if (!this.layout) {
+      const pane = this.createPane(sessionId);
+      this.layout = { type: 'leaf', paneId: pane.id };
+      this.activePane = pane.id;
+      return pane;
+    }
+    let pane = this.paneForSession(sessionId);
+    if (pane) return pane;
+    pane = this.paneById(this.activePane) || this.paneById(this.visiblePaneIds()[0]);
+    if (!pane) {
+      pane = this.createPane(sessionId);
+      this.layout = { type: 'leaf', paneId: pane.id };
+    } else {
+      pane.sessionId = sessionId;
+    }
+    this.activePane = pane.id;
+    return pane;
+  },
+  placeSession(sessionId, paneId) {
+    let pane = paneId ? this.paneById(paneId) : null;
+    if (!pane) pane = this.ensurePaneForSession(sessionId);
+    pane.sessionId = sessionId;
+    this.activePane = pane.id;
+    this.renderLayout();
+    this.saveActiveGroup();
+    return pane;
+  },
+  insertPaneAround(targetPaneId, newPaneId, direction) {
+    const orient = (direction === 'left' || direction === 'right') ? 'row' : 'col';
+    const before = direction === 'left' || direction === 'up';
+    const replacement = {
+      type: 'split',
+      orient,
+      sizes: [50, 50],
+      children: before
+        ? [{ type: 'leaf', paneId: newPaneId }, { type: 'leaf', paneId: targetPaneId }]
+        : [{ type: 'leaf', paneId: targetPaneId }, { type: 'leaf', paneId: newPaneId }],
+    };
+    const replace = (node) => {
+      if (!node) return null;
+      if (node.type === 'leaf') return node.paneId === targetPaneId ? replacement : null;
+      if (node.type !== 'split') return null;
+      for (let i = 0; i < node.children.length; i++) {
+        const next = replace(node.children[i]);
+        if (next) {
+          node.children[i] = next;
+          return node;
+        }
+      }
+      return null;
+    };
+    const next = replace(this.layout);
+    if (next) this.layout = next;
+    else if (!this.layout) this.layout = { type: 'leaf', paneId: newPaneId };
+  },
+  leafCount(node) {
+    if (!node) return 0;
+    if (node.type === 'leaf') return 1;
+    return (node.children || []).reduce((n, child) => n + this.leafCount(child), 0);
+  },
+  splitAxisCount(paneId, orient) {
+    let best = null;
+    const walk = (node, stack = []) => {
+      if (!node) return false;
+      if (node.type === 'leaf') return node.paneId === paneId;
+      const nextStack = stack.concat(node);
+      for (const child of node.children || []) {
+        if (walk(child, nextStack)) {
+          best = nextStack.find((n) => n.orient === orient) || best;
+          return true;
+        }
+      }
+      return false;
+    };
+    walk(this.layout);
+    return best ? this.leafCount(best) : 1;
+  },
+  splitMinPx(orient) { return orient === 'row' ? 180 : 120; },
+  cloneLayout(node) {
+    if (!node) return null;
+    if (node.type === 'leaf') return { type: 'leaf', paneId: node.paneId };
+    return {
+      type: 'split',
+      orient: node.orient,
+      sizes: (node.sizes || []).slice(),
+      children: (node.children || []).map((child) => this.cloneLayout(child)),
+    };
+  },
+  layoutWithInsertedPane(layout, targetPaneId, newPaneId, direction) {
+    const orient = (direction === 'left' || direction === 'right') ? 'row' : 'col';
+    const before = direction === 'left' || direction === 'up';
+    const replacement = {
+      type: 'split',
+      orient,
+      sizes: [50, 50],
+      children: before
+        ? [{ type: 'leaf', paneId: newPaneId }, { type: 'leaf', paneId: targetPaneId }]
+        : [{ type: 'leaf', paneId: targetPaneId }, { type: 'leaf', paneId: newPaneId }],
+    };
+    const replace = (node) => {
+      if (!node) return null;
+      if (node.type === 'leaf') return node.paneId === targetPaneId ? replacement : node;
+      node.children = (node.children || []).map(replace);
+      return node;
+    };
+    return replace(layout);
+  },
+  projectedLeafRects(layout, width, height) {
+    const rects = [];
+    const handle = 6;
+    const walk = (node, w, h) => {
+      if (!node) return;
+      if (node.type === 'leaf') { rects.push({ paneId: node.paneId, width: w, height: h }); return; }
+      const children = node.children || [];
+      if (!children.length) return;
+      const sizes = (node.sizes && node.sizes.length === children.length) ? node.sizes : children.map(() => 100 / children.length);
+      const handleTotal = handle * Math.max(0, children.length - 1);
+      const span = node.orient === 'row' ? Math.max(0, w - handleTotal) : Math.max(0, h - handleTotal);
+      children.forEach((child, i) => {
+        const part = span * (sizes[i] / 100);
+        if (node.orient === 'row') walk(child, part, h);
+        else walk(child, w, part);
+      });
+    };
+    walk(layout, width, height);
+    return rects;
+  },
+  visiblePaneCount() {
+    return this.panes.filter((p) => p.groupId === this.activeGroup && p.sessionId).length;
+  },
+  canSplitPane(paneId, direction) {
+    const orient = (direction === 'left' || direction === 'right') ? 'row' : 'col';
+    const root = $('#xterm-host');
+    if (!root) return { ok: false, message: '当前终端尺寸异常，无法继续拆分' };
+    const r = root.getBoundingClientRect();
+    const projected = this.layoutWithInsertedPane(this.cloneLayout(this.layout), paneId, '__next__', direction);
+    const rects = this.projectedLeafRects(projected, r.width, r.height);
+    const bad = rects.find((x) => x.width < this.splitMinPx('row') || x.height < this.splitMinPx('col'));
+    if (bad) {
+      return { ok: false, message: orient === 'row' ? '空间不足，继续横向拆分会导致终端空白' : '空间不足，继续纵向拆分会导致终端空白' };
+    }
+    return { ok: true };
+  },
+  removePane(paneId) {
+    this.panes = this.panes.filter((p) => p.id !== paneId);
+    const prune = (node) => {
+      if (!node) return null;
+      if (node.type === 'leaf') return node.paneId === paneId ? null : node;
+      const kids = (node.children || []).map(prune).filter(Boolean);
+      if (!kids.length) return null;
+      if (kids.length === 1) return kids[0];
+      node.children = kids;
+      return node;
+    };
+    this.layout = prune(this.layout);
+    const ids = this.visiblePaneIds();
+    if (!ids.includes(this.activePane)) this.activePane = ids[0] || null;
+    this.saveActiveGroup();
+  },
+  renderLayout() {
+    const root = $('#xterm-host');
+    if (!root) return;
+    const hosts = this.sessions.map((s) => s.host).filter(Boolean);
+    hosts.forEach((h) => h.remove());
+    root.innerHTML = '';
+    const hidden = document.createElement('div');
+    hidden.className = 'term-hidden-hosts';
+    root.appendChild(hidden);
+    const visible = new Set();
+    const mountHost = (paneEl, sessionId) => {
+      const sess = this.sessions.find((s) => s.id === sessionId);
+      if (!sess) return;
+      visible.add(sessionId);
+      sess.host.classList.add('show');
+      paneEl.appendChild(sess.host);
+    };
+    const build = (node) => {
+      if (!node) return null;
+      if (node.type === 'leaf') {
+        const pane = this.paneById(node.paneId);
+        const el = document.createElement('div');
+        el.className = 'term-pane' + (node.paneId === this.activePane ? ' active' : '');
+        el.dataset.paneId = node.paneId;
+        el.addEventListener('mousedown', () => {
+          const p = this.paneById(node.paneId);
+          if (p && p.sessionId) this.activate(p.sessionId, { paneId: node.paneId });
+        });
+        if (pane && pane.sessionId) {
+          mountHost(el, pane.sessionId);
+          const close = document.createElement('button');
+          close.className = 'term-pane-close';
+          close.title = '关闭此终端';
+          close.textContent = '×';
+          close.addEventListener('mousedown', (ev) => { ev.preventDefault(); ev.stopPropagation(); });
+          close.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); this.closeTab(pane.sessionId); });
+          el.appendChild(close);
+        }
+        return el;
+      }
+      const el = document.createElement('div');
+      el.className = node.orient === 'row' ? 'term-split-row' : 'term-split-col';
+      const children = node.children || [];
+      if (!node.sizes || node.sizes.length !== children.length) node.sizes = children.map(() => 100 / Math.max(1, children.length));
+      children.forEach((child, idx) => {
+        const childEl = build(child);
+        if (!childEl) return;
+        childEl.style.flex = `${node.sizes[idx]} ${node.sizes[idx]} 0`;
+        el.appendChild(childEl);
+        if (idx < children.length - 1) el.appendChild(this.splitHandle(node, idx));
+      });
+      return el;
+    };
+    const tree = build(this.layout);
+    if (tree) root.appendChild(tree);
+    this.sessions.forEach((s) => {
+      if (visible.has(s.id)) return;
+      s.host.classList.remove('show');
+      hidden.appendChild(s.host);
+    });
+  },
+  splitHandle(node, idx) {
+    const h = document.createElement('div');
+    h.className = 'term-split-handle ' + (node.orient === 'row' ? 'is-row' : 'is-col');
+    h.title = '拖动调整终端大小';
+    h.addEventListener('mousedown', (ev) => this.beginSplitResize(ev, node, idx));
+    return h;
+  },
+  beginSplitResize(ev, node, idx) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const parent = ev.currentTarget.parentElement;
+    const beforeEl = ev.currentTarget.previousElementSibling;
+    const afterEl = ev.currentTarget.nextElementSibling;
+    if (!parent || !beforeEl || !afterEl) return;
+    const axis = node.orient === 'row' ? 'x' : 'y';
+    const start = axis === 'x' ? ev.clientX : ev.clientY;
+    const totalPx = axis === 'x' ? parent.getBoundingClientRect().width : parent.getBoundingClientRect().height;
+    if (!totalPx) return;
+    const beforePx = axis === 'x' ? beforeEl.getBoundingClientRect().width : beforeEl.getBoundingClientRect().height;
+    const afterPx = axis === 'x' ? afterEl.getBoundingClientRect().width : afterEl.getBoundingClientRect().height;
+    const pairPx = beforePx + afterPx;
+    const startBefore = node.sizes[idx];
+    const startAfter = node.sizes[idx + 1];
+    const pairPct = startBefore + startAfter;
+    const minPx = this.splitMinPx(node.orient);
+    const minPct = Math.min(pairPct / 2, (minPx / totalPx) * 100);
+    let raf = null;
+    const move = (e) => {
+      const deltaPx = (axis === 'x' ? e.clientX : e.clientY) - start;
+      const deltaPct = pairPx ? (deltaPx / pairPx) * pairPct : 0;
+      let nextBefore = Math.max(minPct, Math.min(pairPct - minPct, startBefore + deltaPct));
+      let nextAfter = pairPct - nextBefore;
+      node.sizes[idx] = nextBefore;
+      node.sizes[idx + 1] = nextAfter;
+      beforeEl.style.flex = `${nextBefore} ${nextBefore} 0`;
+      afterEl.style.flex = `${nextAfter} ${nextAfter} 0`;
+      this.saveActiveGroup();
+      if (!raf) raf = requestAnimationFrame(() => { raf = null; this.fitVisible(); });
+    };
+    const up = () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      document.body.classList.remove('term-split-resizing');
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      this.fitVisible();
+    };
+    document.body.classList.add('term-split-resizing');
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = node.orient === 'row' ? 'col-resize' : 'row-resize';
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up, { once: true });
+  },
+  fitSession(s) {
+    if (!s || !s.fit) return;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      try {
+        s.fit.fit();
+        s.xterm._core?.viewport?.syncScrollArea?.(true);
+      } catch { /* */ }
+    }));
+  },
+  fitVisible() {
+    const visible = new Set(this.panes.filter((p) => p.groupId === this.activeGroup).map((p) => p.sessionId).filter(Boolean));
+    this.sessions.forEach((s) => { if (visible.has(s.id)) this.fitSession(s); });
+  },
   toggle() {
     if (!this.available()) { if (state.cwd) openWith(state.cwd, 'terminal'); return; } // 浏览器降级到系统终端
     const hidden = $('#terminal-panel').classList.contains('hidden');
@@ -3050,7 +3415,7 @@ const term = {
     $('#terminal-resizer').classList.remove('hidden');
     this.applyDock();
     if (!this.sessions.length) this.newTab();
-    else this.fitActive();
+    else { this.renderLayout(); this.fitVisible(); }
     $('#btn-terminal').classList.add('active');
     player.refreshHint(); // 有录像就给回放按钮点红点，提升发现性
     localStorage.setItem('fb_term_open', '1');
@@ -3083,7 +3448,7 @@ const term = {
       panel.style.width = w + 'px'; panel.style.height = '';
     }
     applyPreviewSize(); // 预览随 dock 翻转轴向
-    this.fitActive();
+    this.fitVisible();
   },
   setDock(d) {
     if (this.maximized) this.toggleMax(false); // 铺满下切布局看不出任何变化，先退出铺满让分屏可见
@@ -3096,7 +3461,7 @@ const term = {
     $('#main-body').classList.toggle('term-max', this.maximized);
     const b = $('#term-max');
     if (b) { b.classList.toggle('on', this.maximized); b.title = this.maximized ? '还原终端' : '终端铺满'; }
-    this.fitActive();
+    this.fitVisible();
   },
   // 在指定目录开终端（新标签）；浏览器版降级到系统终端。返回新 session（spawn 完成后）
   openInDir(dir) {
@@ -3257,16 +3622,42 @@ const term = {
       const r = await window.fanboxPty.cwd(s.id);
       if (r && r.ok && r.cwd && r.cwd !== s.cwd) {
         s.cwd = r.cwd; s.title = baseOf(r.cwd) || s.title;
+        this.syncGroupMeta(s);
         this.renderTabs(); renderBreadcrumb(); // 面包屑的项目配对色点也跟着换
       }
     } catch { /* 取不到就保持原标题 */ }
   },
-  async newTab(cwdOverride) {
+  async newTab(cwdOverride, opts = {}) {
+    let group = opts.groupId ? this.groups.find((g) => g.id === opts.groupId) : null;
+    if (!group) group = this.createGroup();
+    if (this.activeGroup !== group.id) {
+      this.saveActiveGroup();
+      this.loadGroup(group);
+    }
     const startDir = cwdOverride || state.cwd;
     const id = 't' + (++this.seq);
+    let targetPane = opts.paneId ? this.paneById(opts.paneId) : null;
+    if (!targetPane) {
+      if (!this.layout) {
+        targetPane = this.createPane(id, group.id);
+        this.layout = { type: 'leaf', paneId: targetPane.id };
+      } else {
+        targetPane = this.paneById(this.activePane) || this.paneById(this.visiblePaneIds()[0]);
+        if (!targetPane) {
+          targetPane = this.createPane(id, group.id);
+          this.layout = { type: 'leaf', paneId: targetPane.id };
+        }
+      }
+    }
+    targetPane.sessionId = id;
+    this.activePane = targetPane.id;
+    group.activePane = targetPane.id;
+    group.layout = this.layout;
+    this.renderLayout();
     const host = document.createElement('div');
     host.className = 'xterm-instance';
-    $('#xterm-host').appendChild(host);
+    const paneEl = $(`.term-pane[data-pane-id="${targetPane.id}"]`);
+    (paneEl || $('#xterm-host')).appendChild(host);
     host.classList.add('show'); // 先可见再 open/fit：display:none 下 fit 量不出尺寸，PTY 会以 80 列出生
     const FitCtor = window.FitAddon ? (window.FitAddon.FitAddon || window.FitAddon) : null;
     const xterm = new window.Terminal({
@@ -3319,9 +3710,12 @@ const term = {
       } catch { wg = null; /* 回退默认 DOM renderer */ }
     }
     if (fit) try { fit.fit(); } catch { /* */ }
-    const sess = { id, xterm, fit, host, webgl: wg, dead: false, status: 'idle', unread: false, startDir, title: baseOf(startDir || '') || 'shell' };
+    const sess = { id, groupId: group.id, xterm, fit, host, webgl: wg, dead: false, status: 'idle', unread: false, startDir, title: baseOf(startDir || '') || 'shell' };
     this.sessions.push(sess);
-    this.activate(id);
+    group.active = id;
+    group.title = sess.title;
+    this.saveActiveGroup();
+    this.activate(id, { paneId: targetPane.id });
     updateWatches(); // 新终端的项目目录也纳入监听
     const r = await window.fanboxPty.spawn({ id, cwd: startDir, cols: xterm.cols, rows: xterm.rows, theme: state.theme });
     if (!r.ok) { sess.dead = true; xterm.write('\r\n  \x1b[31m终端启动失败：' + (r.error || '') + '\x1b[0m\r\n'); }
@@ -3523,15 +3917,31 @@ const term = {
     if (!r.ok) { sess.dead = true; sess.xterm.write('\x1b[31m重开失败：' + (r.error || '') + '\x1b[0m\r\n'); }
     else sess.cwd = r.cwd || sess.startDir;
   },
-  activate(id) {
+  activate(id, opts = {}) {
+    const sess = this.sessions.find((x) => x.id === id);
+    if (sess && sess.groupId !== this.activeGroup) {
+      const group = this.groups.find((g) => g.id === sess.groupId);
+      this.saveActiveGroup();
+      this.loadGroup(group);
+    }
     this.active = id;
-    this.sessions.forEach((s) => s.host.classList.toggle('show', s.id === id));
+    const pane = opts.paneId ? this.paneById(opts.paneId) : this.paneForSession(id);
+    if (pane) this.activePane = pane.id;
+    else this.ensurePaneForSession(id);
+    const group = this.currentGroup();
+    if (group) {
+      group.active = id;
+      group.activePane = this.activePane;
+      group.layout = this.layout;
+    }
+    this.renderLayout();
     const cur = this.sessions.find((x) => x.id === id);
     if (cur) cur.unread = false; // 切到该标签即清未读
     this.renderTabs();
     const s = this.sessions.find((x) => x.id === id);
     if (s) {
-      this.fitActive();
+      this.syncGroupMeta(s);
+      this.fitSession(s);
       // xterm 5.5.0 旧 Viewport 在 display:none 期间会把滚动区高度算矮一屏（上游 #5339，6.0 重写才修）；
       // 重新可见后强制同步一次，否则滚轮到不了底部。升级 xterm 6.0 后删掉这行
       requestAnimationFrame(() => { try { s.xterm._core.viewport?.syncScrollArea?.(true); } catch { /* */ } });
@@ -3540,23 +3950,107 @@ const term = {
       setTimeout(() => this.refreshCwd(s), 600);
     }
   },
+  closeGroup(groupId) {
+    const group = this.groups.find((g) => g.id === groupId);
+    if (!group) return;
+    const idx = this.groups.findIndex((g) => g.id === groupId);
+    const members = this.sessionsInGroup(groupId);
+    members.forEach((s) => {
+      try { window.fanboxPty.kill(s.id); } catch { /* */ }
+      try { s.xterm.dispose(); } catch { /* */ }
+      try { s.host.remove(); } catch { /* */ }
+    });
+    this.sessions = this.sessions.filter((s) => s.groupId !== groupId);
+    this.panes = this.panes.filter((p) => p.groupId !== groupId);
+    this.groups.splice(idx, 1);
+    updateWatches();
+    if (!this.groups.length) {
+      this.active = null; this.activeGroup = null; this.layout = null; this.activePane = null;
+      this.renderLayout(); this.renderTabs(); this.close();
+      return;
+    }
+    if (this.activeGroup === groupId) {
+      const next = this.groups[Math.max(0, idx - 1)] || this.groups[0];
+      this.loadGroup(next);
+      if (!this.active) {
+        const first = this.sessionsInGroup(next.id)[0];
+        if (first) this.active = first.id;
+      }
+    }
+    this.renderLayout();
+    this.renderTabs();
+    this.fitVisible();
+  },
   closeTab(id) {
     const i = this.sessions.findIndex((x) => x.id === id);
     if (i < 0) return;
     const s = this.sessions[i];
+    const group = this.groupForSession(id);
     try { window.fanboxPty.kill(id); } catch { /* */ }
     try { s.xterm.dispose(); } catch { /* */ }
     s.host.remove();
     this.sessions.splice(i, 1);
+    const pane = this.paneForSession(id);
+    if (pane) this.removePane(pane.id);
+    const nextVisible = this.activePane && this.paneById(this.activePane) ? this.paneById(this.activePane).sessionId : null;
     updateWatches(); // 该终端的项目目录不再需要监听
-    if (!this.sessions.length) { this.close(); return; }
-    if (this.active === id) this.activate(this.sessions[Math.max(0, i - 1)].id);
-    else this.renderTabs();
+    if (!this.sessions.length) {
+      this.groups = []; this.active = null; this.activeGroup = null; this.layout = null; this.activePane = null;
+      this.close();
+      return;
+    }
+    if (group && !this.sessionsInGroup(group.id).length) {
+      this.closeGroup(group.id);
+      return;
+    }
+    if (group && group.active === id) group.active = nextVisible || (this.sessionsInGroup(group.id)[0] || {}).id || null;
+    if (!this.layout) {
+      const next = group ? this.sessionsInGroup(group.id)[0] : this.sessions[Math.max(0, i - 1)];
+      const pane2 = this.createPane(next.id);
+      this.layout = { type: 'leaf', paneId: pane2.id };
+      this.activePane = pane2.id;
+    }
+    const nextInGroup = group ? (this.sessionsInGroup(group.id)[0] || {}).id : null;
+    if (this.active === id) this.activate(nextVisible || nextInGroup || this.sessions[Math.max(0, i - 1)].id);
+    else { this.renderLayout(); this.renderTabs(); this.fitVisible(); }
   },
   fitActive() {
     const s = this.sessions.find((x) => x.id === this.active);
-    if (!s || !s.fit) return;
-    requestAnimationFrame(() => { try { s.fit.fit(); } catch { /* */ } });
+    if (s && this.paneForSession(s.id)) this.fitSession(s);
+    else this.fitVisible();
+  },
+  async split(direction) {
+    if (!this.available()) { if (state.cwd) openWith(state.cwd, 'terminal'); return null; }
+    $('#terminal-panel').classList.remove('hidden');
+    $('#terminal-resizer').classList.remove('hidden');
+    $('#btn-terminal').classList.add('active');
+    localStorage.setItem('fb_term_open', '1');
+    if (!this.sessions.length) await this.newTab();
+    const group = this.currentGroup();
+    const basePane = this.paneById(this.activePane) || this.paneForSession(this.active);
+    if (!basePane) return this.newTab();
+    const orient = (direction === 'left' || direction === 'right') ? 'row' : 'col';
+    if (this.splitAxisCount(basePane.id, orient) >= 3) {
+      toast(orient === 'row' ? '横向最多拆分 3 个终端' : '纵向最多拆分 3 个终端', true);
+      return null;
+    }
+    if (this.visiblePaneCount() >= 4) {
+      toast('当前终端组最多拆分 4 个终端', true);
+      return null;
+    }
+    const splitCheck = this.canSplitPane(basePane.id, direction);
+    if (!splitCheck.ok) {
+      toast(splitCheck.message, true);
+      return null;
+    }
+    const pane = this.createPane(null, group && group.id);
+    this.insertPaneAround(basePane.id, pane.id, direction);
+    this.activePane = pane.id;
+    this.renderLayout();
+    this.saveActiveGroup();
+    const sess = await this.newTab(null, { groupId: group && group.id, paneId: pane.id });
+    this.fitVisible();
+    return sess;
   },
   // 字体缩放：⌘+/⌘- 调整字号，⌘0 重置为默认 13px
   adjustFont(sess, delta) {
@@ -3667,18 +4161,26 @@ const term = {
   renderTabs() {
     const bar = $('#term-tabs');
     bar.innerHTML = '';
-    this.sessions.forEach((s) => {
+    this.groups.forEach((g) => {
+      const members = this.sessionsInGroup(g.id);
+      if (!members.length) return;
+      const activeMember = members.find((s) => s.id === g.active) || members[0];
+      const anyBusy = members.some((s) => s.status === 'busy');
+      const allDead = members.every((s) => s.dead);
+      const unread = members.some((s) => s.unread) && g.id !== this.activeGroup;
+      const paneCount = members.length;
       const t = document.createElement('div');
-      const dotState = s.dead ? 'dead' : (s.status === 'busy' ? 'busy' : 'idle');
-      const followed = follow.on && follow.sid === s.id; // 文件跟随正盯着这个 tab
-      t.className = 'term-tab' + (s.id === this.active ? ' active' : '') + (s.unread ? ' unread' : '') + (followed ? ' following' : '');
-      const dotTitle = s.dead ? '进程已退出' : (s.status === 'busy' ? 'agent 运行中' : '空闲');
+      const dotState = allDead ? 'dead' : (anyBusy ? 'busy' : 'idle');
+      const followed = follow.on && members.some((s) => follow.sid === s.id); // 文件跟随正盯着这个 tab 组
+      t.className = 'term-tab' + (g.id === this.activeGroup ? ' active' : '') + (unread ? ' unread' : '') + (followed ? ' following' : '');
+      const dotTitle = allDead ? '终端组已退出' : (anyBusy ? '终端组运行中' : '空闲');
       // 终端图标按项目路径染色：同项目同色，和面包屑的配对色点呼应
-      const hue = this.hueOf(s.cwd || s.startDir);
+      const hue = this.hueOf(activeMember.cwd || activeMember.startDir);
       t.title = followed ? '文件跟随正盯着这个终端 · 双击跳到它所在目录' : '双击：文件区跳到该终端所在目录';
       const eye = followed ? `<span class="tab-eye" title="文件跟随盯着它">${ic('eye', 'currentColor', 11)}</span>` : '';
-      t.innerHTML = `<span class="tab-dot ${dotState}" title="${dotTitle}"></span>${eye}${ic('term', `hsl(${hue} 62% 48%)`, 12)}<span>${escapeHtml(s.title)}</span><span class="tab-x" title="关闭">✕</span>`;
-      t.onclick = (e) => { if (e.target.classList.contains('tab-x')) { this.closeTab(s.id); return; } this.activate(s.id); };
+      const count = paneCount > 1 ? `<span class="tab-count">${paneCount}</span>` : '';
+      t.innerHTML = `<span class="tab-dot ${dotState}" title="${dotTitle}"></span>${eye}${ic('term', `hsl(${hue} 62% 48%)`, 12)}<span>${escapeHtml(g.title || activeMember.title)}</span>${count}<span class="tab-x" title="关闭">✕</span>`;
+      t.onclick = (e) => { if (e.target.classList.contains('tab-x')) { this.closeGroup(g.id); return; } this.activateGroup(g.id); };
       t.ondblclick = (e) => { if (e.target.classList.contains('tab-x')) return; this.locateCwd(); };
       bar.appendChild(t);
     });
