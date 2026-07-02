@@ -1147,6 +1147,9 @@ body { transition: background-color 0.28s ease, color 0.28s ease; }
 .update-pill .up-go:hover { filter: brightness(1.06); }
 .update-pill .up-x { border: none; background: none; color: var(--text-dim); cursor: pointer; font-size: 12px; padding: 2px 4px; }
 .update-pill .up-x:hover { color: var(--text); }
+.update-pill .up-dl:disabled { opacity: 0.75; cursor: default; }
+.update-pill .up-page { border: 1px solid var(--border); background: none; color: var(--text-dim); border-radius: 999px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
+.update-pill .up-page:hover { color: var(--text); border-color: var(--text-dim); }
 
 /* ---------- Skills 透视（主区全屏视图）---------- */
 .sk-wrap { max-width: 1180px; margin: 0 auto; padding: 6px 4px 60px; }

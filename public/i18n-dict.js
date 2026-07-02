@@ -365,6 +365,11 @@ window.FANBOX_DICT = {
 
   // ---------- 更新提示 ----------
   '去下载': 'Download',
+  '下载更新': 'Download update',
+  '发布页': 'Release page',
+  '下载中…': 'Downloading…',
+  '已下载并打开 dmg，拖进 Applications 完成更新': 'Downloaded — the dmg is open, drag it into Applications to finish',
+  '下载失败，去发布页手动下吧': 'Download failed — grab it from the release page',
   '这个版本不再提醒': "Don't remind me for this version",
 
   // ---------- 快速入口目录名 ----------
@@ -481,4 +486,5 @@ window.FANBOX_DICT_RULES = [
   }],
   // 更新提示
   [/^新版本 v(.+) 已发布$/, (m) => `v${m[1]} is out`],
+  [/^下载中 (\d+)%$/, (m) => `Downloading ${m[1]}%`],
 ];

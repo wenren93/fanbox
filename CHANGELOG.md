@@ -11,7 +11,10 @@
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-07-01
+
 ### Added
+- **更新胶囊一键下载**（#26 轻量方案）：右下角新版本提示不再只是跳网页——「下载更新」直接在应用内按当前芯片架构下载对应 dmg 到「下载」文件夹（胶囊上显示进度百分比），下完自动打开挂载，拖进 Applications 即完成。全自动后台安装仍受 Apple Development 签名限制，等升级 Developer ID 后随公证（#34）一起上。
 - **一键启动 agent 大扩容 + 设置面板**（#38 建议一）：内置 11 个 coding agent——Claude Code / Codex / Hermes Agent / OpenClaw / Kimi Code / ZCode / opencode / pi / CodeBuddy / WorkBuddy / Qoder CLI，全部官方图标 + 逐一核实过的启动命令（Qoder 的 CLI 是 `qodercli` 不是 `qoder`）。终端顶栏新增滑杆设置按钮：勾选启用哪些入口（默认仍只有 Claude Code + Codex），勾选即生效并落盘；未安装的标「未装」，点一下复制官方安装命令。ZCode / WorkBuddy 官方确认无终端 CLI 形态（桌面应用），按钮改为 `open -a` 拉起 App。高级用户仍可在 `~/.fanbox/config.json` 的 `agents` 数组自定义命令（同 id 覆盖内置）或追加任意新 agent。会话发现 / 续会话 / AI 整理引擎的按 agent 适配是后续第二步。
 - **Intel (x86_64) 构建**（#38 建议二）：`npm run dist:x64` 一键出 x64 dmg——先用 node-gyp 12 把 node-pty 交叉编成 x64（绕开 electron-rebuild 在 node 26 下的 yargs 崩溃、以及 node-pty 自带 node-gyp 9 在 Python 3.12+ 的 distutils 缺失），打完自动把本地 node-pty 编回 arm64。产物统一命名 `FanBox-<版本>-<arch>.dmg`。
 

@@ -4779,9 +4779,27 @@ function bindUpdateNotice() {
     if (localStorage.getItem('fb_skip_ver') === version || document.querySelector('.update-pill')) return;
     const bar = document.createElement('div');
     bar.className = 'update-pill';
-    bar.innerHTML = `<span>新版本 v${escapeHtml(version)} 已发布</span><button class="up-go">去下载</button><button class="up-x" title="这个版本不再提醒">✕</button>`;
+    const canDl = typeof window.fanboxUpdate.download === 'function'; // 老 preload 没这桥，降级只留发布页
+    bar.innerHTML = `<span class="up-msg">新版本 v${escapeHtml(version)} 已发布</span>`
+      + (canDl ? '<button class="up-go up-dl">下载更新</button><button class="up-page">发布页</button>' : '<button class="up-go">去下载</button>')
+      + '<button class="up-x" title="这个版本不再提醒">✕</button>';
     document.body.appendChild(bar);
-    bar.querySelector('.up-go').onclick = () => { window.fanboxUpdate.open(url); bar.remove(); };
+    // #26 一键下载：主进程按当前架构下对应 dmg 到 ~/Downloads 并打开挂载，拖一下完成更新
+    const dl = bar.querySelector('.up-dl');
+    if (dl) {
+      dl.onclick = async () => {
+        dl.disabled = true; dl.textContent = '下载中…';
+        const r = await window.fanboxUpdate.download(version).catch(() => ({ ok: false }));
+        if (r && r.ok) { bar.querySelector('.up-msg').textContent = '已下载并打开 dmg，拖进 Applications 完成更新'; dl.remove(); }
+        else { dl.disabled = false; dl.textContent = '下载更新'; toast('下载失败，去发布页手动下吧', true); }
+      };
+      if (window.fanboxUpdate.onProgress) window.fanboxUpdate.onProgress((m) => {
+        if (m.state === 'downloading' && dl.disabled) dl.textContent = m.pct >= 0 ? `下载中 ${m.pct}%` : '下载中…';
+      });
+      bar.querySelector('.up-page').onclick = () => window.fanboxUpdate.open(url);
+    } else {
+      bar.querySelector('.up-go').onclick = () => { window.fanboxUpdate.open(url); bar.remove(); };
+    }
     bar.querySelector('.up-x').onclick = () => { localStorage.setItem('fb_skip_ver', version); bar.remove(); };
   };
   window.fanboxUpdate.onAvailable(show);
