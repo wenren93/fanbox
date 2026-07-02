@@ -11,6 +11,26 @@
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-07-01
+
+### Added
+- **回合安全带：agent 每轮开工前自动存档 + 一键回到任意一轮之前**：把「AI 弄坏了东西怎么办」从一种恐惧变成一个按钮。终端里的 agent 一开工（idle→busy 瞬间），FanBox 就给项目静默打一个快照——影子 git 存在 `~/.fanbox/snapshots/`，项目文件夹里不落任何东西，对你自己的 git 仓库零干扰；无变化不堆快照，node_modules/构建产物/大视频不入档，超大目录自动放弃不卡终端。状态栏新入口「回合存档」列出每一轮的完整状态，「回到这时」一键恢复（恢复前会自动把当前状态再存一份，回滚本身永远可再滚回来）；agent 正在该项目干活时不给回滚。顺带把「查看改动」从 git 仓库专属扩展到所有文件夹：不在 git 仓库的文件，diff 基准自动退回上一回合存档。每项目保留最近 40 份，滚动裁剪。
+
+## [2.4.1] - 2026-07-01
+
+### Changed
+- **正式签名 + 苹果公证**（#34）：从本版本起用 Developer ID Application 证书签名并经 Apple 公证（notarytool），下载后**双击直接打开，不再弹「未知开发者」**，也不用右键/系统设置绕行。代码零改动，与 2.4.0 功能完全一致。全自动后台更新（electron-updater）的签名前提已就绪，排下个版本。
+
+## [2.4.0] - 2026-07-01
+
+### Added
+- **更新胶囊一键下载**（#26 轻量方案）：右下角新版本提示不再只是跳网页——「下载更新」直接在应用内按当前芯片架构下载对应 dmg 到「下载」文件夹（胶囊上显示进度百分比），下完自动打开挂载，拖进 Applications 即完成。全自动后台安装仍受 Apple Development 签名限制，等升级 Developer ID 后随公证（#34）一起上。
+- **一键启动 agent 大扩容 + 设置面板**（#38 建议一）：内置 11 个 coding agent——Claude Code / Codex / Hermes Agent / OpenClaw / Kimi Code / ZCode / opencode / pi / CodeBuddy / WorkBuddy / Qoder CLI，全部官方图标 + 逐一核实过的启动命令（Qoder 的 CLI 是 `qodercli` 不是 `qoder`）。终端顶栏新增滑杆设置按钮：勾选启用哪些入口（默认仍只有 Claude Code + Codex），勾选即生效并落盘；未安装的标「未装」，点一下复制官方安装命令。ZCode / WorkBuddy 官方确认无终端 CLI 形态（桌面应用），按钮改为 `open -a` 拉起 App。高级用户仍可在 `~/.fanbox/config.json` 的 `agents` 数组自定义命令（同 id 覆盖内置）或追加任意新 agent。会话发现 / 续会话 / AI 整理引擎的按 agent 适配是后续第二步。
+- **Intel (x86_64) 构建**（#38 建议二）：`npm run dist:x64` 一键出 x64 dmg——先用 node-gyp 12 把 node-pty 交叉编成 x64（绕开 electron-rebuild 在 node 26 下的 yargs 崩溃、以及 node-pty 自带 node-gyp 9 在 Python 3.12+ 的 distutils 缺失），打完自动把本地 node-pty 编回 arm64。产物统一命名 `FanBox-<版本>-<arch>.dmg`。
+
+### Fixed
+- **文件区被压窄时文件名被截成几个字**（#49）：列表列让位改为名称优先——文件区 <620px 先藏「大小」列，<460px 再藏「修改时间」列，名称始终占满剩余宽度（ResizeObserver 观测文件区自身宽度，与顶栏防挤压同一套思路）。
+
 ## [2.3.3] - 2026-06-26
 
 ### Changed

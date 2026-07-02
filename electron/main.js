@@ -220,6 +220,44 @@ async function checkUpdate(opts) {
 ipcMain.handle('update:open', (e, { url }) => { if (/^https:\/\/github\.com\//.test(String(url))) shell.openExternal(url); });
 ipcMain.handle('update:get', () => pendingUpdate);
 
+// #26 应用内下载更新：按当前架构拼 dmg 资产地址（发布产物统一 FanBox-<版本>-<arch>.dmg），
+// 下到 ~/Downloads 后直接打开挂载，拖进 Applications 即完成。全自动安装（Squirrel）仍要等 Developer ID 签名
+let updDownloading = false;
+ipcMain.handle('update:download', async (e, { version }) => {
+  if (updDownloading) return { ok: false, error: 'busy' };
+  const ver = String(version || '').replace(/^v/, '');
+  if (!/^\d+\.\d+\.\d+$/.test(ver)) return { ok: false, error: 'bad version' };
+  const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
+  const url = `https://github.com/alchaincyf/fanbox/releases/download/v${ver}/FanBox-${ver}-${arch}.dmg`;
+  const dest = path.join(app.getPath('downloads'), `FanBox-${ver}-${arch}.dmg`);
+  const send = (m) => { if (win && !win.isDestroyed()) win.webContents.send('update:progress', m); };
+  updDownloading = true;
+  const tmp = dest + '.part';
+  try {
+    const res = await net.fetch(url, { headers: { 'User-Agent': 'fanbox-app' } });
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+    const total = Number(res.headers.get('content-length')) || 0;
+    const out = fs.createWriteStream(tmp);
+    let got = 0, lastPct = -1;
+    for await (const chunk of res.body) {
+      const buf = Buffer.from(chunk);
+      if (!out.write(buf)) await new Promise((r) => out.once('drain', r));
+      got += buf.length;
+      const pct = total ? Math.floor((got / total) * 100) : -1;
+      if (pct !== lastPct) { lastPct = pct; send({ state: 'downloading', pct }); }
+    }
+    await new Promise((resolve, reject) => out.end((err) => (err ? reject(err) : resolve())));
+    await fs.promises.rename(tmp, dest);
+    send({ state: 'done', file: dest });
+    shell.openPath(dest);
+    return { ok: true, file: dest };
+  } catch (err) {
+    fs.promises.unlink(tmp).catch(() => {});
+    send({ state: 'error', error: String((err && err.message) || err) });
+    return { ok: false, error: String((err && err.message) || err) };
+  } finally { updDownloading = false; }
+});
+
 // 点完成通知把 app 拉到前台（渲染层 window.focus() 唤不醒最小化/被遮挡的窗口）
 ipcMain.handle('win:focus', () => {
   if (!win || win.isDestroyed()) return;
