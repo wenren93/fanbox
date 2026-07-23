@@ -392,16 +392,11 @@ function visibleEntries() {
 function renderStatusbar() {
   const sb = $('#statusbar'); if (!sb) return;
   if (state.skillsMode || state.recentMode || !state.cwd) { sb.classList.add('hidden'); return; }
-  const list = state.visible || [];
-  const dirs = list.filter((e) => e.isDir).length;
-  const files = list.length - dirs;
-  const bytes = list.reduce((a, e) => a + (e.isDir ? 0 : e.size || 0), 0);
   sb.classList.remove('hidden');
-  sb.innerHTML = `<span>${list.length} 项${dirs ? ` · ${dirs} 文件夹` : ''}${files ? ` · ${files} 文件 ${fmtSize(bytes)}` : ''}</span><span class="sb-links">${state.project ? '<a id="sb-rel" title="版本号→CHANGELOG→打包→push→Release 一条龙，在终端跑">发版</a>' : ''}<a id="sb-mem" title="这个文件夹里 AI 干过什么：历史会话、改过的文件、一键续上">项目记忆</a><a id="sb-snap" title="agent 每轮开工前的自动存档，可一键回到任意一轮之前">回合存档</a><a id="sb-du" title="算上子目录的真实磁盘占用">占用透视</a></span>`;
+  sb.innerHTML = `<span class="sb-links"><a id="sb-mem" title="这个文件夹里 AI 干过什么：历史会话、改过的文件、一键续上">项目记忆</a><a id="sb-snap" title="agent 每轮开工前的自动存档，可一键回到任意一轮之前">回合存档</a><a id="sb-du" title="算上子目录的真实磁盘占用">占用透视</a></span>`;
   $('#sb-du').onclick = () => diskPanel(state.cwd);
   $('#sb-mem').onclick = () => memoryPanel(state.cwd);
   $('#sb-snap').onclick = () => snapshotPanel(state.cwd);
-  const rel = $('#sb-rel'); if (rel) rel.onclick = () => releasePanel();
 }
 function renderFiles() {
   if (state.skillsMode) return; // skills 视图自管 #file-area，文件渲染不要清掉它
@@ -2615,6 +2610,11 @@ const agentsPop = {
         <input type="checkbox" ${(() => { try { return localStorage.getItem('fanbox.noWebgl') === '1' ? '' : 'checked'; } catch { return 'checked'; } })()}>
         <span class="ap-name">WebGL 加速渲染</span>
       </label>
+      <div class="ap-head ap-sub">Agent 互控</div>
+      <div class="ap-row" title="装进 ~/.claude/skills 后，翻箱终端里的 claude 就能指挥兄弟窗口：新开窗口 / 读输出 / 发指令 / 等结果">
+        <span class="ap-name">fanbox-agent skill</span>
+        <span class="ap-flag" data-skill-flag="fanbox-agent"></span>
+      </div>
       <div class="ap-foot">勾选即生效 · 点「未装」复制安装命令<br>高级：~/.fanbox/config.json 的 agents 数组可自定义命令 / 加新 agent</div>`;
     document.body.appendChild(pop);
     const r = $('#agent-config').getBoundingClientRect();
@@ -2623,6 +2623,7 @@ const agentsPop = {
     this.el = pop;
     AGENT_REGISTRY.forEach(async (a) => { const el = pop.querySelector(`[data-ic="${a.id}"]`); const ic = await agentIconHtml(a.id); if (el) el.innerHTML = ic || `<span class="agent-abbr">${escapeHtml(a.label.slice(0, 2))}</span>`; });
     this.markInstalled(pop);
+    this.markSkill(pop);
     const wgCb = pop.querySelector('[data-webgl] input');
     if (wgCb) wgCb.onchange = () => { term.setWebgl(wgCb.checked); toast(wgCb.checked ? 'WebGL 渲染已开启' : '已切换兼容渲染（修中文乱码）'); };
     pop.querySelectorAll('.ap-list .ap-row input').forEach((cb) => {
@@ -2635,6 +2636,22 @@ const agentsPop = {
     });
     this._out = (ev) => { if (!pop.contains(ev.target) && !$('#agent-config').contains(ev.target)) this.close(); };
     document.addEventListener('mousedown', this._out, true);
+  },
+  // 内置 skill 安装状态：未装 →「安装」可点；装过但内容旧 →「可更新」可点；最新 →「已装 ✓」
+  async markSkill(pop) {
+    const f = pop.querySelector('[data-skill-flag="fanbox-agent"]');
+    if (!f) return;
+    let st = null;
+    try { st = ((await api('/api/skills/builtin')).skills || []).find((s) => s.id === 'fanbox-agent'); } catch { /* */ }
+    if (!st) { f.textContent = '不可用'; return; }
+    const set = (txt, click) => { f.textContent = txt; f.onclick = click || null; f.style.cursor = click ? 'pointer' : ''; };
+    if (st.installed && st.upToDate) return set('已装 ✓');
+    set(st.installed ? '可更新' : '安装', async (ev) => {
+      ev.preventDefault();
+      const r = await apiPost('/api/skills/install-builtin', { id: 'fanbox-agent' }).catch(() => null);
+      if (r && r.ok) { set('已装 ✓'); toast('fanbox-agent skill 已装进 ~/.claude/skills，终端里的 claude 即刻可用'); }
+      else toast('安装失败' + (r && r.error ? '：' + r.error : ''), true);
+    });
   },
   async markInstalled(pop) {
     if (!this.which) {
@@ -3766,8 +3783,6 @@ const term = {
     await navigate(dirOf(r.path));
     const e = state.entries.find((x) => x.path === r.path) || { path: r.path, name: baseOf(r.path), kind: 'text', isDir: false };
     applySelection(r.path); openPreview(e); recordRecent(r.path);
-    // md/html 是「写给人看」的：点开即全屏，最贴合「我想看看这文件长啥样」的意图（代码等退回常规分栏）
-    setPreviewMax(isMdName(r.path) || isHtmlName(r.path));
     toast(r.viaSearch ? '未精确命中，已打开最接近的「' + baseOf(r.path) + '」' : (r.viaScrollback ? '已按会话里出现过的路径打开' : '已打开'));
   },
   // 从 fromRow 往上回扫 scrollback（最多 2000 物理行），收集含该 basename 的绝对路径（/ 或 ~ 开头，
@@ -3895,6 +3910,7 @@ const term = {
         wg = new Wg();
         wg.onContextLoss(() => { try { wg.dispose(); } catch { /* */ } });
         xterm.loadAddon(wg);
+        this.watchAtlas(wg);
       } catch { wg = null; /* 回退默认 DOM renderer */ }
     }
     if (fit) try { fit.fit(); } catch { /* */ }
@@ -4128,15 +4144,11 @@ const term = {
     this.renderTabs();
     const s = this.sessions.find((x) => x.id === id);
     if (s) {
-<<<<<<< HEAD
       this.syncGroupMeta(s);
-      this.fitSession(s);
+      this.fitActive();
       // xterm 5.5.0 旧 Viewport 在 display:none 期间会把滚动区高度算矮一屏（上游 #5339，6.0 重写才修）；
       // 重新可见后强制同步一次，否则滚轮到不了底部。升级 xterm 6.0 后删掉这行
       requestAnimationFrame(() => { try { s.xterm._core.viewport?.syncScrollArea?.(true); } catch { /* */ } });
-=======
-      this.fitActive();
->>>>>>> master
       setTimeout(() => s.xterm.focus(), 0);
       // 延迟刷新标题（避开双击窗口：双击的第二下若撞上 renderTabs 重建会丢 dblclick 事件）
       setTimeout(() => this.refreshCwd(s), 600);
@@ -4245,13 +4257,51 @@ const term = {
     return sess;
   },
   // WebGL 字形图集保养：大量中文输出会撑满图集触发分页合并，上游 bug 让汉字画成别字碎片
-  //（拖拽窗口能复原＝resize 重建了图集）。忙时每 5 分钟、收工时距上次 >60s 主动重建，重画一帧无感
-  atlasCare(s, now, eager) {
-    if (!s.webgl) return;
-    if (!s._atlasAt) { s._atlasAt = now; return; } // 新会话图集是干净的，先记时间
-    if (now - s._atlasAt < (eager ? 60000 : 300000)) return;
-    s._atlasAt = now;
-    try { s.webgl.clearTextureAtlas(); } catch { /* */ }
+  //（拖拽窗口能复原＝resize 重建了图集）。忙时每 5 分钟、收工时距上次 >60s 主动重建，重画一帧无感。
+  // 图集按字体配置在标签间共享，单独清一个标签会让其他标签的字指向已清空的纹理（大面积丢字），
+  // 所以全局节流、到点后所有标签同一 tick 一起清：头一个清掉共享纹理，其余只重建自己的模型并重绘
+  atlasCare(now, eager) {
+    if (!this._atlasAt) { this._atlasAt = now; return; } // 刚启动图集是干净的，先记时间
+    if (now - this._atlasAt < (eager ? 60000 : 300000)) return;
+    this._atlasAt = now;
+    this.sessions.forEach((s) => { try { s.webgl?.clearTextureAtlas(); } catch { /* */ } });
+  },
+  // 图集压力监视（分页合并的机制级防线）：addon 每开一页新图集就发事件（同一页会被共享它的每个
+  // 标签各转发一次，WeakSet 去重后计数≈真实页数）。页数到 12（上限一般 16，顶格才触发出乱码的
+  // 分页合并）就整体重建，让合并从机制上没机会发生。定时的 atlasCare 只回收页内空间、减缓页数增长，
+  // 但 clearTextureAtlas 页数只增不减（合并出的大页清空后还永久占坑不可写），压不住时得靠这里真重建
+  watchAtlas(wg) {
+    if (!wg || !wg.onAddTextureAtlasCanvas) return;
+    if (!this._atlasSeen) this._atlasSeen = new WeakSet();
+    wg.onAddTextureAtlasCanvas((canvas) => {
+      if (this._atlasSeen.has(canvas)) return;
+      this._atlasSeen.add(canvas);
+      this._atlasPages = (this._atlasPages || 0) + 1;
+      if (this._atlasPages < 12 || this._atlasRecycling) return;
+      this._atlasRecycling = true;
+      requestAnimationFrame(() => this.recycleWebgl()); // 事件在绘制途中同步发出，等这帧画完再动手
+    });
+  },
+  // 真重建：所有标签的 WebGL 插件先全部销毁、再全部重装。图集按引用计数存活，
+  // 边销毁边重装会让新插件捡回那张退化的旧图集，必须两趟分开走
+  recycleWebgl() {
+    this._atlasRecycling = false;
+    this._atlasPages = 0;
+    this._atlasSeen = new WeakSet();
+    this._atlasAt = Date.now();
+    const Wg = (!window.__noWebgl && window.WebglAddon) ? (window.WebglAddon.WebglAddon || window.WebglAddon) : null;
+    const wants = this.sessions.filter((s) => s.webgl);
+    wants.forEach((s) => { try { s.webgl.dispose(); } catch { /* */ } s.webgl = null; });
+    if (!Wg) return; // 环境没了 WebGL 就顺势落回 DOM renderer
+    wants.forEach((s) => {
+      try {
+        const wg = new Wg();
+        wg.onContextLoss(() => { try { wg.dispose(); } catch { /* */ } if (s.webgl === wg) s.webgl = null; });
+        s.xterm.loadAddon(wg);
+        s.webgl = wg;
+        this.watchAtlas(wg);
+      } catch { /* 单个失败回退 DOM，不拦其他 */ }
+    });
   },
   // 兼容渲染模式：关 WebGL 改用 DOM renderer（无字形图集，从机制上杜绝中文乱码；大输出略慢）。
   // 对所有已开标签立即生效；选择存 localStorage，新标签在创建处同样遵守
@@ -4266,6 +4316,7 @@ const term = {
           wg.onContextLoss(() => { try { wg.dispose(); } catch { /* */ } if (s.webgl === wg) s.webgl = null; });
           s.xterm.loadAddon(wg);
           s.webgl = wg;
+          this.watchAtlas(wg);
         }
       } catch { /* 单个会话失败不拦其他 */ }
     });
@@ -4278,8 +4329,12 @@ const term = {
     const xterm = sess.xterm;
     // xterm 没有直接改 fontSize 的 API，通过 options 更新
     xterm.options.fontSize = sess._fontSize;
-    // 字号变了要重新 fit，避免内容裁切
-    requestAnimationFrame(() => { try { sess.fit.fit(); sess.webgl?.clearTextureAtlas?.(); } catch { /* */ } }); // 顺带清图集，防字号变化后 CJK 残影
+    // 字号变了要重新 fit，避免内容裁切。顺带清图集防 CJK 残影——图集在同字号标签间共享，
+    // 只清自己会让其他标签的字悬空指向已清空的纹理（2.6.1 的教训），必须所有标签同一 tick 一起清
+    requestAnimationFrame(() => {
+      try { sess.fit.fit(); } catch { /* */ }
+      this.sessions.forEach((s) => { try { s.webgl?.clearTextureAtlas?.(); } catch { /* */ } });
+    });
     // 通知 PTY 重新获取尺寸（fit 会触发 onResize，已经做了）
   },
   // agent 态势感知：终端有输出→busy；静默 >2.5s→idle；进程退出→dead。
@@ -4324,7 +4379,7 @@ const term = {
       const now = Date.now(); let anyBusy = false;
       this.sessions.forEach((s) => {
         if (s.status !== 'busy') return;
-        this.atlasCare(s, now); // 忙满 5 分钟清一次图集，长中文输出中途也能自愈
+        this.atlasCare(now); // 忙满 5 分钟清一次图集，长中文输出中途也能自愈
         const quiet = now - (s.lastData || 0);
         if (quiet <= 2500) { anyBusy = true; return; } // claude/codex 忙碌心跳约 1s 一帧，容差太紧会闪断误报
         const tail = this.tailText(s);
@@ -4332,7 +4387,7 @@ const term = {
         if (quiet < 30000 && /esc to interrupt/i.test(tail)) { anyBusy = true; return; }
         const dur = (s.lastReal || 0) - (s.busyStart || 0); // 工时只数自发输出：回显续命不算，免得打字把琐碎回显养肥成「真任务」
         s.status = 'idle';
-        this.atlasCare(s, now, true); // 收工间隙兜底再清一次（距上次 >60s 才动手）
+        this.atlasCare(now, true); // 收工间隙兜底再清一次（距上次 >60s 才动手）
         this.renderTabs();
         this.refreshCwd(s); // 干完一段活，标题对齐终端真实目录
         // 阶段性收工不报喜：底部状态行还挂着后台任务（「1 shell, 1 monitor still running」/「· 1 shell ·」），
@@ -4403,8 +4458,9 @@ const term = {
       const hue = this.hueOf(activeMember.cwd || activeMember.startDir);
       t.title = followed ? '文件跟随正盯着这个终端 · 双击跳到它所在目录' : '双击：文件区跳到该终端所在目录';
       const eye = followed ? `<span class="tab-eye" title="文件跟随盯着它">${ic('eye', 'currentColor', 11)}</span>` : '';
+      const zap = members.some((s) => s.agentTouch && Date.now() - s.agentTouch < 8000) ? '<span class="tab-zap" title="正被 agent 控制">⚡</span>' : ''; // 被 agent 遥控过闪 8 秒：审计 + 围观
       const count = paneCount > 1 ? `<span class="tab-count">${paneCount}</span>` : '';
-      t.innerHTML = `<span class="tab-dot ${dotState}" title="${dotTitle}"></span>${eye}${ic('term', `hsl(${hue} 62% 48%)`, 12)}<span>${escapeHtml(g.title || activeMember.title)}</span>${count}<span class="tab-x" title="关闭">✕</span>`;
+      t.innerHTML = `<span class="tab-dot ${dotState}" title="${dotTitle}"></span>${eye}${zap}${ic('term', `hsl(${hue} 62% 48%)`, 12)}<span>${escapeHtml(g.title || activeMember.title)}</span>${count}<span class="tab-x" title="关闭">✕</span>`;
       t.onclick = (e) => { if (e.target.classList.contains('tab-x')) { this.closeGroup(g.id); return; } this.activateGroup(g.id); };
       t.ondblclick = (e) => { if (e.target.classList.contains('tab-x')) return; this.locateCwd(); };
       bar.appendChild(t);
@@ -5477,5 +5533,23 @@ function bindUpdateNotice() {
 // 终端渲染器诊断开关：fbWebgl(false) 关 WebGL 用 DOM renderer 排查 CJK 残影，fbWebgl(true) 恢复。
 // 与设置面板「WebGL 加速渲染」同一逻辑，对所有已开标签立即生效
 window.fbWebgl = (on) => { term.setWebgl(!!on); console.log('[fanbox] WebGL ' + (on ? '已开启' : '已关闭（DOM renderer 兼容渲染）') + '，已对所有终端标签生效'); return !!on; };
+
+// Agent 控制接口（/api/agent/*）的渲染侧配合：应 main 之邀开新终端 tab + 给被控 tab 闪 ⚡
+if (window.fanboxAgentCtl) {
+  window.fanboxAgentCtl.onCreate(async ({ reqId, cwd }) => {
+    try {
+      if ($('#terminal-panel').classList.contains('hidden')) term.open();
+      const sess = await term.newTab(cwd || undefined);
+      window.fanboxAgentCtl.created({ reqId, ok: !!(sess && sess.id), id: sess && sess.id });
+    } catch (e) { window.fanboxAgentCtl.created({ reqId, ok: false, error: String(e && e.message || e) }); }
+  });
+  window.fanboxAgentCtl.onTouch(({ id }) => {
+    const s = term.sessions.find((x) => x.id === id);
+    if (!s) return;
+    s.agentTouch = Date.now();
+    term.renderTabs();
+    setTimeout(() => term.renderTabs(), 8200); // 标记过期后重画抹掉
+  });
+}
 
 init();
