@@ -108,10 +108,11 @@ body {
   padding: 16px 12px;
   overflow-y: auto;
 }
-/* 侧栏右缘拖拽条：fixed 定位贴在 sidebar 右边界（用 --sidebar-w 变量定位），不随侧栏滚动跑掉 */
-#sidebar-resizer { position: fixed; top: 0; bottom: 0; left: calc(var(--sidebar-w, 248px) - 3px); width: 6px; cursor: col-resize; z-index: 50; }
-#sidebar-resizer::after { content: ''; position: absolute; inset: 0 2px; border-radius: 1px; background: var(--accent); opacity: 0; transition: opacity 0.15s ease 0.08s; }
-#sidebar-resizer:hover::after, #sidebar-resizer.dragging::after { opacity: 0.55; }
+/* 侧栏右缘拖拽条：热区保持好抓，可见线只画 1px，避免把侧栏切成一条重色块 */
+#sidebar-resizer { position: fixed; top: 0; bottom: 0; left: calc(var(--sidebar-w, 248px) - 5px); width: 20px; cursor: col-resize; z-index: 50; background: transparent; }
+#sidebar-resizer::after { content: ''; position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; transform: translateX(-0.5px); background: color-mix(in srgb, var(--accent) 55%, var(--border)); opacity: 0; transition: opacity 0.14s ease; }
+#sidebar-resizer:hover::after { opacity: 0.22; }
+#sidebar-resizer.dragging::after { opacity: 0.42; }
 #app.sidebar-collapsed #sidebar-resizer { display: none; }
 .brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 16px; }
 .brand .logo { font-size: 26px; }
@@ -125,6 +126,18 @@ body {
   color: var(--text-dim); cursor: pointer; font-size: 13px; transition: 0.15s;
 }
 .cmdk-trigger:hover { border-color: var(--accent); color: var(--text); }
+.cmdk-open {
+  flex: 1 1 auto; min-width: 0; border: 0; background: transparent; color: inherit;
+  display: flex; align-items: center; padding: 0; font: inherit; cursor: pointer; text-align: left;
+}
+.cmdk-tools { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; }
+.cmdk-tools .nav-step {
+  width: 23px; height: 23px; border: 1px solid var(--border); border-radius: 6px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--bg); color: var(--text-dim); cursor: pointer; padding: 0;
+}
+.cmdk-tools .nav-step:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+.cmdk-tools .nav-step:disabled { opacity: 0.32; cursor: default; }
 kbd {
   font-family: ui-monospace, monospace; font-size: 11px; padding: 2px 6px;
   background: var(--bg); border: 1px solid var(--border); border-radius: 5px; color: var(--text-faint);
@@ -132,6 +145,13 @@ kbd {
 
 .nav-section { margin-bottom: 18px; }
 .nav-title { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 1px; padding: 0 8px 6px; display: flex; align-items: center; gap: 5px; }
+.nav-title-row { justify-content: space-between; }
+.nav-title-btn {
+  width: 22px; height: 22px; border: 0; border-radius: 6px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; color: var(--text-faint); cursor: pointer;
+}
+.nav-title-btn:hover { background: var(--bg-3); color: var(--accent); }
 .nav-title svg { flex-shrink: 0; }
 .brand .logo { display: inline-flex; }
 .ct-label { display: inline-flex; align-items: center; gap: 7px; }
@@ -147,6 +167,14 @@ kbd {
 .nav-list li .label { overflow: hidden; text-overflow: ellipsis; }
 .nav-list li .unfav { margin-left: auto; opacity: 0; font-size: 11px; }
 .nav-list li:hover .unfav { opacity: 0.6; }
+.nav-list li .nav-remove {
+  margin-left: auto; flex-shrink: 0; width: 20px; height: 20px; border: 0; border-radius: 5px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; color: var(--text-faint); cursor: pointer;
+  opacity: 0; transition: opacity 0.12s, background-color 0.12s, color 0.12s;
+}
+.nav-list li:hover .nav-remove, .nav-list li .nav-remove:focus-visible { opacity: 0.7; }
+.nav-list li .nav-remove:hover { opacity: 1; color: #b5483a; background: var(--bg-3); }
 .nav-empty { padding: 4px 8px; font-size: 12px; color: var(--text-faint); }
 /* 侧栏目录树：展开箭头 + 子级缩进 */
 .nav-list li .twirl { flex-shrink: 0; width: 13px; margin-right: -4px; text-align: center; font-size: 9px; color: var(--text-faint); border-radius: 3px; }
@@ -290,6 +318,8 @@ kbd {
 .grid .item .icon .play-badge { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 34px; height: 34px; border-radius: 50%; background: rgba(0, 0, 0, 0.5); display: flex; align-items: center; justify-content: center; backdrop-filter: blur(2px); pointer-events: none; }
 .grid .item .icon .svg-icon { display: flex; filter: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.12)); }
 .grid .item .fname { font-size: 12px; word-break: break-all; line-height: 1.3; max-height: 32px; overflow: hidden; color: var(--text); }
+/* 小图标格子窄，两行装不下几个字：放宽到三行；中/大图标行宽足够仍两行 */
+.grid.size-sm .item .fname { max-height: 47px; }
 
 /* 文件夹 vs 文件：扁平实心文件夹（无盒子）+ 名称加粗；文件名常规、略淡 */
 .grid .item.is-dir .fname { font-weight: 650; }
@@ -337,6 +367,7 @@ kbd {
 #preview {
   background: var(--panel); flex: 0 0 auto;
   display: flex; flex-direction: column; overflow: hidden; min-height: 0; min-width: 0;
+  container-type: inline-size;
 }
 #preview.hidden { display: none; }
 /* 全屏放大：脱离分屏，铺满整个窗口（盖住文件区/终端/侧边栏）。md/html 放大后照样可看可编辑。
@@ -354,6 +385,12 @@ kbd {
 #preview-close { background: none; border: none; color: var(--text-dim); font-size: 16px; cursor: pointer; flex: 0 0 auto; margin-left: 2px; }
 #preview-close:hover { color: var(--text); }
 .preview-actions { display: flex; flex-wrap: nowrap; gap: 5px; padding: 0; margin-left: auto; overflow: visible; scrollbar-width: none; }
+.preview-actions button { flex: none; }
+/* 预览被压窄时操作条自身横向滚动（触控板横扫），标题和关闭钮永远在位。
+   代价：滚动容器会裁掉按钮的 hover 气泡，所以只在窄时开启，宽时保持 overflow:visible */
+@container (max-width: 420px) {
+  .preview-actions { overflow-x: auto; min-width: 0; }
+}
 
 /* 无文字图标按钮的即时气泡标签（替代慢吞吞、样式丑的原生 title）。统一向下弹出，避免贴顶被裁 */
 [data-tip] { position: relative; }
@@ -542,7 +579,8 @@ kbd {
 /* 底部状态条：贴在文件区底缘，内容短时也贴底（margin-top:auto），滚动时 sticky 常驻 */
 #statusbar {
   position: sticky; bottom: 0; margin-top: auto; flex: none;
-  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  display: flex; align-items: center; gap: 10px; white-space: nowrap;
+  overflow-x: auto; scrollbar-width: none;
   padding: 5px 16px; font-size: 11.5px; color: var(--text-faint);
   background: color-mix(in srgb, var(--bg) 86%, transparent); backdrop-filter: blur(6px);
 }
@@ -585,7 +623,7 @@ kbd {
 .shot-acts button:hover { color: var(--text); border-color: var(--accent); }
 
 /* 项目记忆 */
-.sb-links { display: flex; gap: 14px; }
+.sb-links { display: flex; gap: 14px; margin-left: auto; }
 .mem-dialog { width: 680px; max-width: 94vw; }
 .mem-body { max-height: 68vh; overflow-y: auto; margin-top: 8px; }
 .mem-sess { padding: 9px 6px; border-bottom: 1px solid var(--border); }
@@ -972,6 +1010,7 @@ kbd {
 .term-tab.active { background: var(--bg-3); color: var(--text); }
 .term-tab .tab-x { opacity: 0.45; margin-left: 2px; }
 .term-tab .tab-x:hover { opacity: 1; color: var(--accent); }
+.term-tab .tab-count { min-width: 13px; height: 13px; padding: 0 4px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; line-height: 1; background: var(--bg); color: var(--text-dim); }
 /* agent 态势小圆点：运行中(绿/呼吸) · 空闲(灰) · 已退出(红) */
 .term-tab .tab-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--text-dim); }
 .term-tab .tab-dot.busy { background: var(--green, #3fb950); animation: tabpulse 1.1s ease-in-out infinite; }
@@ -1019,12 +1058,29 @@ kbd {
 .agents-pop .ap-flag { font-size: 11px; color: var(--yellow); cursor: copy; flex: none; }
 .agents-pop .ap-foot { padding: 8px 12px; font-size: 11px; color: var(--text-dim); border-top: 1px solid var(--border); line-height: 1.7; }
 
-#xterm-host { flex: 1; position: relative; min-height: 0; overflow: hidden; background: var(--bg); }
+#xterm-host { flex: 1; position: relative; min-height: 0; min-width: 0; overflow: hidden; background: var(--bg); display: flex; }
+.term-hidden-hosts { display: none; }
+.term-split-row, .term-split-col { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; }
+.term-split-row { flex-direction: row; }
+.term-split-col { flex-direction: column; }
+.term-pane { flex: 1 1 0; min-width: 0; min-height: 0; position: relative; overflow: hidden; border: 1px solid transparent; background: var(--bg); }
+.term-pane.active { border-color: color-mix(in srgb, var(--accent) 48%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent); }
+.term-pane-close { position: absolute; top: 5px; right: 7px; z-index: 6; width: 18px; height: 18px; border: none; border-radius: 5px; display: flex; align-items: center; justify-content: center; background: color-mix(in srgb, var(--bg-2) 82%, transparent); color: var(--text-dim); opacity: 0; cursor: pointer; font-size: 14px; line-height: 1; }
+.term-pane:hover .term-pane-close, .term-pane.active .term-pane-close, .term-pane-close:focus-visible { opacity: 0.72; }
+.term-pane-close:hover { opacity: 1; color: var(--accent); background: var(--bg-3); }
+.term-split-handle { flex: 0 0 6px; position: relative; z-index: 4; background: transparent; }
+.term-split-handle.is-row { cursor: col-resize; }
+.term-split-handle.is-col { cursor: row-resize; }
+.term-split-handle::after { content: ''; position: absolute; inset: 0; margin: auto; background: color-mix(in srgb, var(--accent) 52%, var(--border)); opacity: 0; transition: opacity 0.12s ease; }
+.term-split-handle.is-row::after { width: 1px; height: 100%; }
+.term-split-handle.is-col::after { width: 100%; height: 1px; }
+.term-split-handle:hover::after, .term-split-resizing .term-split-handle::after { opacity: 0.36; }
 /* xterm 6.0 的 Viewport 重写后不再用 JS 把 .xterm-viewport 刷成主题色，xterm.css 默认的 #000
    会在行区底部的余高缝隙里露出来（黑带横跳）——改透明，让容器背景（皮肤色/回放录制色）透上来 */
 .xterm .xterm-viewport { background-color: transparent !important; }
 .xterm-instance { position: absolute; inset: 4px 2px 2px 8px; display: none; }
-.xterm-instance.show { display: block; }
+#xterm-host > .xterm-instance.show { display: block; }
+.term-pane .xterm-instance.show { display: block; }
 .xterm-instance .xterm { height: 100%; }
 
 /* ---------- 桌面 app：交通灯避让 + 顶部可拖拽 ---------- */
@@ -1075,6 +1131,8 @@ kbd {
 /* 文件跟随正盯着的终端 tab：描边高亮 + 眼睛标记 */
 .term-tab.following { box-shadow: inset 0 0 0 1px var(--accent); }
 .term-tab .tab-eye { display: inline-flex; align-items: center; color: var(--accent); margin: 0 1px; }
+/* 刚被 agent 遥控过的终端 tab：⚡ 闪 8 秒（审计 + 围观） */
+.term-tab .tab-zap { font-size: 10px; line-height: 1; margin: 0 1px; }
 /* 产物卡片：agent 编译/打包出的成品 */
 .artifact-card .art-name { font-size: 15px; font-weight: 600; color: var(--text); word-break: break-all; margin-bottom: 4px; }
 .artifact-card .art-sub { font-size: 12px; color: var(--text-faint); margin-bottom: 16px; }

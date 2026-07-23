@@ -1,0 +1,50 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+
+test('terminal exposes equal split pane controls and layout plumbing', () => {
+  const html = fs.readFileSync('public/index.html', 'utf8');
+  const js = fs.readFileSync('public/app.js', 'utf8');
+  const css = fs.readFileSync('public/style.css', 'utf8');
+
+  assert.match(html, /id="term-split"/);
+  assert.match(js, /split\(direction\)/);
+  assert.match(js, /groups:\s*\[\]/);
+  assert.match(js, /createGroup\(\)/);
+  assert.match(js, /activateGroup\(groupId\)/);
+  assert.match(js, /closeGroup\(g\.id\)/);
+  assert.match(js, /groupId:\s*group\.id/);
+  assert.match(js, /await this\.newTab\(null,\s*\{\s*groupId:\s*group && group\.id,\s*paneId:\s*pane\.id\s*\}\)/);
+  assert.match(js, /term\.split\('right'\)/);
+  assert.match(js, /term\.split\('down'\)/);
+  assert.match(js, /term\.split\('left'\)/);
+  assert.match(js, /term\.split\('up'\)/);
+  assert.match(js, /renderLayout\(\)/);
+  assert.match(js, /fitVisible\(\)/);
+  assert.doesNotMatch(js, /next\s*!==\s*true/);
+  assert.match(js, /splitHandle\(node,\s*idx\)/);
+  assert.match(js, /beginSplitResize\(ev,\s*node,\s*idx\)/);
+  assert.match(js, /node\.sizes/);
+  assert.match(js, /term-pane-close/);
+  assert.match(js, /this\.closeTab\(pane\.sessionId\)/);
+  assert.match(js, /canSplitPane\(paneId,\s*direction\)/);
+  assert.match(js, /layoutWithInsertedPane\(layout,\s*targetPaneId,\s*newPaneId,\s*direction\)/);
+  assert.match(js, /projectedLeafRects\(layout,\s*width,\s*height\)/);
+  assert.match(js, /visiblePaneCount\(\)/);
+  assert.match(js, /当前终端组最多拆分 4 个终端/);
+  assert.match(js, /空间不足，继续横向拆分会导致终端空白/);
+  assert.match(js, /空间不足，继续纵向拆分会导致终端空白/);
+  assert.match(js, /splitAxisCount\(paneId,\s*orient\)/);
+  assert.match(js, /横向最多拆分 3 个终端/);
+  assert.match(js, /纵向最多拆分 3 个终端/);
+  assert.match(css, /\.term-split-row/);
+  assert.match(css, /\.term-split-col/);
+  assert.match(css, /\.term-split-handle/);
+  assert.match(css, /\.term-pane-close/);
+  assert.match(css, /col-resize/);
+  assert.match(css, /row-resize/);
+  assert.match(css, /\.term-pane\.active/);
+  assert.match(css, /\.term-tab \.tab-count/);
+});
