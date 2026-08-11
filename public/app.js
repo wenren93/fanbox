@@ -4558,19 +4558,28 @@ const usagePanel = {
 
 // ---------- Skills 透视（主区全屏视图）----------
 const skillsView = {
-  data: null, filter: 'all', sort: 'hits', open: new Set(),
+  data: null, filter: 'all', sort: 'hits', query: '', open: new Set(),
+  batchMode: false, selected: new Set(), busy: false, batchResult: null,
   async show() {
     state.skillsMode = true; state.recentMode = false; state.cursor = -1;
+    this.batchMode = false; this.selected.clear(); this.busy = false; this.batchResult = null;
     renderBreadcrumb();
     $('#file-area').innerHTML = '<div class="cmdk-loading">扫描本机 skills…</div>';
     try { this.data = await apiPost('/api/skills/refresh', { cwd: state.cwd }); } catch { $('#file-area').innerHTML = '<div class="nav-empty">扫描失败</div>'; return; }
     this.render();
   },
   async reload() {
-    try { this.data = await api('/api/skills'); if (state.skillsMode) this.render(); } catch { /* */ }
+    try {
+      this.data = await apiPost('/api/skills/refresh', { cwd: state.cwd });
+      if (state.skillsMode) this.render();
+      return true;
+    } catch {
+      if (state.skillsMode && this.data) this.render();
+      return false;
+    }
   },
   srcTag(it) {
-    const cls = { claude: '', codex: ' codex', agents: ' codex', plugin: ' plugin', project: ' proj' }[it.source] || '';
+    const cls = { claude: '', codex: ' codex', agents: ' codex', workbuddy: ' workbuddy', plugin: ' plugin', project: ' proj' }[it.source] || '';
     return `<span class="sk-src${cls}">${escapeHtml(it.label)}</span>`;
   },
   ago(t) {
@@ -4588,6 +4597,8 @@ const skillsView = {
     else if (f === 'project') arr = arr.filter((x) => x.source === 'project');
     else if (f === 'codex') arr = arr.filter((x) => x.source === 'codex' || x.source === 'agents');
     else if (f !== 'all') arr = arr.filter((x) => x.source === f);
+    const q = this.query.trim().toLocaleLowerCase();
+    if (q) arr = arr.filter((x) => [x.name, x.desc, x.label, x.dir, ...(x.issues || [])].join('\n').toLocaleLowerCase().includes(q));
     const ho = (x) => (x.residue || x.issues.length ? 0 : x.disabled ? 1 : 2);
     if (this.sort === 'hits') arr.sort((a, b) => b.hits - a.hits || b.last - a.last || a.name.localeCompare(b.name));
     if (this.sort === 'recent') arr.sort((a, b) => b.last - a.last || b.hits - a.hits);
@@ -4595,13 +4606,66 @@ const skillsView = {
     if (this.sort === 'name') arr.sort((a, b) => a.name.localeCompare(b.name));
     return arr;
   },
+  batchCounts() {
+    const selected = (this.data.items || []).filter((x) => this.selected.has(x.dir));
+    return {
+      total: this.selected.size,
+      enable: selected.filter((x) => !x.residue && x.disabled).length,
+      disable: selected.filter((x) => !x.residue && !x.disabled).length,
+      uninstall: this.selected.size,
+    };
+  },
+  batchSummary() {
+    if (!this.batchResult) return '';
+    const s = this.batchResult.summary || {};
+    const parts = [];
+    if (s.success) parts.push(`完成 ${s.success}`);
+    if (s.noop) parts.push(`无需处理 ${s.noop}`);
+    if (s.skipped) parts.push(`跳过 ${s.skipped}`);
+    if (s.failed) parts.push(`失败 ${s.failed}`);
+    return parts.join(' · ') || '没有需要处理的项目';
+  },
+  async runBatch(action) {
+    if (this.busy) return;
+    const dirs = [...this.selected];
+    if (!dirs.length) return;
+    const counts = this.batchCounts();
+    if ((action === 'enable' && !counts.enable) || (action === 'disable' && !counts.disable)) return;
+    if (action === 'uninstall') {
+      const ok = await confirmDialog(`卸载选中的 ${dirs.length} 个 Skill 安装项？它们将被移到系统废纸篓，可恢复。`);
+      if (!ok) return;
+    }
+    const before = new Map((this.data.items || []).map((x) => [x.dir, { name: x.name, label: x.label }]));
+    this.busy = true; this.batchResult = null; this.render();
+    try {
+      const r = await apiPost('/api/skills/batch', { action, dirs, cwd: state.cwd });
+      if (!r || r.ok === false || !Array.isArray(r.results)) throw new Error((r && r.error) || '服务端没有返回操作结果');
+      const failures = r.results.filter((x) => x.status === 'failed').map((x) => ({ ...x, ...(before.get(x.dir) || {}) }));
+      const summary = r.summary || r.results.reduce((s, x) => { s[x.status] = (s[x.status] || 0) + 1; s.total++; return s; }, { success: 0, noop: 0, skipped: 0, failed: 0, total: 0 });
+      this.selected = new Set(failures.map((x) => x.dir));
+      this.batchResult = { action, summary, failures };
+      const verb = { enable: '启用', disable: '停用', uninstall: '卸载' }[action];
+      if (failures.length) toast(`${verb}完成，${failures.length} 项失败`, true);
+      else toast(`批量${verb}完成`);
+    } catch (e) {
+      this.batchResult = { action, summary: { success: 0, noop: 0, skipped: 0, failed: dirs.length, total: dirs.length }, failures: dirs.map((dir) => ({ dir, ...(before.get(dir) || {}), error: e.message || '请求失败' })) };
+      toast('批量操作失败：' + (e.message || '请求失败'), true);
+    } finally {
+      this.busy = false;
+      await this.reload();
+    }
+  },
   render() {
     const o = this.data.overview;
     const items = this.data.items || [];
+    const rows = this.rows();
+    const batch = this.batchCounts();
+    const allVisibleSelected = rows.length > 0 && rows.every((x) => this.selected.has(x.dir));
+    const someVisibleSelected = rows.some((x) => this.selected.has(x.dir));
     const cnt = (fn) => items.filter(fn).length;
     const over = o.budgetChars > o.budgetLimit;
     const ratio = (o.budgetChars / o.budgetLimit).toFixed(1);
-    let h = `<div class="sk-wrap">
+    let h = `<div class="sk-wrap ${this.batchMode ? 'is-batch' : ''} ${this.busy ? 'is-busy' : ''}">
       <div class="sk-stats">
         <div class="sk-stat"><div class="sk-num">${o.unique}<small>/${o.total}</small></div><div class="sk-lbl">全部 skills</div><div class="sk-note">唯一 / 含跨端副本</div></div>
         <div class="sk-stat"><div class="sk-num good">${o.active}</div><div class="sk-lbl">45 天内活跃</div><div class="sk-note">共 ${o.totalHits} 次触发</div></div>
@@ -4617,30 +4681,50 @@ const skillsView = {
         <div class="sk-chips">
           ${[['all', '全部', items.length],
              ['claude', 'Claude 全局', cnt((x) => x.source === 'claude')],
+             ['codex', 'Codex', cnt((x) => x.source === 'codex' || x.source === 'agents')],
+             ['workbuddy', 'WorkBuddy', cnt((x) => x.source === 'workbuddy')],
              ['project', '项目', cnt((x) => x.source === 'project')],
              ['plugin', '插件', cnt((x) => x.source === 'plugin')],
-             ['codex', 'Codex', cnt((x) => x.source === 'codex' || x.source === 'agents')],
              ['dup', '跨端重复', cnt((x) => x.copies)],
              ['bad', '仅看问题', o.issues]]
-            .map(([k, lbl, n]) => `<button class="sk-chip ${this.filter === k ? 'on' : ''}" data-f="${k}">${lbl} <i>${n}</i></button>`).join('')}
+            .map(([k, lbl, n]) => `<button class="sk-chip ${this.filter === k ? 'on' : ''}" data-f="${k}" ${this.busy ? 'disabled' : ''}>${lbl} <i>${n}</i></button>`).join('')}
         </div>
-        <select class="sk-sort" id="sk-sort">
+        <select class="sk-sort" id="sk-sort" ${this.busy ? 'disabled' : ''}>
           <option value="hits" ${this.sort === 'hits' ? 'selected' : ''}>按触发次数</option>
           <option value="recent" ${this.sort === 'recent' ? 'selected' : ''}>按最后触发</option>
           <option value="health" ${this.sort === 'health' ? 'selected' : ''}>按健康度</option>
           <option value="name" ${this.sort === 'name' ? 'selected' : ''}>按名称</option>
         </select>
+        <div class="sk-search ${this.query ? 'has-query' : ''}" role="search">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
+          <input type="search" id="sk-search" value="${escapeHtml(this.query)}" placeholder="搜索 Skill" aria-label="搜索 Skill 名称、描述、来源或路径" autocomplete="off" spellcheck="false" ${this.busy ? 'disabled' : ''}>
+        </div>
+        <button class="ghost-btn sk-batch-toggle ${this.batchMode ? 'active' : ''}" id="sk-batch-toggle" ${this.busy ? 'disabled' : ''}>${this.batchMode ? '退出批量管理' : '批量管理'}</button>
       </div>
-      <div class="sk-thead"><span></span><span>Skill</span><span>来源</span><span class="r">45 天触发</span><span class="r">最后触发</span><span class="r">启用</span><span></span></div>`;
+      ${this.batchMode ? `<section class="sk-batch-bar" aria-label="批量操作">
+        <div class="sk-batch-count"><span>本次选择</span><b>${batch.total}</b><em>项</em></div>
+        <div class="sk-batch-actions">
+          <button data-batch-action="enable" ${this.busy || !batch.enable ? 'disabled' : ''}>启用 <b>${batch.enable}</b></button>
+          <button data-batch-action="disable" ${this.busy || !batch.disable ? 'disabled' : ''}>停用 <b>${batch.disable}</b></button>
+          <button class="danger" data-batch-action="uninstall" ${this.busy || !batch.uninstall ? 'disabled' : ''}>卸载 <b>${batch.uninstall}</b></button>
+        </div>
+        <div class="sk-batch-status" role="status">${this.busy ? '<span class="sk-busy-dot"></span> 正在逐项处理…' : escapeHtml(this.batchSummary() || '选择后可启用、停用或卸载')}</div>
+      </section>${this.batchResult && this.batchResult.failures.length ? `<div class="sk-batch-failures" role="alert">
+        <strong>${escapeHtml(this.batchSummary())}</strong>
+        ${this.batchResult.failures.map((x) => `<div><span>${escapeHtml(x.name || tilde(x.dir))}${x.label ? ` · ${escapeHtml(x.label)}` : ''}</span><em>${escapeHtml(x.error || '操作失败')}</em></div>`).join('')}
+      </div>` : ''}` : ''}
+      <div class="sk-thead">${this.batchMode ? `<label class="sk-check-cell"><input type="checkbox" id="sk-select-all" aria-label="全选当前筛选结果" ${allVisibleSelected ? 'checked' : ''} ${someVisibleSelected && !allVisibleSelected ? 'data-partial="true"' : ''} ${this.busy || !rows.length ? 'disabled' : ''}></label>` : ''}<span></span><span>Skill</span><span>来源</span><span class="r">45 天触发</span><span class="r">最后触发</span><span class="r">启用</span><span></span></div>`;
+    if (!rows.length) h += `<div class="sk-empty">${this.query ? `没有找到“${escapeHtml(this.query)}”` : '当前筛选下没有 Skill'}</div>`;
     let dustMarked = false;
-    this.rows().forEach((it) => {
-      if (this.sort === 'hits' && this.filter === 'all' && !dustMarked && it.hits === 0) {
+    rows.forEach((it) => {
+      if (this.sort === 'hits' && this.filter === 'all' && !this.query && !dustMarked && it.hits === 0) {
         h += `<div class="sk-mark">以下 ${o.dust} 个 45 天零触发——启用中的描述仍在每次会话占用预算</div>`;
         dustMarked = true;
       }
       const key = it.dir;
       const dot = it.issues.length ? (it.residue || it.issues.some((s) => s.includes('缺')) ? 'bad' : 'warn') : 'ok';
-      h += `<div class="sk-row ${this.open.has(key) ? 'expanded' : ''} ${it.disabled ? 'off' : ''}" data-dir="${escapeHtml(key)}" draggable="true">
+      h += `<div class="sk-row ${this.open.has(key) ? 'expanded' : ''} ${it.disabled ? 'off' : ''} ${this.selected.has(key) ? 'selected' : ''}" data-dir="${escapeHtml(key)}" draggable="${this.busy ? 'false' : 'true'}">
+        ${this.batchMode ? `<label class="sk-check-cell" title="选择 ${escapeHtml(it.name)}"><input type="checkbox" data-act="select" aria-label="选择 ${escapeHtml(it.name)}" ${this.selected.has(key) ? 'checked' : ''} ${this.busy ? 'disabled' : ''}></label>` : ''}
         <span class="sk-dot ${dot}"></span>
         <div class="sk-name">
           <div class="nm">${escapeHtml(it.name)}${it.copies ? ` <i class="sk-dup">${it.copies.length} 处副本</i>` : ''}${it.disabled ? ' <i class="sk-offtag">已停用</i>' : ''}</div>
@@ -4651,7 +4735,7 @@ const skillsView = {
         <div class="sk-last">${this.ago(it.last)}</div>
         ${it.residue
           ? '<div class="sk-last r">残留</div>'
-          : `<label class="sk-switch ${it.disabled ? '' : 'on'}" data-act="toggle" title="${it.disabled ? '启用（移回 skills 目录）' : '停用（移入 _disabled/，不删文件，立即对模型不可见）'}"><i></i></label>`}
+          : `<label class="sk-switch ${it.disabled ? '' : 'on'} ${this.busy ? 'locked' : ''}" data-act="toggle" title="${it.disabled ? '启用（移回 skills 目录）' : '停用（移入 _disabled/，后续会话将不再发现）'}"><i></i></label>`}
         <span class="sk-chev">▸</span>
       </div>`;
       if (this.open.has(key)) {
@@ -4662,10 +4746,10 @@ const skillsView = {
             ${it.descLen > cut ? `<div class="fd-cut">⚠ description 共 ${it.descLen.toLocaleString()} 字符，第 ${cut.toLocaleString()} 字符之后模型看不见——靠后段触发词的场景不会触发</div>` : ''}
             ${it.issues.map((s) => `<div class="fd-cut">⚠ ${escapeHtml(s)}</div>`).join('')}
             <div class="fd-acts">
-              ${it.residue ? '' : '<button data-act="invoke" class="primary">▶ 终端调用</button>'}
-              <button data-act="reveal">在文件区显示</button>
-              ${it.residue ? '' : '<button data-act="edit">编辑 SKILL.md</button>'}
-              <button data-act="trash" class="danger">移到废纸篓</button>
+              ${it.residue ? '' : `<button data-act="invoke" class="primary" ${this.busy ? 'disabled' : ''}>▶ 终端调用</button>`}
+              <button data-act="reveal" ${this.busy ? 'disabled' : ''}>在文件区显示</button>
+              ${it.residue ? '' : `<button data-act="edit" ${this.busy ? 'disabled' : ''}>编辑 SKILL.md</button>`}
+              <button data-act="trash" class="danger" ${this.busy ? 'disabled' : ''}>卸载</button>
             </div>
           </div>
           <dl class="fd-meta">
@@ -4682,12 +4766,48 @@ const skillsView = {
     this.bind(area);
   },
   bind(area) {
+    const batchToggle = area.querySelector('#sk-batch-toggle');
+    if (batchToggle) batchToggle.onclick = () => {
+      if (this.busy) return;
+      this.batchMode = !this.batchMode;
+      this.selected.clear(); this.batchResult = null;
+      this.render();
+    };
+    const selectAll = area.querySelector('#sk-select-all');
+    if (selectAll) {
+      selectAll.indeterminate = selectAll.dataset.partial === 'true';
+      selectAll.onchange = () => {
+        if (this.busy) return;
+        const visible = this.rows();
+        if (selectAll.checked) visible.forEach((x) => this.selected.add(x.dir));
+        else visible.forEach((x) => this.selected.delete(x.dir));
+        this.batchResult = null; this.render();
+      };
+    }
+    area.querySelectorAll('[data-batch-action]').forEach((btn) => {
+      btn.onclick = () => this.runBatch(btn.dataset.batchAction);
+    });
+    const search = area.querySelector('#sk-search');
+    if (search) {
+      let composing = false;
+      const applySearch = (value) => {
+        if (this.busy || value === this.query) return;
+        this.query = value; this.selected.clear(); this.batchResult = null; this.render();
+        const next = area.querySelector('#sk-search');
+        if (next) { next.focus({ preventScroll: true }); next.setSelectionRange(value.length, value.length); }
+      };
+      search.oncompositionstart = () => { composing = true; };
+      search.oncompositionend = (e) => { composing = false; applySearch(e.target.value); };
+      search.oninput = (e) => { if (!composing && !e.isComposing) applySearch(e.target.value); };
+    }
     area.querySelector('.sk-chips').onclick = (e) => {
       const c = e.target.closest('.sk-chip'); if (!c) return;
-      this.filter = c.dataset.f; this.render();
+      if (this.busy) return;
+      this.filter = c.dataset.f; this.selected.clear(); this.batchResult = null; this.render();
     };
-    area.querySelector('#sk-sort').onchange = (e) => { this.sort = e.target.value; this.render(); };
+    area.querySelector('#sk-sort').onchange = (e) => { if (this.busy) return; this.sort = e.target.value; this.render(); };
     area.querySelector('.sk-wrap').addEventListener('click', async (e) => {
+      if (e.target.closest('.sk-check-cell') && !e.target.closest('[data-act]')) { e.stopPropagation(); return; }
       const row = e.target.closest('.sk-row');
       const detail = e.target.closest('.sk-detail');
       const act = e.target.closest('[data-act]');
@@ -4696,24 +4816,44 @@ const skillsView = {
       const it = this.data.items.find((x) => x.dir === dir);
       if (act && it) {
         e.stopPropagation();
-        if (act.dataset.act === 'toggle') {
-          const r = await apiPost('/api/skills/toggle', { dir, enable: it.disabled });
-          if (r.ok) { toast(it.disabled ? '已启用 ' + it.name : '已停用 ' + it.name + '（文件还在，随时可启用）'); this.reload(); }
-          else toast('操作失败：' + (r.error || ''), true);
+        if (act.dataset.act === 'select') {
+          if (this.busy) return;
+          act.checked ? this.selected.add(dir) : this.selected.delete(dir);
+          this.batchResult = null; this.render();
+        } else if (act.dataset.act === 'toggle') {
+          if (this.busy) return;
+          this.busy = true; this.render();
+          try {
+            const r = await apiPost('/api/skills/toggle', { dir, enable: it.disabled });
+            if (r.ok) {
+              if (this.selected.has(dir) && r.dir && r.dir !== dir) { this.selected.delete(dir); this.selected.add(r.dir); }
+              toast(it.disabled ? '已启用 ' + it.name : '已停用 ' + it.name + '（文件还在，随时可启用）');
+            }
+            else toast('操作失败：' + (r.error || ''), true);
+          } catch (err) { toast('操作失败：' + (err.message || '请求失败'), true); }
+          finally { this.busy = false; await this.reload(); }
         } else if (act.dataset.act === 'invoke') {
+          if (this.busy) return;
           invokeSkillInTerm(it.name);
         } else if (act.dataset.act === 'reveal') {
+          if (this.busy) return;
           navigate(dirOf(it.dir));
         } else if (act.dataset.act === 'edit') {
+          if (this.busy) return;
           await navigate(it.dir);
           const e2 = state.entries.find((x) => x.name === 'SKILL.md');
           if (e2) { state.selected = e2.path; openPreview(e2); renderFiles(); }
         } else if (act.dataset.act === 'trash') {
+          if (this.busy) return;
           const ok = await confirmDialog(`把「${it.name}」移到废纸篓？（系统废纸篓里随时可恢复）`);
           if (!ok) return;
-          const r = await apiPost('/api/skills/trash', { dir });
-          if (r.ok) { toast('已移到废纸篓'); this.open.delete(dir); this.reload(); }
-          else toast('删除失败：' + (r.error || ''), true);
+          this.busy = true; this.render();
+          try {
+            const r = await apiPost('/api/skills/trash', { dir });
+            if (r.ok) { toast('已卸载，可从系统废纸篓恢复'); this.open.delete(dir); this.selected.delete(dir); }
+            else toast('卸载失败：' + (r.error || ''), true);
+          } catch (err) { toast('卸载失败：' + (err.message || '请求失败'), true); }
+          finally { this.busy = false; await this.reload(); }
         }
         return;
       }

@@ -1871,16 +1871,26 @@ async function agentProjects(force = false) {
 }
 
 // ---------- Skills 透视（本机 agent skills 的扫描 / 触发统计 / 健康检查 / 启停）----------
-// 扫描五类来源：~/.claude/skills、最近 agent 项目的 .claude/skills、Claude 插件、
-// ~/.codex/skills、~/.agents/skills。触发统计读两家的会话日志。
+// 扫描六类来源：~/.claude/skills、最近 agent 项目的 .claude/skills、Claude 插件、
+// ~/.codex/skills、~/.agents/skills、~/.workbuddy/skills。触发统计读 Claude/Codex 会话日志。
 // 启停不走 skillOverrides（官方 #50631：用户级配置当前不生效）——用「移入 _disabled/ 子目录」
 // 实现：两家 CLI 都只扫一层目录，移进去立即对模型不可见，移回来即恢复，可靠且可逆。
 const CLAUDE_SKILLS = path.join(HOME, '.claude', 'skills');
 const CODEX_SKILLS = path.join(HOME, '.codex', 'skills');
 const AGENTS_SKILLS = path.join(HOME, '.agents', 'skills');
+const WORKBUDDY_SKILLS = path.join(HOME, '.workbuddy', 'skills');
 const SKILL_DESC_CUT = 1536; // Claude Code 单条 description 的截断线（官方文档）
 const SKILL_BUDGET_CHARS = 15000; // 描述总预算的社区实测估算值（窗口的 1%），仅作预警参考
 let skillsCache = { at: 0, data: null };
+
+// Skills 目录的移动/删除会改变下一次操作的校验依据；多窗口写入统一排队，避免交叉执行。
+// 队列只包最外层请求，批量内部直接调用未入队的 item helper，避免递归等待自身。
+let _skillsWriteChain = Promise.resolve();
+function queueSkillsWrite(operation) {
+  const run = _skillsWriteChain.then(operation);
+  _skillsWriteChain = run.catch(() => {});
+  return run;
+}
 
 function skillFrontmatter(txt) {
   const m = txt.match(/^---\s*\r?\n([\s\S]*?)\r?\n---/);
@@ -2051,6 +2061,7 @@ async function skillsData(opts = {}) {
   await scanSkillRoot(CLAUDE_SKILLS, 'claude', '~/.claude', items);
   await scanSkillRoot(CODEX_SKILLS, 'codex', '~/.codex', items);
   await scanSkillRoot(AGENTS_SKILLS, 'agents', '~/.agents', items);
+  await scanSkillRoot(WORKBUDDY_SKILLS, 'workbuddy', '~/.workbuddy', items);
   // Claude 插件自带的 skills
   try {
     const inst = JSON.parse(await fsp.readFile(path.join(HOME, '.claude', 'plugins', 'installed_plugins.json'), 'utf8'));
@@ -2078,6 +2089,18 @@ async function skillsData(opts = {}) {
       }
     } catch { /* */ }
   }
+
+  // 同一目录可能同时被识别为全局根和当前项目根（例如当前浏览目录恰好是 HOME）。
+  // 绝对路径才是安装项身份：保留首次扫描到的来源，避免一项在 UI 出现多行、选择计数失真。
+  const seenSkillDirs = new Set();
+  const uniqueItems = items.filter((item) => {
+    const dir = path.resolve(item.dir);
+    if (seenSkillDirs.has(dir)) return false;
+    seenSkillDirs.add(dir);
+    return true;
+  });
+  items.length = 0;
+  items.push(...uniqueItems);
 
   // 触发统计合并（按 skill 名聚合两端事件）
   const [ce, xe] = await Promise.all([
@@ -2114,7 +2137,7 @@ async function skillsData(opts = {}) {
   const data = {
     ok: true, at: Date.now(),
     items,
-    roots: { claude: CLAUDE_SKILLS, codex: CODEX_SKILLS, agents: AGENTS_SKILLS },
+    roots: { claude: CLAUDE_SKILLS, codex: CODEX_SKILLS, agents: AGENTS_SKILLS, workbuddy: WORKBUDDY_SKILLS },
     overview: {
       total: items.filter((it) => !it.residue).length,
       unique: new Set(items.filter((it) => !it.residue).map((it) => it.name)).size,
@@ -2138,12 +2161,11 @@ async function validateSkillDir(dir) {
   return { ok: true, item: it };
 }
 
-async function skillToggle(dir, enable) {
-  const v = await validateSkillDir(dir);
-  if (!v.ok) return v;
-  const it = v.item;
+async function skillToggleItem(it, enable) {
   if (it.residue) return { ok: false, error: '残留文件不能启停，请直接清理' };
-  if (!!enable === !it.disabled) return { ok: true, dir: it.dir }; // 已是目标状态
+  try { await fsp.lstat(it.dir); }
+  catch { return { ok: false, error: '文件不存在' }; }
+  if (!!enable === !it.disabled) return { ok: true, noop: true, dir: it.dir }; // 已是目标状态
   const root = it.disabled ? path.dirname(path.dirname(it.dir)) : path.dirname(it.dir);
   const dest = enable ? path.join(root, it.name) : path.join(root, '_disabled', it.name);
   try {
@@ -2160,16 +2182,109 @@ async function skillToggle(dir, enable) {
       await fsp.rename(it.dir, dest);
     }
   } catch (e) { return { ok: false, error: e.message }; }
-  skillsCache = { at: 0, data: null };
   return { ok: true, dir: dest };
+}
+
+async function skillToggle(dir, enable) {
+  const v = await validateSkillDir(dir);
+  if (!v.ok) return v;
+  const r = await skillToggleItem(v.item, enable);
+  if (r.ok) skillsCache = { at: 0, data: null };
+  return r.noop ? { ok: true, dir: r.dir } : r; // 保持原单项接口的精确响应形状
+}
+
+async function skillTrashItem(it) {
+  return trashPath(it.dir);
 }
 
 async function skillTrash(dir) {
   const v = await validateSkillDir(dir);
   if (!v.ok) return v;
-  const r = await trashPath(v.item.dir);
+  const r = await skillTrashItem(v.item);
   if (r.ok) skillsCache = { at: 0, data: null };
   return r;
+}
+
+function parseSkillBatchRequest(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: '请求体格式错误' };
+  if (!['enable', 'disable', 'uninstall'].includes(body.action)) return { ok: false, error: '未知的批量操作' };
+  if (!Array.isArray(body.dirs) || body.dirs.length === 0) return { ok: false, error: 'dirs 必须是非空数组' };
+  if (body.dirs.some((dir) => typeof dir !== 'string' || !dir.trim() || dir.includes('\0'))) {
+    return { ok: false, error: 'dirs 只能包含非空路径字符串' };
+  }
+  if (body.cwd !== undefined && (typeof body.cwd !== 'string' || !body.cwd.trim() || body.cwd.includes('\0'))) {
+    return { ok: false, error: 'cwd 必须是非空路径字符串' };
+  }
+  const seen = new Set();
+  const dirs = [];
+  for (const dir of body.dirs) {
+    const normalized = path.resolve(dir);
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    dirs.push(normalized);
+  }
+  return { ok: true, action: body.action, dirs, cwd: body.cwd === undefined ? null : path.resolve(body.cwd) };
+}
+
+async function skillBatch(parsed) {
+  const extraCwds = parsed.cwd ? [parsed.cwd] : [];
+  const snapshot = await skillsData({ force: true, extraCwds });
+  const byDir = new Map();
+  for (const item of snapshot.items || []) {
+    const normalized = path.resolve(item.dir);
+    if (!byDir.has(normalized)) byDir.set(normalized, item);
+  }
+
+  const results = [];
+  let changed = false;
+  for (const dir of parsed.dirs) {
+    const item = byDir.get(dir);
+    if (!item) {
+      results.push({ dir, status: 'failed', error: '不在本次扫描的 skills 清单里' });
+      continue;
+    }
+
+    // 快照只负责认定目标身份；每一项执行前仍检查原路径，外部移动/删除后不能凭名称猜测新位置。
+    try { await fsp.lstat(item.dir); }
+    catch {
+      results.push({ dir, status: 'failed', error: '文件不存在' });
+      continue;
+    }
+
+    if (parsed.action !== 'uninstall' && item.residue) {
+      results.push({ dir, status: 'skipped', error: '残留文件不能启停，请直接清理' });
+      continue;
+    }
+
+    if (parsed.action !== 'uninstall') {
+      const enable = parsed.action === 'enable';
+      if (enable === !item.disabled) {
+        results.push({ dir, status: 'noop' });
+        continue;
+      }
+      const r = await skillToggleItem(item, enable);
+      if (r.ok) {
+        changed = true;
+        results.push({ dir, status: r.noop ? 'noop' : 'success' });
+      } else {
+        results.push({ dir, status: 'failed', error: r.error || '操作失败' });
+      }
+      continue;
+    }
+
+    const r = await skillTrashItem(item);
+    if (r.ok) {
+      changed = true;
+      results.push({ dir, status: 'success' });
+    } else {
+      results.push({ dir, status: 'failed', error: r.error || '操作失败' });
+    }
+  }
+
+  if (changed) skillsCache = { at: 0, data: null };
+  const summary = { success: 0, noop: 0, skipped: 0, failed: 0, total: results.length };
+  for (const result of results) summary[result.status]++;
+  return { ok: true, action: parsed.action, results, summary };
 }
 
 // ---------- 内置 skill 一键安装（设置面板）----------
@@ -2443,11 +2558,16 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/skills/toggle' && req.method === 'POST') {
       const b = await readBody(req);
-      return sendJSON(res, 200, await skillToggle(b.dir, !!b.enable));
+      return sendJSON(res, 200, await queueSkillsWrite(() => skillToggle(b.dir, !!b.enable)));
     }
     if (p === '/api/skills/trash' && req.method === 'POST') {
       const b = await readBody(req);
-      return sendJSON(res, 200, await skillTrash(b.dir));
+      return sendJSON(res, 200, await queueSkillsWrite(() => skillTrash(b.dir)));
+    }
+    if (p === '/api/skills/batch' && req.method === 'POST') {
+      const parsed = parseSkillBatchRequest(await readBody(req));
+      if (!parsed.ok) return sendJSON(res, 400, { ok: false, error: parsed.error });
+      return sendJSON(res, 200, await queueSkillsWrite(() => skillBatch(parsed)));
     }
     if (p === '/api/agent-usage') {
       return sendJSON(res, 200, await agentUsage());
