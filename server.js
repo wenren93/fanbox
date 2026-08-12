@@ -2023,17 +2023,111 @@ async function agentProjects(force = false) {
 }
 
 // ---------- Skills 透视（本机 agent skills 的扫描 / 触发统计 / 健康检查 / 启停）----------
-// 扫描六类来源：~/.claude/skills、最近 agent 项目的 .claude/skills、Claude 插件、
-// ~/.codex/skills、~/.agents/skills、~/.workbuddy/skills。触发统计读 Claude/Codex 会话日志。
-// 启停不走 skillOverrides（官方 #50631：用户级配置当前不生效）——用「移入 _disabled/ 子目录」
-// 实现：两家 CLI 都只扫一层目录，移进去立即对模型不可见，移回来即恢复，可靠且可逆。
+// 扫描全局（Claude / Codex / Agents / WorkBuddy）、Claude 插件，以及最近 agent 项目中的
+// .claude/skills、.codex/skills、.workbuddy/skills。触发统计读 Claude/Codex 会话日志。
+// Claude / Codex 启停分别投影到官方 settings.json / config.toml；WorkBuddy 以及历史兼容项
+// 使用「移入 _disabled/ 子目录」。已有 Agent 会话不会被撤回，Codex 配置变更需重启 Codex。
 const CLAUDE_SKILLS = path.join(HOME, '.claude', 'skills');
 const CODEX_SKILLS = path.join(HOME, '.codex', 'skills');
 const AGENTS_SKILLS = path.join(HOME, '.agents', 'skills');
 const WORKBUDDY_SKILLS = path.join(HOME, '.workbuddy', 'skills');
+const CODEX_CONFIG = path.join(HOME, '.codex', 'config.toml');
+const CLAUDE_SETTINGS = path.join(HOME, '.claude', 'settings.json');
 const SKILL_DESC_CUT = 1536; // Claude Code 单条 description 的截断线（官方文档）
 const SKILL_BUDGET_CHARS = 15000; // 描述总预算的社区实测估算值（窗口的 1%），仅作预警参考
 let skillsCache = { at: 0, data: null };
+
+async function atomicWriteText(file, text) {
+  await fsp.mkdir(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
+  let mode = 0o600;
+  try { mode = (await fsp.stat(file)).mode & 0o777; } catch { /* 新配置默认仅当前用户可读写 */ }
+  try {
+    const fh = await fsp.open(tmp, 'w', mode);
+    try { await fh.writeFile(text); await fh.sync(); } finally { await fh.close(); }
+    await fsp.rename(tmp, file);
+  } catch (e) { await fsp.unlink(tmp).catch(() => {}); throw e; }
+}
+
+async function backupSkillConfig(file) {
+  let st;
+  try { st = await fsp.stat(file); } catch (e) { if (e.code === 'ENOENT') return null; throw e; }
+  const dir = path.join(CONFIG_DIR, 'backups');
+  await fsp.mkdir(dir, { recursive: true });
+  const owner = path.basename(path.dirname(file)).replace(/^\./, '');
+  const name = `${owner}-${path.basename(file)}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}.bak`;
+  const dest = path.join(dir, name);
+  await fsp.copyFile(file, dest);
+  await fsp.chmod(dest, st.mode & 0o777);
+  return dest;
+}
+
+function tomlStringValue(raw) {
+  const value = raw.trim();
+  if (value.startsWith('"')) {
+    let escaped = false;
+    for (let i = 1; i < value.length; i++) {
+      if (!escaped && value[i] === '"') {
+        try { return JSON.parse(value.slice(0, i + 1)); } catch { return null; }
+      }
+      escaped = !escaped && value[i] === '\\';
+      if (value[i] !== '\\') escaped = false;
+    }
+  }
+  if (value.startsWith("'")) {
+    const end = value.indexOf("'", 1);
+    if (end >= 0) return value.slice(1, end);
+  }
+  return null;
+}
+
+function codexSkillConfigBlocks(text) {
+  const headers = [...text.matchAll(/^\s*\[\[skills\.config\]\]\s*(?:#.*)?$/gm)];
+  return headers.map((header) => {
+    const start = header.index;
+    const nextHeader = text.slice(header.index + header[0].length).search(/^\s*\[/m);
+    const end = nextHeader < 0 ? text.length : header.index + header[0].length + nextHeader;
+    const body = text.slice(start, end);
+    const pathMatch = body.match(/^\s*path\s*=\s*(.+)$/m);
+    const enabledMatch = body.match(/^\s*enabled\s*=\s*(true|false)\s*(?:#.*)?$/m);
+    return { start, end, body, path: pathMatch ? tomlStringValue(pathMatch[1]) : null, enabled: enabledMatch ? enabledMatch[1] === 'true' : true };
+  });
+}
+
+async function codexDisabledSkillFiles() {
+  let text;
+  try { text = await fsp.readFile(CODEX_CONFIG, 'utf8'); } catch { return new Set(); }
+  const states = new Map();
+  for (const block of codexSkillConfigBlocks(text)) if (block.path) states.set(path.resolve(block.path), block.enabled);
+  return new Set([...states].filter(([, enabled]) => !enabled).map(([file]) => file));
+}
+
+async function setCodexSkillEnabled(skillFile, enable) {
+  let text = '';
+  try { text = await fsp.readFile(CODEX_CONFIG, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  const target = path.resolve(skillFile);
+  const blocks = codexSkillConfigBlocks(text);
+  const matches = blocks.filter((block) => block.path && path.resolve(block.path) === target);
+  if (matches.length) {
+    for (const block of matches.slice().reverse()) {
+      let replacement;
+      if (/^\s*enabled\s*=/m.test(block.body)) {
+        replacement = block.body.replace(/^(\s*enabled\s*=\s*)(true|false)(\s*(?:#.*)?)$/m, `$1${enable ? 'true' : 'false'}$3`);
+      } else {
+        replacement = block.body.replace(/\s*$/, '') + `\nenabled = ${enable ? 'true' : 'false'}\n`;
+      }
+      text = text.slice(0, block.start) + replacement + text.slice(block.end);
+    }
+  } else if (!enable) {
+    text = text.replace(/\s*$/, '');
+    if (text) text += '\n\n';
+    text += `[[skills.config]]\npath = ${JSON.stringify(target)}\nenabled = false\n`;
+  } else {
+    return;
+  }
+  await backupSkillConfig(CODEX_CONFIG);
+  await atomicWriteText(CODEX_CONFIG, text);
+}
 
 // Skills 目录的移动/删除会改变下一次操作的校验依据；多窗口写入统一排队，避免交叉执行。
 // 队列只包最外层请求，批量内部直接调用未入队的 item helper，避免递归等待自身。
@@ -2048,21 +2142,74 @@ function skillFrontmatter(txt) {
   const m = txt.match(/^---\s*\r?\n([\s\S]*?)\r?\n---/);
   if (!m) return null;
   const fm = m[1];
+  const nm = fm.match(/(?:^|\r?\n)name\s*:\s*([^\r\n]+)/);
+  let name = nm ? nm[1].trim() : '';
+  name = name.replace(/^(['"])([\s\S]*)\1$/, '$2').trim();
   // 不用 m 标志：$ 必须是整段 frontmatter 的末尾，否则块标量（description: >- 换行缩进正文）会被截成空
   const dm = fm.match(/(?:^|\r?\n)description\s*:\s*([\s\S]*?)(?=\r?\n[\w-]+\s*:|\s*$)/);
   let desc = dm ? dm[1].trim() : '';
   desc = desc.replace(/^[|>][+-]?\s*/, '').replace(/^(['"])([\s\S]*)\1$/, '$2').trim();
-  return { desc };
+  return { name, desc };
 }
 
-async function scanSkillRoot(root, source, label, out, disabled = false) {
+async function claudeSkillOverrides() {
+  try {
+    const settings = JSON.parse(await fsp.readFile(CLAUDE_SETTINGS, 'utf8'));
+    return settings && typeof settings.skillOverrides === 'object' && !Array.isArray(settings.skillOverrides)
+      ? settings.skillOverrides : {};
+  } catch { return {}; }
+}
+
+async function setClaudeSkillEnabled(skillName, enable) {
+  let settings = {};
+  try {
+    const text = await fsp.readFile(CLAUDE_SETTINGS, 'utf8');
+    settings = JSON.parse(text);
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) throw new Error('Claude settings.json 顶层必须是对象');
+  } catch (e) {
+    if (e.code !== 'ENOENT') throw new Error(`无法更新 Claude settings.json：${e.message}`);
+  }
+  const overrides = settings.skillOverrides && typeof settings.skillOverrides === 'object' && !Array.isArray(settings.skillOverrides)
+    ? { ...settings.skillOverrides } : {};
+  const cfg = await readConfig();
+  const remembered = cfg.skillPreviousOverrides && typeof cfg.skillPreviousOverrides === 'object'
+    ? cfg.skillPreviousOverrides[skillName] : undefined;
+  if (enable) {
+    if (overrides[skillName] === 'off') {
+      if (remembered && remembered.present) overrides[skillName] = remembered.value;
+      else delete overrides[skillName];
+    }
+  } else {
+    const present = Object.prototype.hasOwnProperty.call(overrides, skillName);
+    if (overrides[skillName] !== 'off') {
+      await updateConfig((fanbox) => {
+        if (!fanbox.skillPreviousOverrides || typeof fanbox.skillPreviousOverrides !== 'object') fanbox.skillPreviousOverrides = {};
+        fanbox.skillPreviousOverrides[skillName] = { present, value: present ? overrides[skillName] : null };
+      });
+    }
+    overrides[skillName] = 'off';
+  }
+  settings.skillOverrides = overrides;
+  await backupSkillConfig(CLAUDE_SETTINGS);
+  await atomicWriteText(CLAUDE_SETTINGS, JSON.stringify(settings, null, 2) + '\n');
+  if (enable && remembered) {
+    await updateConfig((fanbox) => {
+      if (fanbox.skillPreviousOverrides && typeof fanbox.skillPreviousOverrides === 'object') {
+        delete fanbox.skillPreviousOverrides[skillName];
+        if (!Object.keys(fanbox.skillPreviousOverrides).length) delete fanbox.skillPreviousOverrides;
+      }
+    });
+  }
+}
+
+async function scanSkillRoot(root, source, label, out, disabled = false, meta = null) {
   let names;
   try { names = await fsp.readdir(root, { withFileTypes: true }); } catch { return; }
   for (const n of names) {
     if (n.name.startsWith('.') || n.name === '_archive' || n.name === '_backups') continue;
     const fp = path.join(root, n.name);
     if (n.name === '_disabled') {
-      if (n.isDirectory() && !disabled) await scanSkillRoot(fp, source, label, out, true);
+      if (n.isDirectory() && !disabled) await scanSkillRoot(fp, source, label, out, true, meta);
       continue;
     }
     let isDir = n.isDirectory();
@@ -2071,11 +2218,11 @@ async function scanSkillRoot(root, source, label, out, disabled = false) {
     }
     if (!isDir) {
       if (/\.md$/i.test(n.name)) continue; // 根目录的说明文档不算残留
-      out.push({ name: n.name, dir: fp, source, label, disabled, residue: true, desc: '', descLen: 0, mtime: 0,
+      out.push({ name: n.name, dir: fp, source, label, ...(meta || {}), disabled, residue: true, desc: '', descLen: 0, mtime: 0,
         issues: ['残留文件——不是有效 skill，只占目录'] });
       continue;
     }
-    const item = { name: n.name, dir: fp, source, label, disabled, residue: false, desc: '', descLen: 0, mtime: 0, issues: [] };
+    const item = { name: n.name, dir: fp, source, label, ...(meta || {}), disabled, residue: false, desc: '', descLen: 0, mtime: 0, issues: [] };
     try {
       const sm = path.join(fp, 'SKILL.md');
       const st = await fsp.stat(sm);
@@ -2088,6 +2235,15 @@ async function scanSkillRoot(root, source, label, out, disabled = false) {
         head = buf.toString('utf8', 0, bytesRead);
       } finally { await fh.close(); }
       const fm = skillFrontmatter(head);
+      item.skillName = fm && fm.name ? fm.name : item.name;
+      const agent = source === 'project' && meta ? meta.projectAgent : source;
+      item.invocationMode = agent === 'claude' && /(?:^|\r?\n)disable-model-invocation\s*:\s*true\s*(?:\r?\n|$)/i.test(head) ? 'manual' : 'auto';
+      if (agent === 'codex' || agent === 'agents') {
+        try {
+          const openaiYaml = await fsp.readFile(path.join(fp, 'agents', 'openai.yaml'), 'utf8');
+          if (/(?:^|\r?\n)\s*allow_implicit_invocation\s*:\s*false\s*(?:\r?\n|$)/i.test(openaiYaml)) item.invocationMode = 'manual';
+        } catch { /* 没有 Codex 自动调用策略 */ }
+      }
       if (!fm || !fm.desc) {
         item.issues.push('SKILL.md 缺 frontmatter description——模型的技能清单里看不到它，只能手动调用');
       } else {
@@ -2098,6 +2254,7 @@ async function scanSkillRoot(root, source, label, out, disabled = false) {
         }
       }
     } catch {
+      item.skillName = item.name;
       item.residue = true;
       item.issues.push('缺 SKILL.md——不是有效 skill');
     }
@@ -2223,13 +2380,31 @@ async function skillsData(opts = {}) {
       }
     }
   } catch { /* 没装插件 */ }
+  // 项目级 skills 仍统一归入 project 筛选，同时带 projectAgent 供 UI 明确区分归属。
+  const scanProjectSkills = async (cwd, projectName) => {
+    const roots = [
+      ['.claude', 'Claude', 'claude'],
+      ['.codex', 'Codex', 'codex'],
+      ['.workbuddy', 'WorkBuddy', 'workbuddy'],
+    ];
+    for (const [hiddenDir, agentLabel, projectAgent] of roots) {
+      await scanSkillRoot(
+        path.join(cwd, hiddenDir, 'skills'),
+        'project',
+        `${agentLabel} · ${projectName}`,
+        items,
+        false,
+        { projectAgent, projectName },
+      );
+    }
+  };
   // 最近 agent 项目的项目级 skills
   const seenCwds = new Set();
   try {
     const pj = await agentProjects(force);
     for (const p of pj.projects || []) {
       seenCwds.add(p.path);
-      await scanSkillRoot(path.join(p.path, '.claude', 'skills'), 'project', p.name, items);
+      await scanProjectSkills(p.path, p.name);
     }
   } catch { /* */ }
   // 额外追加扫描当前浏览目录（不在最近12个项目里也能看到）
@@ -2237,7 +2412,7 @@ async function skillsData(opts = {}) {
     if (!cwd || seenCwds.has(cwd)) continue;
     try {
       if ((await fsp.stat(cwd)).isDirectory()) {
-        await scanSkillRoot(path.join(cwd, '.claude', 'skills'), 'project', path.basename(cwd), items);
+        await scanProjectSkills(cwd, path.basename(cwd));
       }
     } catch { /* */ }
   }
@@ -2253,6 +2428,23 @@ async function skillsData(opts = {}) {
   });
   items.length = 0;
   items.push(...uniqueItems);
+
+  // Codex 官方按 SKILL.md 绝对路径记录启停；旧 _disabled 目录仍保留为兼容状态。
+  const [codexDisabled, claudeOverrides] = await Promise.all([codexDisabledSkillFiles(), claudeSkillOverrides()]);
+  for (const it of items) {
+    const agent = it.source === 'project' ? it.projectAgent : it.source;
+    it.toggleStrategy = it.source === 'plugin' ? 'plugin'
+      : agent === 'claude' ? 'claude-settings'
+        : agent === 'codex' || agent === 'agents' ? 'codex-config' : 'directory';
+    if (it.toggleStrategy === 'codex-config' && codexDisabled.has(path.resolve(it.dir, 'SKILL.md'))) it.disabled = true;
+    if (it.toggleStrategy === 'claude-settings') {
+      it.toggleScope = 'claude-name';
+      const override = claudeOverrides[it.skillName || it.name];
+      if (override === 'off') it.disabled = true;
+      else if (override === 'user-invocable-only' || override === 'name-only') it.invocationMode = 'manual';
+    }
+    if (it.toggleStrategy === 'plugin') it.toggleSupported = false;
+  }
 
   // 触发统计合并（按 skill 名聚合两端事件）
   const [ce, xe] = await Promise.all([
@@ -2270,7 +2462,7 @@ async function skillsData(opts = {}) {
   for (const it of items) {
     if (it.residue) continue;
     const arr = copies.get(it.name) || [];
-    arr.push(it.label + '/skills' + (it.disabled ? '/_disabled' : ''));
+    arr.push(it.label + '/skills' + (it.dir.split(path.sep).includes('_disabled') ? '/_disabled' : ''));
     copies.set(it.name, arr);
   }
   for (const it of items) {
@@ -2315,9 +2507,20 @@ async function validateSkillDir(dir) {
 
 async function skillToggleItem(it, enable) {
   if (it.residue) return { ok: false, error: '残留文件不能启停，请直接清理' };
+  if (it.toggleStrategy === 'plugin') return { ok: false, error: 'Claude 插件 Skill 请通过插件管理启停' };
   try { await fsp.lstat(it.dir); }
   catch { return { ok: false, error: '文件不存在' }; }
   if (!!enable === !it.disabled) return { ok: true, noop: true, dir: it.dir }; // 已是目标状态
+  if (it.toggleStrategy === 'claude-settings' && !it.dir.split(path.sep).includes('_disabled')) {
+    try { await setClaudeSkillEnabled(it.skillName || it.name, enable); }
+    catch (e) { return { ok: false, error: e.message }; }
+    return { ok: true, dir: it.dir };
+  }
+  if (it.toggleStrategy === 'codex-config' && !it.dir.split(path.sep).includes('_disabled')) {
+    try { await setCodexSkillEnabled(path.join(it.dir, 'SKILL.md'), enable); }
+    catch (e) { return { ok: false, error: e.message }; }
+    return { ok: true, dir: it.dir, restartRequired: 'codex' };
+  }
   const root = it.disabled ? path.dirname(path.dirname(it.dir)) : path.dirname(it.dir);
   const dest = enable ? path.join(root, it.name) : path.join(root, '_disabled', it.name);
   try {
@@ -2333,16 +2536,25 @@ async function skillToggleItem(it, enable) {
     } else {
       await fsp.rename(it.dir, dest);
     }
+    // 兼容旧版物理禁用：恢复目录时，同时清理可能并存的官方禁用状态，避免刷新后仍显示停用。
+    if (enable && it.toggleStrategy === 'claude-settings') await setClaudeSkillEnabled(it.skillName || it.name, true);
+    if (enable && it.toggleStrategy === 'codex-config') await setCodexSkillEnabled(path.join(dest, 'SKILL.md'), true);
   } catch (e) { return { ok: false, error: e.message }; }
-  return { ok: true, dir: dest };
+  return { ok: true, dir: dest, ...(enable && it.toggleStrategy === 'codex-config' ? { restartRequired: 'codex' } : {}) };
 }
 
 async function skillToggle(dir, enable) {
   const v = await validateSkillDir(dir);
   if (!v.ok) return v;
+  const snapshot = skillsCache.data;
   const r = await skillToggleItem(v.item, enable);
   if (r.ok) skillsCache = { at: 0, data: null };
-  return r.noop ? { ok: true, dir: r.dir } : r; // 保持原单项接口的精确响应形状
+  if (r.noop) return { ok: true, dir: r.dir };
+  if (r.ok && v.item.toggleScope === 'claude-name') {
+    const affected = (snapshot ? snapshot.items : []).filter((it) => it.toggleScope === 'claude-name' && (it.skillName || it.name) === (v.item.skillName || v.item.name)).length;
+    return { ...r, affected: Math.max(1, affected) };
+  }
+  return r;
 }
 
 async function skillTrashItem(it) {
@@ -2388,6 +2600,7 @@ async function skillBatch(parsed) {
   }
 
   const results = [];
+  const restartRequired = new Set();
   let changed = false;
   for (const dir of parsed.dirs) {
     const item = byDir.get(dir);
@@ -2417,6 +2630,7 @@ async function skillBatch(parsed) {
       const r = await skillToggleItem(item, enable);
       if (r.ok) {
         changed = true;
+        if (r.restartRequired) restartRequired.add(r.restartRequired);
         results.push({ dir, status: r.noop ? 'noop' : 'success' });
       } else {
         results.push({ dir, status: 'failed', error: r.error || '操作失败' });
@@ -2436,7 +2650,7 @@ async function skillBatch(parsed) {
   if (changed) skillsCache = { at: 0, data: null };
   const summary = { success: 0, noop: 0, skipped: 0, failed: 0, total: results.length };
   for (const result of results) summary[result.status]++;
-  return { ok: true, action: parsed.action, results, summary };
+  return { ok: true, action: parsed.action, results, summary, restartRequired: [...restartRequired] };
 }
 
 // ---------- 内置 skill 一键安装（设置面板）----------

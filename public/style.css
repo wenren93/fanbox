@@ -1378,7 +1378,11 @@ body { transition: background-color 0.28s ease, color 0.28s ease; }
 .sk-search input::placeholder { color: var(--text-faint); }
 .sk-search input::-webkit-search-cancel-button { cursor: pointer; opacity: 0.55; }
 .sk-search:has(input:disabled) { opacity: 0.5; cursor: wait; }
-.sk-chip:disabled, .sk-sort:disabled, .sk-batch-toggle:disabled { opacity: 0.5; cursor: wait; }
+.sk-chip:disabled, .sk-sort:disabled, .sk-refresh:disabled, .sk-batch-toggle:disabled { opacity: 0.5; cursor: wait; }
+.sk-refresh { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; font-family: var(--font-ui); }
+.sk-refresh svg { flex: none; }
+.sk-refresh.is-refreshing svg { animation: skRefreshSpin 0.8s linear infinite; }
+@keyframes skRefreshSpin { to { transform: rotate(360deg); } }
 .sk-batch-toggle { white-space: nowrap; font-family: var(--font-ui); }
 .sk-batch-toggle.active { background: var(--accent-soft); color: var(--accent); font-weight: 650; }
 .sk-batch-bar { min-height: 48px; display: flex; align-items: center; gap: 14px; margin: 1px 0 10px; padding: 7px 10px 7px 0; border: 1px solid var(--rule); border-left: 4px solid var(--accent); border-radius: 3px 8px 8px 3px; background: linear-gradient(90deg, var(--accent-soft), var(--bg-2) 30%); box-shadow: 0 5px 18px rgba(46, 35, 25, 0.04); }
@@ -1426,6 +1430,8 @@ body { transition: background-color 0.28s ease, color 0.28s ease; }
 .sk-src.codex { color: #3b8a6e; border-color: #3b8a6e55; }
 .sk-src.workbuddy { color: #5573a6; border-color: #5573a655; }
 .sk-src.proj { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.sk-src.proj.project-codex { color: #3b8a6e; border-color: #3b8a6e66; }
+.sk-src.proj.project-workbuddy { color: #5573a6; border-color: #5573a666; }
 .sk-src.plugin { color: #8a6db1; border-color: #8a6db155; }
 .sk-hits { text-align: right; font-family: var(--font-display); font-size: 17px; font-variant-numeric: tabular-nums; font-weight: 550; }
 .sk-hits.zero { color: var(--text-faint); font-size: 12px; font-family: var(--font-ui); }

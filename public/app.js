@@ -4736,7 +4736,7 @@ const usagePanel = {
 // ---------- Skills 透视（主区全屏视图）----------
 const skillsView = {
   data: null, filter: 'all', sort: 'hits', query: '', open: new Set(),
-  batchMode: false, selected: new Set(), busy: false, batchResult: null,
+  batchMode: false, selected: new Set(), busy: false, refreshing: false, batchResult: null,
   async show() {
     state.skillsMode = true; state.recentMode = false; state.cursor = -1;
     this.batchMode = false; this.selected.clear(); this.busy = false; this.batchResult = null;
@@ -4755,9 +4755,26 @@ const skillsView = {
       return false;
     }
   },
+  async refreshScan() {
+    if (this.busy || this.refreshing) return;
+    this.refreshing = true; this.render();
+    try {
+      this.data = await apiPost('/api/skills/refresh', { cwd: state.cwd });
+      const dirs = new Set((this.data.items || []).map((x) => x.dir));
+      this.selected = new Set([...this.selected].filter((dir) => dirs.has(dir)));
+      this.open = new Set([...this.open].filter((dir) => dirs.has(dir)));
+      toast(`已刷新，共发现 ${this.data.overview.total} 个 Skill 安装项`);
+    } catch (err) {
+      toast('刷新失败：' + (err.message || '请求失败'), true);
+    } finally {
+      this.refreshing = false;
+      if (state.skillsMode && this.data) this.render();
+    }
+  },
   srcTag(it) {
     const cls = { claude: '', codex: ' codex', agents: ' codex', workbuddy: ' workbuddy', plugin: ' plugin', project: ' proj' }[it.source] || '';
-    return `<span class="sk-src${cls}">${escapeHtml(it.label)}</span>`;
+    const agentCls = it.source === 'project' && it.projectAgent ? ` project-${it.projectAgent}` : '';
+    return `<span class="sk-src${cls}${agentCls}" title="${escapeHtml(it.label)}">${escapeHtml(it.label)}</span>`;
   },
   ago(t) {
     if (!t) return '—';
@@ -4775,7 +4792,7 @@ const skillsView = {
     else if (f === 'codex') arr = arr.filter((x) => x.source === 'codex' || x.source === 'agents');
     else if (f !== 'all') arr = arr.filter((x) => x.source === f);
     const q = this.query.trim().toLocaleLowerCase();
-    if (q) arr = arr.filter((x) => [x.name, x.desc, x.label, x.dir, ...(x.issues || [])].join('\n').toLocaleLowerCase().includes(q));
+    if (q) arr = arr.filter((x) => [x.name, x.desc, x.label, x.projectAgent, x.projectName, x.dir, ...(x.issues || [])].filter(Boolean).join('\n').toLocaleLowerCase().includes(q));
     const ho = (x) => (x.residue || x.issues.length ? 0 : x.disabled ? 1 : 2);
     if (this.sort === 'hits') arr.sort((a, b) => b.hits - a.hits || b.last - a.last || a.name.localeCompare(b.name));
     if (this.sort === 'recent') arr.sort((a, b) => b.last - a.last || b.hits - a.hits);
@@ -4787,8 +4804,8 @@ const skillsView = {
     const selected = (this.data.items || []).filter((x) => this.selected.has(x.dir));
     return {
       total: this.selected.size,
-      enable: selected.filter((x) => !x.residue && x.disabled).length,
-      disable: selected.filter((x) => !x.residue && !x.disabled).length,
+      enable: selected.filter((x) => !x.residue && x.toggleSupported !== false && x.disabled).length,
+      disable: selected.filter((x) => !x.residue && x.toggleSupported !== false && !x.disabled).length,
       uninstall: this.selected.size,
     };
   },
@@ -4823,6 +4840,7 @@ const skillsView = {
       this.batchResult = { action, summary, failures };
       const verb = { enable: '启用', disable: '停用', uninstall: '卸载' }[action];
       if (failures.length) toast(`${verb}完成，${failures.length} 项失败`, true);
+      else if ((r.restartRequired || []).includes('codex')) toast(`批量${verb}完成；重启 Codex 后生效`);
       else toast(`批量${verb}完成`);
     } catch (e) {
       this.batchResult = { action, summary: { success: 0, noop: 0, skipped: 0, failed: dirs.length, total: dirs.length }, failures: dirs.map((dir) => ({ dir, ...(before.get(dir) || {}), error: e.message || '请求失败' })) };
@@ -4842,7 +4860,8 @@ const skillsView = {
     const cnt = (fn) => items.filter(fn).length;
     const over = o.budgetChars > o.budgetLimit;
     const ratio = (o.budgetChars / o.budgetLimit).toFixed(1);
-    let h = `<div class="sk-wrap ${this.batchMode ? 'is-batch' : ''} ${this.busy ? 'is-busy' : ''}">
+    const locked = this.busy || this.refreshing;
+    let h = `<div class="sk-wrap ${this.batchMode ? 'is-batch' : ''} ${locked ? 'is-busy' : ''}">
       <div class="sk-stats">
         <div class="sk-stat"><div class="sk-num">${o.unique}<small>/${o.total}</small></div><div class="sk-lbl">全部 skills</div><div class="sk-note">唯一 / 含跨端副本</div></div>
         <div class="sk-stat"><div class="sk-num good">${o.active}</div><div class="sk-lbl">45 天内活跃</div><div class="sk-note">共 ${o.totalHits} 次触发</div></div>
@@ -4857,16 +4876,16 @@ const skillsView = {
       <div class="sk-tools">
         <div class="sk-chips">
           ${[['all', '全部', items.length],
-             ['claude', 'Claude 全局', cnt((x) => x.source === 'claude')],
+             ['claude', 'Claude', cnt((x) => x.source === 'claude')],
              ['codex', 'Codex', cnt((x) => x.source === 'codex' || x.source === 'agents')],
              ['workbuddy', 'WorkBuddy', cnt((x) => x.source === 'workbuddy')],
              ['project', '项目', cnt((x) => x.source === 'project')],
              ['plugin', '插件', cnt((x) => x.source === 'plugin')],
              ['dup', '跨端重复', cnt((x) => x.copies)],
              ['bad', '仅看问题', o.issues]]
-            .map(([k, lbl, n]) => `<button class="sk-chip ${this.filter === k ? 'on' : ''}" data-f="${k}" ${this.busy ? 'disabled' : ''}>${lbl} <i>${n}</i></button>`).join('')}
+            .map(([k, lbl, n]) => `<button class="sk-chip ${this.filter === k ? 'on' : ''}" data-f="${k}" ${locked ? 'disabled' : ''}>${lbl} <i>${n}</i></button>`).join('')}
         </div>
-        <select class="sk-sort" id="sk-sort" ${this.busy ? 'disabled' : ''}>
+        <select class="sk-sort" id="sk-sort" ${locked ? 'disabled' : ''}>
           <option value="hits" ${this.sort === 'hits' ? 'selected' : ''}>按触发次数</option>
           <option value="recent" ${this.sort === 'recent' ? 'selected' : ''}>按最后触发</option>
           <option value="health" ${this.sort === 'health' ? 'selected' : ''}>按健康度</option>
@@ -4874,9 +4893,12 @@ const skillsView = {
         </select>
         <div class="sk-search ${this.query ? 'has-query' : ''}" role="search">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
-          <input type="search" id="sk-search" value="${escapeHtml(this.query)}" placeholder="搜索 Skill" aria-label="搜索 Skill 名称、描述、来源或路径" autocomplete="off" spellcheck="false" ${this.busy ? 'disabled' : ''}>
+          <input type="search" id="sk-search" value="${escapeHtml(this.query)}" placeholder="搜索 Skill" aria-label="搜索 Skill 名称、描述、来源或路径" autocomplete="off" spellcheck="false" ${locked ? 'disabled' : ''}>
         </div>
-        <button class="ghost-btn sk-batch-toggle ${this.batchMode ? 'active' : ''}" id="sk-batch-toggle" ${this.busy ? 'disabled' : ''}>${this.batchMode ? '退出批量管理' : '批量管理'}</button>
+        <button class="ghost-btn sk-refresh ${this.refreshing ? 'is-refreshing' : ''}" id="sk-refresh" title="重新扫描本机 Skills" aria-label="重新扫描本机 Skills" ${this.busy || this.refreshing ? 'disabled' : ''}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/></svg><span>${this.refreshing ? '刷新中…' : '刷新'}</span>
+        </button>
+        <button class="ghost-btn sk-batch-toggle ${this.batchMode ? 'active' : ''}" id="sk-batch-toggle" ${locked ? 'disabled' : ''}>${this.batchMode ? '退出批量管理' : '批量管理'}</button>
       </div>
       ${this.batchMode ? `<section class="sk-batch-bar" aria-label="批量操作">
         <div class="sk-batch-count"><span>本次选择</span><b>${batch.total}</b><em>项</em></div>
@@ -4900,11 +4922,18 @@ const skillsView = {
       }
       const key = it.dir;
       const dot = it.issues.length ? (it.residue || it.issues.some((s) => s.includes('缺')) ? 'bad' : 'warn') : 'ok';
+      const toggleTitles = {
+        plugin: 'Claude 插件 Skill 请通过插件管理启停',
+        'claude-settings': it.disabled ? '启用（更新 Claude Settings）' : '停用（更新 Claude Settings）',
+        'codex-config': it.disabled ? '启用（更新 Codex config.toml，重启 Codex 后生效）' : '停用（更新 Codex config.toml，重启 Codex 后生效）',
+        directory: it.disabled ? '启用（移回 skills 目录）' : '停用（移入 _disabled/，后续会话将不再发现）',
+      };
+      const toggleTitle = toggleTitles[it.toggleStrategy] || toggleTitles.directory;
       h += `<div class="sk-row ${this.open.has(key) ? 'expanded' : ''} ${it.disabled ? 'off' : ''} ${this.selected.has(key) ? 'selected' : ''}" data-dir="${escapeHtml(key)}" draggable="${this.busy ? 'false' : 'true'}">
         ${this.batchMode ? `<label class="sk-check-cell" title="选择 ${escapeHtml(it.name)}"><input type="checkbox" data-act="select" aria-label="选择 ${escapeHtml(it.name)}" ${this.selected.has(key) ? 'checked' : ''} ${this.busy ? 'disabled' : ''}></label>` : ''}
         <span class="sk-dot ${dot}"></span>
         <div class="sk-name">
-          <div class="nm">${escapeHtml(it.name)}${it.copies ? ` <i class="sk-dup">${it.copies.length} 处副本</i>` : ''}${it.disabled ? ' <i class="sk-offtag">已停用</i>' : ''}</div>
+          <div class="nm">${escapeHtml(it.name)}${it.copies ? ` <i class="sk-dup">${it.copies.length} 处副本</i>` : ''}${it.disabled ? ' <i class="sk-offtag">已停用</i>' : it.invocationMode === 'manual' ? ' <i class="sk-offtag">仅手动</i>' : ''}</div>
           <div class="ds">${escapeHtml(it.issues[0] || it.desc || '')}</div>
         </div>
         ${this.srcTag(it)}
@@ -4912,7 +4941,8 @@ const skillsView = {
         <div class="sk-last">${this.ago(it.last)}</div>
         ${it.residue
           ? '<div class="sk-last r">残留</div>'
-          : `<label class="sk-switch ${it.disabled ? '' : 'on'} ${this.busy ? 'locked' : ''}" data-act="toggle" title="${it.disabled ? '启用（移回 skills 目录）' : '停用（移入 _disabled/，后续会话将不再发现）'}"><i></i></label>`}
+          : it.toggleSupported === false ? `<span class="sk-last r" title="${toggleTitle}">插件管理</span>`
+          : `<label class="sk-switch ${it.disabled ? '' : 'on'} ${this.busy ? 'locked' : ''}" data-act="toggle" title="${toggleTitle}"><i></i></label>`}
         <span class="sk-chev">▸</span>
       </div>`;
       if (this.open.has(key)) {
@@ -4943,6 +4973,8 @@ const skillsView = {
     this.bind(area);
   },
   bind(area) {
+    const refresh = area.querySelector('#sk-refresh');
+    if (refresh) refresh.onclick = () => this.refreshScan();
     const batchToggle = area.querySelector('#sk-batch-toggle');
     if (batchToggle) batchToggle.onclick = () => {
       if (this.busy) return;
@@ -5002,10 +5034,12 @@ const skillsView = {
           this.busy = true; this.render();
           try {
             const r = await apiPost('/api/skills/toggle', { dir, enable: it.disabled });
-            if (r.ok) {
-              if (this.selected.has(dir) && r.dir && r.dir !== dir) { this.selected.delete(dir); this.selected.add(r.dir); }
-              toast(it.disabled ? '已启用 ' + it.name : '已停用 ' + it.name + '（文件还在，随时可启用）');
-            }
+                if (r.ok) {
+                  if (this.selected.has(dir) && r.dir && r.dir !== dir) { this.selected.delete(dir); this.selected.add(r.dir); }
+                  const done = it.disabled ? '已启用 ' + it.name : '已停用 ' + it.name + '（文件还在，随时可启用）';
+                  const sameName = r.affected > 1 ? `；同名 Claude 安装项共 ${r.affected} 个已同步` : '';
+                  toast((r.restartRequired === 'codex' ? done + '；重启 Codex 后生效' : done) + sameName);
+                }
             else toast('操作失败：' + (r.error || ''), true);
           } catch (err) { toast('操作失败：' + (err.message || '请求失败'), true); }
           finally { this.busy = false; await this.reload(); }
