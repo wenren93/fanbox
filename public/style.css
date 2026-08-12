@@ -1407,6 +1407,12 @@ body { transition: background-color 0.28s ease, color 0.28s ease; }
 .sk-disc-pop b { color:var(--text-dim); font:550 16px var(--font-display); }
 .sk-disc-actions { display:flex; gap:6px; }
 .sk-disc-actions button,.sk-disc-confirm-actions button,.sk-disc-inspection-head button { white-space:nowrap; font:11.5px var(--font-ui); }
+.sk-disc-actions button.primary,.sk-disc-confirm-actions button.primary { display:inline-flex; align-items:center; border:1px solid var(--accent); border-radius:7px; padding:5px 11px; background:var(--accent); color:var(--accent-ink); font-weight:600; cursor:pointer; }
+.sk-disc-actions button.primary:hover:not(:disabled),.sk-disc-confirm-actions button.primary:hover:not(:disabled) { filter:brightness(1.06); }
+.sk-disc-actions .sk-disc-icon-btn,.sk-disc-confirm-actions .sk-disc-icon-btn { width:32px; height:30px; justify-content:center; padding:0; }
+.sk-disc-icon-btn svg { flex:none; }
+.sk-disc-spinner { display:inline-flex; animation:sk-disc-spin .85s linear infinite; }
+@keyframes sk-disc-spin { to { transform:rotate(360deg); } }
 .sk-disc-reason { grid-column:1/-1; padding-top:8px; border-top:1px dashed var(--rule); color:var(--text-faint); font-size:10.5px; }
 .sk-disc-inspection { margin-top:15px; padding:18px; border:1px solid var(--border); border-radius:11px; background:var(--bg-2); box-shadow:0 12px 34px rgba(30,24,18,.06); }
 .sk-disc-inspection-head { display:flex; justify-content:space-between; gap:20px; }

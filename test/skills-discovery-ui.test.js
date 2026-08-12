@@ -9,6 +9,10 @@ function source() {
   return fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
 }
 
+function styles() {
+  return fs.readFileSync(path.join(__dirname, '..', 'public', 'style.css'), 'utf8');
+}
+
 test('Persistent local-runtime copy does not claim Discover never sends data outbound', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
   const i18n = fs.readFileSync(path.join(__dirname, '..', 'public', 'i18n-dict.js'), 'utf8');
@@ -49,6 +53,20 @@ test('Discovery inspection progress belongs only to the selected result', () => 
   assert.match(js, /entry\.id\s*===\s*d\.inspectingEntryId/);
   assert.match(js, /正在固定来源并检查内容/);
   assert.doesNotMatch(js, /\$\{d\.inspecting\s*\?\s*'检查中…'/);
+});
+
+test('Discovery install actions use the themed primary button style', () => {
+  const css = styles();
+  assert.match(css, /\.sk-disc-actions\s+button\.primary[^{]*\{[^}]*border-radius:\s*7px[^}]*padding:\s*5px 11px[^}]*background:\s*var\(--accent\)/s);
+  assert.match(css, /\.sk-disc-confirm-actions\s+button\.primary[^{]*\{[^}]*border-radius:\s*7px[^}]*padding:\s*5px 11px[^}]*background:\s*var\(--accent\)/s);
+});
+
+test('Discovery actions use accessible icon buttons instead of visible text labels', () => {
+  const js = source();
+  assert.match(js, /class="ghost-btn sk-disc-icon-btn"[^>]*aria-label="打开来源"[^>]*title="打开来源"[^>]*>\$\{ic\('link'/);
+  assert.match(js, /class="primary sk-disc-icon-btn"[^>]*aria-label="\$\{escapeHtml\(inspectLabel\)\}"/);
+  assert.match(js, /data-disc-act="install"[^>]*aria-label="\$\{escapeHtml\(installLabel\)\}"/);
+  assert.match(js, /sk-disc-spinner/);
 });
 
 test('Installation confirmation supports four controlled targets and enhanced acknowledgement', () => {

@@ -5274,6 +5274,7 @@ const skillsView = {
     const prerequisite = d.installationPrerequisite || { ok: true };
     const canInspect = prerequisite.ok !== false && !d.searching && !d.cached && d.installable !== false && entry.installable !== false;
     const isInspecting = d.inspecting && entry.id === d.inspectingEntryId;
+    const inspectLabel = isInspecting ? '正在检查' : (entry.actionLabel || '检查并安装');
     const reason = entry.installReason || entry.reason || (!canInspect
       ? (d.cached ? '缓存结果必须联网重新验证' : prerequisite.error || '此来源暂不支持安装') : '');
     return `<article class="sk-disc-card" data-result-index="${index}">
@@ -5281,7 +5282,7 @@ const skillsView = {
         <div class="sk-disc-repo">${ic('gitbranch', 'currentColor', 14)} ${escapeHtml(repo)}</div>
       </div>
       <div class="sk-disc-pop"><b>${count.toLocaleString()}</b><span>安装量</span></div>
-      <div class="sk-disc-actions"><button class="ghost-btn" data-disc-act="source">打开来源</button><button class="primary" data-disc-act="inspect" ${!canInspect || d.inspecting ? 'disabled' : ''}>${isInspecting ? '检查中…' : (entry.actionLabel || '检查并安装')}</button></div>
+      <div class="sk-disc-actions"><button class="ghost-btn sk-disc-icon-btn" data-disc-act="source" aria-label="打开来源" title="打开来源">${ic('link', 'currentColor', 16)}</button><button class="primary sk-disc-icon-btn" data-disc-act="inspect" aria-label="${escapeHtml(inspectLabel)}" title="${escapeHtml(inspectLabel)}" ${!canInspect || d.inspecting ? 'disabled' : ''}>${isInspecting ? `<span class="sk-disc-spinner">${ic('clock', 'currentColor', 16)}</span>` : ic('eye', 'currentColor', 16)}</button></div>
       ${isInspecting ? '<div class="sk-disc-reason" role="status">正在固定来源并检查内容，请稍候…</div>' : reason ? `<div class="sk-disc-reason">${escapeHtml(reason)}</div>` : ''}
     </article>`;
   },
@@ -5293,6 +5294,7 @@ const skillsView = {
     const conflict = i.conflict || null;
     const overwrite = this.conflictNeedsOverwrite(i);
     const blocked = Boolean(i.blocked || i.installable === false || (conflict && (conflict.blocked || conflict.kind === 'different_source')));
+    const installLabel = this.discovery.inspecting ? '正在安装' : (i.actionLabel || (i.update ? '确认更新' : '确认安装'));
     return `<section class="sk-disc-inspection" aria-labelledby="sk-disc-confirm-title">
       <div class="sk-disc-inspection-head"><div><span class="sk-disc-kicker">固定来源 · 本机风险检查</span><h2 id="sk-disc-confirm-title">${escapeHtml(i.name || 'Skill 安装确认')}</h2><p>${escapeHtml(i.description || '（无 description）')}</p></div><button class="ghost-btn" data-disc-act="close-inspection">返回结果</button></div>
       ${this.discovery.installError ? `<div class="sk-disc-install-error" role="alert"><b>安装失败，确认内容已保留</b><span>${escapeHtml(this.discovery.installError)}</span></div>` : ''}
@@ -5310,7 +5312,7 @@ const skillsView = {
       ${overwrite ? `<label class="sk-disc-confirm-check danger"><input type="checkbox" id="sk-disc-overwrite"><span>我确认替换现有安装项；旧内容将移入系统废纸篓，可恢复。</span></label>` : ''}
       <fieldset class="sk-disc-targets"><legend>安装到目标 Agent</legend>${Object.entries(targetLabels).map(([id, label]) => `<label><input type="radio" name="discovery-target" value="${id}" ${this.discovery.defaultTargetAgent === id ? 'checked' : ''}><span>${label}</span></label>`).join('')}</fieldset>
       <label class="sk-disc-remember"><input type="checkbox" id="sk-disc-remember"><span>记住为以后安装的默认目标（确认页始终可以更改）</span></label>
-      <div class="sk-disc-confirm-actions"><button class="ghost-btn" data-disc-act="source-inspection" data-source="${escapeHtml(source || '')}">打开来源</button><button class="primary" data-disc-act="install" ${blocked || this.discovery.inspecting ? 'disabled' : ''}>${this.discovery.inspecting ? '正在安装…' : (i.actionLabel || (i.update ? '确认更新' : '确认安装'))}</button></div>
+      <div class="sk-disc-confirm-actions"><button class="ghost-btn sk-disc-icon-btn" data-disc-act="source-inspection" data-source="${escapeHtml(source || '')}" aria-label="打开来源" title="打开来源">${ic('link', 'currentColor', 16)}</button><button class="primary sk-disc-icon-btn" data-disc-act="install" aria-label="${escapeHtml(installLabel)}" title="${escapeHtml(installLabel)}" ${blocked || this.discovery.inspecting ? 'disabled' : ''}>${this.discovery.inspecting ? `<span class="sk-disc-spinner">${ic('clock', 'currentColor', 16)}</span>` : ic('box', 'currentColor', 16)}</button></div>
     </section>`;
   },
   discoveryDetailGroup(title, values) {
