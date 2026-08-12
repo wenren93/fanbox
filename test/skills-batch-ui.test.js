@@ -92,4 +92,5 @@ test('Skills view explains official toggle behavior and Codex restart requiremen
   assert.match(js, /插件管理/);
   assert.match(js, /invocationMode\s*===\s*['"]manual['"]/);
   assert.match(js, /仅手动/);
+  assert.match(js, /WorkBuddy[\s\S]{0,180}skills_disabled/);
 });

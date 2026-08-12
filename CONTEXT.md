@@ -12,10 +12,10 @@ Skill 在某一来源和目录中的具体安装副本，是选择、启停和�
 _Avoid_: Skill 副本、Skill 行
 
 **启用**:
-让一个 Skill 安装项在对应 Agent 的配置中处于可用状态，因而可被后续 Agent 会话发现。Claude 按 Skill 名称配置，Codex 按 `SKILL.md` 绝对路径配置；其他来源可通过活跃目录表示。
+让一个 Skill 安装项在对应 Agent 的配置中处于可用状态，因而可被后续 Agent 会话发现。Claude 按 Skill 名称配置，Codex 按 `SKILL.md` 绝对路径配置；WorkBuddy 则把安装项放在 `skills` 目录。
 
 **停用**:
-让一个 Skill 安装项在对应 Agent 的配置中变为不可用但仍保留在本机，是可逆状态；后续 Agent 会话将不再发现它，但已有会话不会被撤回。Codex 需要重启后生效。Claude 的设置按名称生效，因此同名普通安装项会同步变化；插件 Skill 由插件管理。
+让一个 Skill 安装项在对应 Agent 的配置中变为不可用但仍保留在本机，是可逆状态；后续 Agent 会话将不再发现它，但已有会话不会被撤回。Codex 需要重启后生效。Claude 的设置按名称生效，因此同名普通安装项会同步变化；WorkBuddy 把安装项移到与 `skills` 同级的 `skills_disabled`；插件 Skill 由插件管理。
 _Avoid_: 关闭、删除
 
 **卸载**:

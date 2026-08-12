@@ -96,10 +96,11 @@ function statuses(body) {
 test('POST /api/skills/batch manages scanned installations independently', async (t) => {
   await withServer(t, async ({ home, request, post }) => {
     const root = path.join(home, '.workbuddy', 'skills');
+    const disabledRoot = path.join(home, '.workbuddy', 'skills_disabled');
     const active = path.join(root, 'active-skill');
     const activeSecond = path.join(root, 'second-active-skill');
-    const alreadyDisabled = path.join(root, '_disabled', 'disabled-skill');
-    const enableTarget = path.join(root, '_disabled', 'enable-target');
+    const alreadyDisabled = path.join(disabledRoot, 'disabled-skill');
+    const enableTarget = path.join(disabledRoot, 'enable-target');
     const residue = path.join(root, 'residue-skill');
     const unknown = path.join(root, 'unknown-skill');
     const globalAlsoSeenAsProject = path.join(home, '.claude', 'skills', 'same-path-skill');
@@ -205,8 +206,8 @@ test('POST /api/skills/batch manages scanned installations independently', async
         total: 4,
       });
       await assert.rejects(fs.stat(active), { code: 'ENOENT' });
-      assert.equal(await fs.stat(path.join(root, '_disabled', 'active-skill')).then((st) => st.isDirectory()), true);
-      assert.equal(await fs.stat(path.join(root, '_disabled', 'second-active-skill')).then((st) => st.isDirectory()), true);
+      assert.equal(await fs.stat(path.join(disabledRoot, 'active-skill')).then((st) => st.isDirectory()), true);
+      assert.equal(await fs.stat(path.join(disabledRoot, 'second-active-skill')).then((st) => st.isDirectory()), true);
     });
 
     await t.test('enables a disabled installation', async () => {
@@ -229,7 +230,7 @@ test('POST /api/skills/batch manages scanned installations independently', async
     });
 
     await t.test('reports already-target-state operations as noop', async () => {
-      const activeTarget = path.join(root, '_disabled', 'active-skill');
+      const activeTarget = path.join(disabledRoot, 'active-skill');
       const response = await post('/api/skills/batch', {
         action: 'disable',
         dirs: [activeTarget, alreadyDisabled],
@@ -275,7 +276,7 @@ test('POST /api/skills/batch manages scanned installations independently', async
       });
       await assert.rejects(fs.stat(projectSkill), { code: 'ENOENT' });
       assert.equal(
-        await fs.stat(path.join(project, '.workbuddy', 'skills', '_disabled', 'project-skill')).then((st) => st.isDirectory()),
+        await fs.stat(path.join(project, '.workbuddy', 'skills_disabled', 'project-skill')).then((st) => st.isDirectory()),
         true,
       );
     });
@@ -310,6 +311,47 @@ test('batch uninstall is wired through the guarded skill trash operation', async
   assert.match(source, /\/api\/skills\/batch/);
   assert.match(batchSource, /parsed\.action\s*!==\s*'uninstall'/);
   assert.match(batchSource, /skillTrashItem\(item\)/);
+});
+
+test('WorkBuddy toggle moves an installation between sibling skills roots', async (t) => {
+  await withServer(t, async ({ home, post }) => {
+    const activeDir = path.join(home, '.workbuddy', 'skills', 'move-me');
+    const disabledDir = path.join(home, '.workbuddy', 'skills_disabled', 'move-me');
+    await createSkill(activeDir);
+
+    await post('/api/skills/refresh', {});
+    const disabled = await post('/api/skills/toggle', { dir: activeDir, enable: false });
+    assert.deepEqual(disabled.body, { ok: true, dir: disabledDir });
+    await assert.rejects(fs.stat(activeDir), { code: 'ENOENT' });
+    assert.equal(await fs.stat(disabledDir).then((st) => st.isDirectory()), true);
+
+    const scan = await post('/api/skills/refresh', {});
+    const item = scan.body.items.find((candidate) => candidate.dir === disabledDir);
+    assert.ok(item);
+    assert.equal(item.disabled, true);
+    assert.equal(item.toggleStrategy, 'directory');
+
+    const enabled = await post('/api/skills/toggle', { dir: disabledDir, enable: true });
+    assert.deepEqual(enabled.body, { ok: true, dir: activeDir });
+    assert.equal(await fs.stat(activeDir).then((st) => st.isDirectory()), true);
+    await assert.rejects(fs.stat(disabledDir), { code: 'ENOENT' });
+  });
+});
+
+test('WorkBuddy toggle refuses a sibling-root name conflict without moving either installation', async (t) => {
+  await withServer(t, async ({ home, post }) => {
+    const activeDir = path.join(home, '.workbuddy', 'skills', 'same-name');
+    const disabledDir = path.join(home, '.workbuddy', 'skills_disabled', 'same-name');
+    await createSkill(activeDir, 'active-version');
+    await createSkill(disabledDir, 'disabled-version');
+
+    await post('/api/skills/refresh', {});
+    const response = await post('/api/skills/toggle', { dir: activeDir, enable: false });
+    assert.equal(response.body.ok, false);
+    assert.match(response.body.error, /目标位置已有同名目录/);
+    assert.equal(await fs.stat(activeDir).then((st) => st.isDirectory()), true);
+    assert.equal(await fs.stat(disabledDir).then((st) => st.isDirectory()), true);
+  });
 });
 
 test('Codex skill toggle uses config.toml and keeps the installation in place', async (t) => {

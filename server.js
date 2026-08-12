@@ -2025,8 +2025,9 @@ async function agentProjects(force = false) {
 // ---------- Skills 透视（本机 agent skills 的扫描 / 触发统计 / 健康检查 / 启停）----------
 // 扫描全局（Claude / Codex / Agents / WorkBuddy）、Claude 插件，以及最近 agent 项目中的
 // .claude/skills、.codex/skills、.workbuddy/skills。触发统计读 Claude/Codex 会话日志。
-// Claude / Codex 启停分别投影到官方 settings.json / config.toml；WorkBuddy 以及历史兼容项
-// 使用「移入 _disabled/ 子目录」。已有 Agent 会话不会被撤回，Codex 配置变更需重启 Codex。
+// Claude / Codex 启停分别投影到官方 settings.json / config.toml；WorkBuddy 使用与 skills
+// 同级的 skills_disabled 目录；历史兼容项仍识别 skills/_disabled。已有 Agent 会话不会被撤回，
+// Codex 配置变更需重启 Codex。
 const CLAUDE_SKILLS = path.join(HOME, '.claude', 'skills');
 const CODEX_SKILLS = path.join(HOME, '.codex', 'skills');
 const AGENTS_SKILLS = path.join(HOME, '.agents', 'skills');
@@ -2262,6 +2263,13 @@ async function scanSkillRoot(root, source, label, out, disabled = false, meta = 
   }
 }
 
+async function scanWorkBuddySkills(activeRoot, source, label, out, meta = null) {
+  const disabledRoot = path.join(path.dirname(activeRoot), 'skills_disabled');
+  const toggleRoots = { toggleActiveRoot: activeRoot, toggleDisabledRoot: disabledRoot };
+  await scanSkillRoot(activeRoot, source, label, out, false, { ...(meta || {}), ...toggleRoots });
+  await scanSkillRoot(disabledRoot, source, label, out, true, { ...(meta || {}), ...toggleRoots });
+}
+
 // Claude Code 触发统计：jsonl 里的 Skill tool_use（模型自动触发）+ <command-name>（用户手动 /调用）
 const claudeSkillStatCache = new Map(); // file -> { offset, events: [{t, skill}] }
 async function claudeSkillEvents(cutoff) {
@@ -2370,7 +2378,7 @@ async function skillsData(opts = {}) {
   await scanSkillRoot(CLAUDE_SKILLS, 'claude', '~/.claude', items);
   await scanSkillRoot(CODEX_SKILLS, 'codex', '~/.codex', items);
   await scanSkillRoot(AGENTS_SKILLS, 'agents', '~/.agents', items);
-  await scanSkillRoot(WORKBUDDY_SKILLS, 'workbuddy', '~/.workbuddy', items);
+  await scanWorkBuddySkills(WORKBUDDY_SKILLS, 'workbuddy', '~/.workbuddy', items);
   // Claude 插件自带的 skills
   try {
     const inst = JSON.parse(await fsp.readFile(path.join(HOME, '.claude', 'plugins', 'installed_plugins.json'), 'utf8'));
@@ -2388,14 +2396,10 @@ async function skillsData(opts = {}) {
       ['.workbuddy', 'WorkBuddy', 'workbuddy'],
     ];
     for (const [hiddenDir, agentLabel, projectAgent] of roots) {
-      await scanSkillRoot(
-        path.join(cwd, hiddenDir, 'skills'),
-        'project',
-        `${agentLabel} · ${projectName}`,
-        items,
-        false,
-        { projectAgent, projectName },
-      );
+      const root = path.join(cwd, hiddenDir, 'skills');
+      const meta = { projectAgent, projectName };
+      if (projectAgent === 'workbuddy') await scanWorkBuddySkills(root, 'project', `${agentLabel} · ${projectName}`, items, meta);
+      else await scanSkillRoot(root, 'project', `${agentLabel} · ${projectName}`, items, false, meta);
     }
   };
   // 最近 agent 项目的项目级 skills
@@ -2462,7 +2466,7 @@ async function skillsData(opts = {}) {
   for (const it of items) {
     if (it.residue) continue;
     const arr = copies.get(it.name) || [];
-    arr.push(it.label + '/skills' + (it.dir.split(path.sep).includes('_disabled') ? '/_disabled' : ''));
+    arr.push(it.label + (it.disabled && it.toggleDisabledRoot ? '/skills_disabled' : '/skills' + (it.dir.split(path.sep).includes('_disabled') ? '/_disabled' : '')));
     copies.set(it.name, arr);
   }
   for (const it of items) {
@@ -2522,9 +2526,11 @@ async function skillToggleItem(it, enable) {
     return { ok: true, dir: it.dir, restartRequired: 'codex' };
   }
   const root = it.disabled ? path.dirname(path.dirname(it.dir)) : path.dirname(it.dir);
-  const dest = enable ? path.join(root, it.name) : path.join(root, '_disabled', it.name);
+  const activeRoot = it.toggleActiveRoot || root;
+  const disabledRoot = it.toggleDisabledRoot || path.join(root, '_disabled');
+  const dest = path.join(enable ? activeRoot : disabledRoot, it.name);
   try {
-    if (!enable) await fsp.mkdir(path.join(root, '_disabled'), { recursive: true });
+    await fsp.mkdir(path.dirname(dest), { recursive: true });
     await fsp.access(dest).then(() => { throw new Error('目标位置已有同名目录'); }, () => {});
     // skills.sh 等安装器装的是相对路径 symlink（../../.agents/...）——直接 rename 会因层级变化断链，
     // 改为解析出绝对目标后删旧链建新链；真实目录才走 rename

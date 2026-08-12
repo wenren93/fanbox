@@ -439,6 +439,7 @@ window.FANBOX_DICT = {
   'Claude 插件 Skill 请通过插件管理启停': 'Manage Claude plugin Skills through plugin management',
   '插件管理': 'Plugin management',
   '停用（移入 _disabled/，不删文件，立即对模型不可见）': 'Disable (move into _disabled/ — files kept, instantly hidden from the model)',
+  '停用 WorkBuddy Skill（移入同级 skills_disabled 目录，后续会话将不再发现）': 'Disable WorkBuddy Skill (move into sibling skills_disabled folder; future sessions will no longer discover it)',
   '（无 description）': '(no description)',
   '▶ 终端调用': '▶ Invoke in terminal',
   '在文件区显示': 'Show in file view',

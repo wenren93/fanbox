@@ -4926,7 +4926,11 @@ const skillsView = {
         plugin: 'Claude 插件 Skill 请通过插件管理启停',
         'claude-settings': it.disabled ? '启用（更新 Claude Settings）' : '停用（更新 Claude Settings）',
         'codex-config': it.disabled ? '启用（更新 Codex config.toml，重启 Codex 后生效）' : '停用（更新 Codex config.toml，重启 Codex 后生效）',
-        directory: it.disabled ? '启用（移回 skills 目录）' : '停用（移入 _disabled/，后续会话将不再发现）',
+        directory: it.disabled
+          ? '启用（移回 skills 目录）'
+          : it.source === 'workbuddy' || it.projectAgent === 'workbuddy'
+            ? '停用 WorkBuddy Skill（移入同级 skills_disabled 目录，后续会话将不再发现）'
+            : '停用（移入 _disabled/，后续会话将不再发现）',
       };
       const toggleTitle = toggleTitles[it.toggleStrategy] || toggleTitles.directory;
       h += `<div class="sk-row ${this.open.has(key) ? 'expanded' : ''} ${it.disabled ? 'off' : ''} ${this.selected.has(key) ? 'selected' : ''}" data-dir="${escapeHtml(key)}" draggable="${this.busy ? 'false' : 'true'}">
