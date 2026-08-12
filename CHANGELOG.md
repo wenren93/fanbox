@@ -13,6 +13,7 @@
 
 ### Added
 - **一键启动新增 Codex 桌面应用**：在 Codex CLI 之外增加独立的「Codex 桌面应用」可选入口，放在 agent 列表最后并复用官方图标；自动检测 Mac 是否已安装，点击通过 `open -a Codex` 拉起 App
+- **接入 Sandcastle 本机 Codex 交互 runner**：新增 `npm run sandcastle:codex [-- "任务"]`，通过 `interactive()` 与 `noSandbox()` 在当前终端启动 Codex TUI；每次会话默认进入独立分支和 worktree，并在 README 明示 Sandcastle 隔离与 Codex 自身审批边界
 
 ## [2.12.1] - 2026-07-26
 

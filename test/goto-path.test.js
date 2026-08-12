@@ -25,8 +25,10 @@ test('path-info resolves folders, files, tilde, file URLs, and cwd-relative path
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'fanbox-goto-home-'));
   const cwd = path.join(home, 'Work Bench');
   const file = path.join(cwd, 'hello world.md');
+  const moduleFile = path.join(cwd, 'main.mts');
   await fs.mkdir(cwd, { recursive: true });
   await fs.writeFile(file, '# hello', 'utf8');
+  await fs.writeFile(moduleFile, 'export const ready = true;', 'utf8');
   const port = await freePortPair();
   const child = spawn(process.execPath, ['server.js'], {
     cwd: path.join(__dirname, '..'),
@@ -56,6 +58,8 @@ test('path-info resolves folders, files, tilde, file URLs, and cwd-relative path
   assert.deepEqual({ ok: folder.ok, path: folder.path, isDir: folder.isDir }, { ok: true, path: cwd, isDir: true });
   const relative = await info('hello world.md');
   assert.deepEqual({ ok: relative.ok, path: relative.path, parent: relative.parent, kind: relative.kind }, { ok: true, path: file, parent: cwd, kind: 'text' });
+  const moduleInfo = await info('main.mts');
+  assert.deepEqual({ ok: moduleInfo.ok, path: moduleInfo.path, parent: moduleInfo.parent, kind: moduleInfo.kind }, { ok: true, path: moduleFile, parent: cwd, kind: 'text' });
   const url = await info(`file://${file}`);
   assert.equal(url.path, file);
   const escaped = await info('hello\\ world.md');
