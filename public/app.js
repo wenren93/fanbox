@@ -1751,6 +1751,40 @@ function confirmDialog(msg) {
     ov.querySelector('[data-act=yes]').focus();
   });
 }
+
+function skillImportTargetDialog(item, roots) {
+  const labels = { claude: 'Claude', codex: 'Codex', agents: 'Agents 共享目录', workbuddy: 'WorkBuddy' };
+  const options = Object.entries(labels).filter(([id]) => {
+    const root = roots && roots[id];
+    return root && (item.importTargets || []).includes(id);
+  });
+  if (!options.length) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const ov = document.createElement('div');
+    ov.className = 'input-overlay sk-import-overlay';
+    ov.innerHTML = `<div class="input-dialog sk-import-dialog" role="dialog" aria-modal="true" aria-labelledby="sk-import-title">
+      <div class="input-title" id="sk-import-title">导入“${escapeHtml(item.name)}”到…</div>
+      <div class="sk-import-note">选择一个目标 Agent。导入后是独立副本，不会与来源同步。</div>
+      <div class="sk-import-targets" role="radiogroup" aria-label="目标 Agent">
+        ${options.map(([id, label], index) => `<label class="sk-import-target"><input type="radio" name="skill-import-target" value="${id}" ${index === 0 ? 'checked' : ''}><span><b>${label}</b><small>${escapeHtml(tilde(roots[id]))}</small></span></label>`).join('')}
+      </div>
+      ${item.source === 'plugin' ? '<div class="sk-import-plugin-note">插件提供的 Skill 导入后由你独立管理，不再随插件更新。</div>' : ''}
+      <div class="input-actions"><button class="ghost-btn" data-act="cancel">取消</button><button class="primary" data-act="import">导入</button></div>
+    </div>`;
+    document.body.appendChild(ov);
+    const done = (value) => { ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(value); };
+    const submit = () => done((ov.querySelector('input[name=skill-import-target]:checked') || {}).value || null);
+    function onKey(ev) {
+      if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); done(null); }
+      else if (ev.key === 'Enter') { ev.preventDefault(); ev.stopPropagation(); submit(); }
+    }
+    ov.querySelector('[data-act=cancel]').onclick = () => done(null);
+    ov.querySelector('[data-act=import]').onclick = submit;
+    ov.onclick = (ev) => { if (ev.target === ov) done(null); };
+    document.addEventListener('keydown', onKey, true);
+    ov.querySelector('[data-act=cancel]').focus();
+  });
+}
 // ---------- 截图直通车：系统截屏落盘 → 右下角浮出直通卡，终端/素材/标注一步到位 ----------
 const shotTray = {
   el: null, timer: null,
@@ -4922,6 +4956,22 @@ const skillsView = {
       await this.reload();
     }
   },
+  async importSkill(it) {
+    if (this.busy || it.residue) return;
+    const targetAgent = await skillImportTargetDialog(it, this.data.roots || {});
+    if (!targetAgent) return;
+    this.busy = true; this.render();
+    try {
+      const r = await apiPost('/api/skills/import', { sourceDir: it.dir, targetAgent, cwd: state.cwd });
+      if (r && r.status === 'created') toast(`已导入到 ${r.targetLabel}；新会话可发现`);
+      else toast('导入失败：' + ((r && r.error) || '请重试'), true);
+    } catch (err) {
+      toast('导入失败：' + (err.message || '请求失败'), true);
+    } finally {
+      this.busy = false;
+      await this.reload();
+    }
+  },
   render() {
     const o = this.data.overview;
     const items = this.data.items || [];
@@ -5030,6 +5080,7 @@ const skillsView = {
             ${it.issues.map((s) => `<div class="fd-cut">⚠ ${escapeHtml(s)}</div>`).join('')}
             <div class="fd-acts">
               ${it.residue ? '' : `<button data-act="invoke" class="primary" ${this.busy ? 'disabled' : ''}>▶ 终端调用</button>`}
+              ${it.residue ? '' : `<button data-act="import" ${this.busy ? 'disabled' : ''}>导入到…</button>`}
               <button data-act="reveal" ${this.busy ? 'disabled' : ''}>在文件区显示</button>
               ${it.residue ? '' : `<button data-act="edit" ${this.busy ? 'disabled' : ''}>编辑 SKILL.md</button>`}
               <button data-act="trash" class="danger" ${this.busy ? 'disabled' : ''}>卸载</button>
@@ -5122,6 +5173,8 @@ const skillsView = {
         } else if (act.dataset.act === 'invoke') {
           if (this.busy) return;
           invokeSkillInTerm(it.name);
+        } else if (act.dataset.act === 'import') {
+          await this.importSkill(it);
         } else if (act.dataset.act === 'reveal') {
           if (this.busy) return;
           navigate(dirOf(it.dir));

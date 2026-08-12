@@ -2070,6 +2070,12 @@ const CLAUDE_SKILLS = path.join(HOME, '.claude', 'skills');
 const CODEX_SKILLS = path.join(HOME, '.codex', 'skills');
 const AGENTS_SKILLS = path.join(HOME, '.agents', 'skills');
 const WORKBUDDY_SKILLS = path.join(HOME, '.workbuddy', 'skills');
+const SKILL_IMPORT_TARGETS = Object.freeze({
+  claude: { id: 'claude', label: 'Claude', root: CLAUDE_SKILLS },
+  codex: { id: 'codex', label: 'Codex', root: CODEX_SKILLS },
+  agents: { id: 'agents', label: 'Agents 共享目录', root: AGENTS_SKILLS },
+  workbuddy: { id: 'workbuddy', label: 'WorkBuddy', root: WORKBUDDY_SKILLS },
+});
 const CODEX_CONFIG = path.join(HOME, '.codex', 'config.toml');
 const CLAUDE_SETTINGS = path.join(HOME, '.claude', 'settings.json');
 const SKILL_DESC_CUT = 1536; // Claude Code 单条 description 的截断线（官方文档）
@@ -2471,6 +2477,22 @@ async function skillsData(opts = {}) {
   items.length = 0;
   items.push(...uniqueItems);
 
+  // 前端只展示不会落回来源同一真实目录的受控目标；顶层软链接也按解析后的实际位置排除。
+  await Promise.all(items.map(async (item) => {
+    if (item.residue) { item.importTargets = []; return; }
+    try {
+      const sourceReal = await fsp.realpath(item.dir);
+      const targets = [];
+      for (const target of Object.values(SKILL_IMPORT_TARGETS)) {
+        const candidate = await canonicalFuturePath(path.join(target.root, item.name));
+        if (path.resolve(candidate) !== path.resolve(sourceReal)) targets.push(target.id);
+      }
+      item.importTargets = targets;
+    } catch {
+      item.importTargets = [];
+    }
+  }));
+
   // Codex 官方按 SKILL.md 绝对路径记录启停；旧 _disabled 目录仍保留为兼容状态。
   const [codexDisabled, claudeOverrides] = await Promise.all([codexDisabledSkillFiles(), claudeSkillOverrides()]);
   for (const it of items) {
@@ -2611,6 +2633,153 @@ async function skillTrash(dir) {
   const r = await skillTrashItem(v.item);
   if (r.ok) skillsCache = { at: 0, data: null };
   return r;
+}
+
+function parseSkillImportRequest(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: '请求体格式错误' };
+  if (typeof body.sourceDir !== 'string' || !body.sourceDir.trim() || body.sourceDir.includes('\0')) {
+    return { ok: false, error: 'sourceDir 必须是非空路径字符串' };
+  }
+  if (typeof body.targetAgent !== 'string' || !Object.prototype.hasOwnProperty.call(SKILL_IMPORT_TARGETS, body.targetAgent)) {
+    return { ok: false, error: '未知的目标 Agent' };
+  }
+  if (body.cwd !== undefined && (typeof body.cwd !== 'string' || !body.cwd.trim() || body.cwd.includes('\0'))) {
+    return { ok: false, error: 'cwd 必须是非空路径字符串' };
+  }
+  return {
+    ok: true,
+    sourceDir: path.resolve(body.sourceDir),
+    targetAgent: body.targetAgent,
+    cwd: body.cwd === undefined ? null : path.resolve(body.cwd),
+  };
+}
+
+function isPathInside(root, candidate) {
+  const rel = path.relative(root, candidate);
+  return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel));
+}
+
+async function canonicalFuturePath(candidate) {
+  let current = path.resolve(candidate);
+  const suffix = [];
+  while (true) {
+    try {
+      const existing = await fsp.realpath(current);
+      return path.join(existing, ...suffix.reverse());
+    } catch (e) {
+      if (e.code !== 'ENOENT') throw e;
+      const parent = path.dirname(current);
+      if (parent === current) throw e;
+      suffix.push(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
+async function copySkillTree(sourceRoot, tempRoot) {
+  const realSourceRoot = await fsp.realpath(sourceRoot);
+  const rootStat = await fsp.stat(realSourceRoot);
+  if (!rootStat.isDirectory()) throw new Error('来源不是 Skill 目录');
+
+  const copyEntry = async (sourcePath, destPath, relativePath, ancestors) => {
+    let lst;
+    try { lst = await fsp.lstat(sourcePath); }
+    catch (e) { throw new Error(`${relativePath || '.'}：无法读取（${e.message}）`); }
+
+    let effectivePath = sourcePath;
+    let stat = lst;
+    if (lst.isSymbolicLink()) {
+      let resolved;
+      try { resolved = await fsp.realpath(sourcePath); }
+      catch (e) { throw new Error(`${relativePath || '.'}：软链接无效或形成循环`); }
+      if (!isPathInside(realSourceRoot, resolved)) throw new Error(`${relativePath || '.'}：软链接指向 Skill 目录之外`);
+      effectivePath = resolved;
+      stat = await fsp.stat(resolved);
+    }
+
+    if (stat.isDirectory()) {
+      const realDir = await fsp.realpath(effectivePath);
+      if (ancestors.has(realDir)) throw new Error(`${relativePath || '.'}：目录或软链接形成循环`);
+      if (relativePath) await fsp.mkdir(destPath, { mode: 0o755 });
+      const nextAncestors = new Set(ancestors);
+      nextAncestors.add(realDir);
+      const entries = await fsp.readdir(effectivePath, { withFileTypes: true });
+      for (const entry of entries) {
+        const childRelative = relativePath ? path.join(relativePath, entry.name) : entry.name;
+        await copyEntry(path.join(effectivePath, entry.name), path.join(destPath, entry.name), childRelative, nextAncestors);
+      }
+      return;
+    }
+
+    if (stat.isFile()) {
+      await fsp.copyFile(effectivePath, destPath);
+      await fsp.chmod(destPath, stat.mode & 0o777);
+      return;
+    }
+
+    throw new Error(`${relativePath || '.'}：不支持特殊文件`);
+  };
+
+  await copyEntry(realSourceRoot, tempRoot, '', new Set());
+  const skillFile = path.join(tempRoot, 'SKILL.md');
+  const skillStat = await fsp.stat(skillFile);
+  if (!skillStat.isFile()) throw new Error('来源缺少可读 SKILL.md');
+  await fsp.access(skillFile, fs.constants.R_OK);
+  return realSourceRoot;
+}
+
+async function skillImport(parsed) {
+  const target = SKILL_IMPORT_TARGETS[parsed.targetAgent];
+  const snapshot = await skillsData({ force: true, extraCwds: parsed.cwd ? [parsed.cwd] : [] });
+  const source = (snapshot.items || []).find((item) => path.resolve(item.dir) === parsed.sourceDir);
+  if (!source) return { ok: false, status: 'invalid_source', error: '来源不在本次扫描的 Skills 清单里' };
+  if (source.residue) return { ok: false, status: 'invalid_source', error: '残留项不能导入' };
+
+  const targetDir = path.join(target.root, path.basename(source.dir));
+  let realSource;
+  let canonicalTarget;
+  try {
+    [realSource, canonicalTarget] = await Promise.all([fsp.realpath(source.dir), canonicalFuturePath(targetDir)]);
+  } catch (e) {
+    return { ok: false, status: 'invalid_source', error: `无法读取来源：${e.message}` };
+  }
+  if (path.resolve(realSource) === path.resolve(canonicalTarget)) {
+    return { ok: false, status: 'self_import', error: '来源已经位于该目标位置' };
+  }
+
+  try {
+    await fsp.lstat(targetDir);
+    return { ok: false, status: 'target_exists', error: '目标已有同目录名安装项' };
+  } catch (e) {
+    if (e.code !== 'ENOENT') return { ok: false, status: 'failed', error: `无法检查目标：${e.message}` };
+  }
+
+  let tempDir = null;
+  try {
+    await fsp.mkdir(target.root, { recursive: true });
+    tempDir = await fsp.mkdtemp(path.join(target.root, '.fanbox-import-'));
+    await copySkillTree(source.dir, tempDir);
+
+    // 临时副本完成后再次确认来源仍是有效扫描项，并确保最终位置没有在预检后出现。
+    const latest = await skillsData({ force: true, extraCwds: parsed.cwd ? [parsed.cwd] : [] });
+    const latestSource = (latest.items || []).find((item) => path.resolve(item.dir) === parsed.sourceDir && !item.residue);
+    if (!latestSource) throw new Error('来源已变化，请重试');
+    try {
+      await fsp.lstat(targetDir);
+      return { ok: false, status: 'target_exists', error: '目标已有同目录名安装项' };
+    } catch (e) {
+      if (e.code !== 'ENOENT') throw e;
+    }
+
+    await fsp.rename(tempDir, targetDir);
+    tempDir = null;
+    skillsCache = { at: 0, data: null };
+    return { ok: true, status: 'created', targetAgent: target.id, targetLabel: target.label, targetDir };
+  } catch (e) {
+    return { ok: false, status: 'failed', error: e.message || '导入失败' };
+  } finally {
+    if (tempDir) await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 function parseSkillBatchRequest(body) {
@@ -3186,6 +3355,11 @@ const server = http.createServer(async (req, res) => {
       const parsed = parseSkillBatchRequest(await readBody(req));
       if (!parsed.ok) return sendJSON(res, 400, { ok: false, error: parsed.error });
       return sendJSON(res, 200, await queueSkillsWrite(() => skillBatch(parsed)));
+    }
+    if (p === '/api/skills/import' && req.method === 'POST') {
+      const parsed = parseSkillImportRequest(await readBody(req));
+      if (!parsed.ok) return sendJSON(res, 400, { ok: false, status: 'invalid_request', error: parsed.error });
+      return sendJSON(res, 200, await queueSkillsWrite(() => skillImport(parsed)));
     }
     if (p === '/api/agent-usage') {
       return sendJSON(res, 200, await agentUsage());
