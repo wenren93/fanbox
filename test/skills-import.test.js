@@ -27,12 +27,12 @@ async function freePortPair() {
   throw new Error('could not find two adjacent free ports');
 }
 
-async function withServer(t, fn) {
+async function withServer(t, fn, extraEnv = {}) {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'fanbox-import-home-'));
   const port = await freePortPair();
   const child = spawn(process.execPath, ['server.js'], {
     cwd: REPO,
-    env: { ...process.env, HOME: home, FANBOX_PORT: String(port), FANBOX_NO_OPEN: '1' },
+    env: { ...process.env, HOME: home, FANBOX_PORT: String(port), FANBOX_NO_OPEN: '1', NODE_ENV: 'test', ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let logs = '';
@@ -145,7 +145,7 @@ test('skill import rejects untrusted source and target input without filesystem 
   });
 });
 
-test('existing target is not modified by phase-one import', async (t) => {
+test('content conflict returns a fingerprint without modifying source or target', async (t) => {
   await withServer(t, async ({ home, post }) => {
     const source = path.join(home, '.claude', 'skills', 'conflicted');
     const target = path.join(home, '.codex', 'skills', 'conflicted');
@@ -154,11 +154,201 @@ test('existing target is not modified by phase-one import', async (t) => {
     await fs.writeFile(path.join(target, 'target-only.txt'), 'keep me', 'utf8');
 
     const response = await post('/api/skills/import', { sourceDir: source, targetAgent: 'codex' });
-    assert.equal(response.body.status, 'target_exists');
+    assert.equal(response.body.status, 'content_conflict');
+    assert.match(response.body.conflictFingerprint, /^[a-f0-9]{64}$/);
     assert.match(await fs.readFile(path.join(target, 'SKILL.md'), 'utf8'), /target-version/);
     assert.equal(await fs.readFile(path.join(target, 'target-only.txt'), 'utf8'), 'keep me');
     assert.deepEqual((await fs.readdir(path.dirname(target))).filter((entry) => entry.startsWith('.fanbox-import-')), []);
   });
+});
+
+test('identical content is a no-op while executable permission differences are conflicts', async (t) => {
+  await withServer(t, async ({ home, post }) => {
+    const source = path.join(home, '.claude', 'skills', 'identical');
+    const target = path.join(home, '.codex', 'skills', 'identical');
+    await createComplexSkill(source, 'identical');
+    await fs.cp(source, target, { recursive: true, preserveTimestamps: false });
+    const before = await fs.stat(target);
+
+    const same = await post('/api/skills/import', { sourceDir: source, targetAgent: 'codex' });
+    assert.equal(same.body.status, 'identical');
+    assert.equal((await fs.stat(target)).mtimeMs, before.mtimeMs);
+
+    await fs.chmod(path.join(target, 'run.sh'), 0o644);
+    const changed = await post('/api/skills/import', { sourceDir: source, targetAgent: 'codex' });
+    assert.equal(changed.body.status, 'content_conflict');
+  });
+});
+
+test('same Skill name in a different target directory is an unforceable ambiguity', async (t) => {
+  await withServer(t, async ({ home, post }) => {
+    const source = path.join(home, '.claude', 'skills', 'incoming-dir');
+    const conflict = path.join(home, '.codex', 'skills', 'existing-dir');
+    await createComplexSkill(source, 'shared-skill-name');
+    await createComplexSkill(conflict, 'shared-skill-name');
+
+    const response = await post('/api/skills/import', { sourceDir: source, targetAgent: 'codex' });
+    assert.equal(response.body.status, 'name_ambiguity');
+    assert.equal(response.body.conflict.dir, conflict);
+    await assert.rejects(fs.stat(path.join(home, '.codex', 'skills', 'incoming-dir')), { code: 'ENOENT' });
+  });
+});
+
+test('WorkBuddy disabled installations participate in name ambiguity checks', async (t) => {
+  await withServer(t, async ({ home, post }) => {
+    const source = path.join(home, '.claude', 'skills', 'incoming-workbuddy');
+    const conflict = path.join(home, '.workbuddy', 'skills_disabled', 'disabled-folder');
+    await createComplexSkill(source, 'disabled-shared-name');
+    await createComplexSkill(conflict, 'disabled-shared-name');
+    const response = await post('/api/skills/import', { sourceDir: source, targetAgent: 'workbuddy' });
+    assert.equal(response.body.status, 'name_ambiguity');
+    assert.equal(response.body.conflict.dir, conflict);
+    assert.equal(response.body.conflict.disabled, true);
+  });
+});
+
+test('overwrite fully replaces the target and moves the old installation to recoverable trash', async (t) => {
+  const trash = await fs.mkdtemp(path.join(os.tmpdir(), 'fanbox-import-trash-'));
+  t.after(() => fs.rm(trash, { recursive: true, force: true }));
+  await withServer(t, async ({ home, post }) => {
+    const source = path.join(home, '.claude', 'skills', 'replace-me');
+    const target = path.join(home, '.codex', 'skills', 'replace-me');
+    await createComplexSkill(source, 'replace-me');
+    await createComplexSkill(target, 'replace-me');
+    await fs.writeFile(path.join(source, 'source-only.txt'), 'new', 'utf8');
+    await fs.writeFile(path.join(target, 'target-only.txt'), 'old', 'utf8');
+
+    const conflict = await post('/api/skills/import', { sourceDir: source, targetAgent: 'codex' });
+    const overwritten = await post('/api/skills/import', {
+      sourceDir: source, targetAgent: 'codex', overwrite: true,
+      sourceFingerprint: conflict.body.sourceFingerprint,
+      conflictFingerprint: conflict.body.conflictFingerprint,
+    });
+    assert.equal(overwritten.body.status, 'overwritten');
+    assert.equal(await fs.readFile(path.join(target, 'source-only.txt'), 'utf8'), 'new');
+    await assert.rejects(fs.stat(path.join(target, 'target-only.txt')), { code: 'ENOENT' });
+    const trashed = await fs.readdir(trash);
+    assert.equal(trashed.length, 1);
+    assert.equal(await fs.readFile(path.join(trash, trashed[0], 'target-only.txt'), 'utf8'), 'old');
+    assert.equal((await fs.stat(source)).isDirectory(), true);
+  }, { FANBOX_TEST_SKILL_TRASH: trash });
+});
+
+test('stale overwrite fingerprints never replace a target changed after confirmation', async (t) => {
+  await withServer(t, async ({ home, post }) => {
+    const source = path.join(home, '.claude', 'skills', 'raced');
+    const target = path.join(home, '.codex', 'skills', 'raced');
+    await createComplexSkill(source, 'raced');
+    await createComplexSkill(target, 'raced');
+    await fs.writeFile(path.join(target, 'old.txt'), 'confirmed old content', 'utf8');
+    const conflict = await post('/api/skills/import', { sourceDir: source, targetAgent: 'codex' });
+    await fs.writeFile(path.join(target, 'external.txt'), 'latest writer wins', 'utf8');
+
+    const response = await post('/api/skills/import', {
+      sourceDir: source, targetAgent: 'codex', overwrite: true,
+      sourceFingerprint: conflict.body.sourceFingerprint,
+      conflictFingerprint: conflict.body.conflictFingerprint,
+    });
+    assert.equal(response.body.status, 'concurrent_changed');
+    assert.equal(await fs.readFile(path.join(target, 'external.txt'), 'utf8'), 'latest writer wins');
+  });
+});
+
+test('source changes after conflict confirmation require a fresh review', async (t) => {
+  await withServer(t, async ({ home, post }) => {
+    const source = path.join(home, '.claude', 'skills', 'source-raced');
+    const target = path.join(home, '.codex', 'skills', 'source-raced');
+    await createComplexSkill(source, 'source-raced');
+    await createComplexSkill(target, 'source-raced');
+    await fs.writeFile(path.join(target, 'old.txt'), 'keep target', 'utf8');
+    const conflict = await post('/api/skills/import', { sourceDir: source, targetAgent: 'codex' });
+    await fs.writeFile(path.join(source, 'new-after-confirmation.txt'), 'new source', 'utf8');
+
+    const response = await post('/api/skills/import', {
+      sourceDir: source, targetAgent: 'codex', overwrite: true,
+      sourceFingerprint: conflict.body.sourceFingerprint,
+      conflictFingerprint: conflict.body.conflictFingerprint,
+    });
+    assert.equal(response.body.status, 'source_changed');
+    assert.equal(await fs.readFile(path.join(target, 'old.txt'), 'utf8'), 'keep target');
+  });
+});
+
+test('unsafe links, loops and special files are rejected before target writes', async (t) => {
+  await withServer(t, async ({ home, post }) => {
+    const socketServers = [];
+    t.after(async () => { await Promise.all(socketServers.map((server) => new Promise((resolve) => server.close(resolve)))); });
+    const fixtures = [];
+    const external = path.join(home, 'private.txt');
+    await fs.writeFile(external, 'private', 'utf8');
+
+    const outside = path.join(home, '.claude', 'skills', 'outside-link');
+    await createComplexSkill(outside, 'outside-link');
+    await fs.symlink(external, path.join(outside, 'leak.txt'));
+    fixtures.push([outside, 'leak.txt']);
+
+    const loop = path.join(home, '.claude', 'skills', 'loop-link');
+    await createComplexSkill(loop, 'loop-link');
+    await fs.symlink('.', path.join(loop, 'again'));
+    fixtures.push([loop, 'again']);
+
+    if (process.platform !== 'win32') {
+      const fifo = path.join(home, '.claude', 'skills', 'fifo-skill');
+      await createComplexSkill(fifo, 'fifo-skill');
+      await new Promise((resolve, reject) => require('node:child_process').execFile('mkfifo', [path.join(fifo, 'pipe')], (e) => e ? reject(e) : resolve()));
+      fixtures.push([fifo, 'pipe']);
+
+      const socketSkill = path.join(home, '.claude', 'skills', 's');
+      await createComplexSkill(socketSkill, 'socket-skill');
+      const socketPath = path.join(socketSkill, 's');
+      const socketServer = require('node:net').createServer();
+      await new Promise((resolve, reject) => socketServer.once('error', reject).listen(socketPath, resolve));
+      assert.equal((await fs.lstat(socketPath)).isSocket(), true);
+      assert.equal((await fs.readdir(socketSkill)).includes('s'), true);
+      socketServers.push(socketServer);
+      fixtures.push([socketSkill, 's']);
+    }
+
+    for (const [source, problemPath] of fixtures) {
+      const response = await post('/api/skills/import', { sourceDir: source, targetAgent: 'codex' });
+      assert.equal(response.body.status, 'unsafe_content');
+      assert.equal(response.body.problemPath, problemPath, JSON.stringify(response.body));
+      await assert.rejects(fs.stat(path.join(home, '.codex', 'skills', path.basename(source))), { code: 'ENOENT' });
+    }
+  });
+});
+
+test('successful import reports when existing Agent configuration keeps the target disabled', async (t) => {
+  await withServer(t, async ({ home, post }) => {
+    const source = path.join(home, '.claude', 'skills', 'configured-off');
+    const target = path.join(home, '.codex', 'skills', 'configured-off');
+    await createComplexSkill(source, 'configured-off');
+    await fs.mkdir(path.join(home, '.codex'), { recursive: true });
+    await fs.writeFile(path.join(home, '.codex', 'config.toml'), `[[skills.config]]\npath = ${JSON.stringify(path.join(target, 'SKILL.md'))}\nenabled = false\n`, 'utf8');
+    const response = await post('/api/skills/import', { sourceDir: source, targetAgent: 'codex' });
+    assert.equal(response.body.status, 'created');
+    assert.equal(response.body.targetDisabled, true);
+  });
+});
+
+test('trash failure rolls overwrite back and leaves no visible scratch installation', async (t) => {
+  await withServer(t, async ({ home, post }) => {
+    const source = path.join(home, '.claude', 'skills', 'rollback');
+    const target = path.join(home, '.codex', 'skills', 'rollback');
+    await createComplexSkill(source, 'rollback');
+    await createComplexSkill(target, 'rollback');
+    await fs.writeFile(path.join(target, 'old.txt'), 'must survive', 'utf8');
+    const conflict = await post('/api/skills/import', { sourceDir: source, targetAgent: 'codex' });
+    const response = await post('/api/skills/import', {
+      sourceDir: source, targetAgent: 'codex', overwrite: true,
+      sourceFingerprint: conflict.body.sourceFingerprint,
+      conflictFingerprint: conflict.body.conflictFingerprint,
+    });
+    assert.equal(response.body.status, 'failed');
+    assert.equal(await fs.readFile(path.join(target, 'old.txt'), 'utf8'), 'must survive');
+    const entries = await fs.readdir(path.dirname(target));
+    assert.deepEqual(entries.filter((entry) => entry.startsWith('.fanbox-import-') || entry.startsWith('.fanbox-rollback-')), []);
+  }, { FANBOX_TEST_SKILL_IMPORT_FAIL: 'trash' });
 });
 
 test('disabled and plugin installations remain valid import sources without changing agent configuration', async (t) => {
@@ -233,5 +423,20 @@ test('a source removed after scanning cannot be imported and leaves no target or
     await assert.rejects(fs.stat(path.join(targetRoot, 'vanished-source')), { code: 'ENOENT' });
     const entries = await fs.readdir(targetRoot).catch(() => []);
     assert.deepEqual(entries.filter((entry) => entry.startsWith('.fanbox-import-')), []);
+  });
+});
+
+test('concurrent imports share the Skills write queue and produce one deterministic installation', async (t) => {
+  await withServer(t, async ({ home, post }) => {
+    const source = path.join(home, '.claude', 'skills', 'queued-import');
+    await createComplexSkill(source, 'queued-import');
+    const [first, second] = await Promise.all([
+      post('/api/skills/import', { sourceDir: source, targetAgent: 'codex' }),
+      post('/api/skills/import', { sourceDir: source, targetAgent: 'codex' }),
+    ]);
+    assert.deepEqual([first.body.status, second.body.status].sort(), ['created', 'identical']);
+    assert.equal(await fs.readFile(path.join(home, '.codex', 'skills', 'queued-import', 'SKILL.md'), 'utf8'), await fs.readFile(path.join(source, 'SKILL.md'), 'utf8'));
+    const entries = await fs.readdir(path.join(home, '.codex', 'skills'));
+    assert.deepEqual(entries.filter((entry) => entry.startsWith('.fanbox-import-') || entry.startsWith('.fanbox-rollback-')), []);
   });
 });

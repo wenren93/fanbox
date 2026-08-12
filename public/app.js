@@ -1785,6 +1785,49 @@ function skillImportTargetDialog(item, roots) {
     ov.querySelector('[data-act=cancel]').focus();
   });
 }
+
+function skillImportConflictDialog(item, result) {
+  return new Promise((resolve) => {
+    const ov = document.createElement('div');
+    ov.className = 'input-overlay sk-import-overlay';
+    ov.innerHTML = `<div class="input-dialog sk-import-dialog" role="alertdialog" aria-modal="true" aria-labelledby="sk-overwrite-title" aria-describedby="sk-overwrite-note">
+      <div class="input-title" id="sk-overwrite-title">覆盖目标安装项？</div>
+      <div class="sk-import-conflict-meta"><span>来源</span><b>${escapeHtml(item.name)}</b><span>目标 Agent</span><b>${escapeHtml(result.targetLabel)}</b><span>目标位置</span><code>${escapeHtml(tilde(result.targetDir))}</code></div>
+      <div class="sk-import-note" id="sk-overwrite-note">覆盖会用来源完整替换目标，不会合并文件。原目标将移入系统废纸篓，可恢复。</div>
+      <div class="input-actions"><button class="ghost-btn" data-act="cancel">取消</button><button class="danger sk-overwrite-btn" data-act="overwrite">覆盖</button></div>
+    </div>`;
+    document.body.appendChild(ov);
+    const done = (value) => { ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(value); };
+    function onKey(ev) { if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); done(false); } }
+    ov.querySelector('[data-act=cancel]').onclick = () => done(false);
+    ov.querySelector('[data-act=overwrite]').onclick = () => done(true);
+    ov.onclick = (ev) => { if (ev.target === ov) done(false); };
+    document.addEventListener('keydown', onKey, true);
+    ov.querySelector('[data-act=cancel]').focus();
+  });
+}
+
+function skillImportAmbiguityDialog(result) {
+  const conflict = result.conflict || {};
+  return new Promise((resolve) => {
+    const ov = document.createElement('div');
+    ov.className = 'input-overlay sk-import-overlay';
+    ov.innerHTML = `<div class="input-dialog sk-import-dialog" role="alertdialog" aria-modal="true" aria-labelledby="sk-ambiguity-title">
+      <div class="input-title" id="sk-ambiguity-title">目标已有同名 Skill</div>
+      <div class="sk-import-note">“${escapeHtml(conflict.name || conflict.skillName || '未知安装项')}”使用相同 Skill 名称。请先修改名称或卸载冲突安装项，再重试导入。</div>
+      <div class="sk-import-conflict-path">${escapeHtml(tilde(conflict.dir || result.targetDir || ''))}</div>
+      <div class="input-actions"><button class="ghost-btn" data-act="cancel">关闭</button><button class="primary" data-act="reveal">在文件区显示</button></div>
+    </div>`;
+    document.body.appendChild(ov);
+    const done = (value) => { ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(value); };
+    function onKey(ev) { if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); done(false); } }
+    ov.querySelector('[data-act=cancel]').onclick = () => done(false);
+    ov.querySelector('[data-act=reveal]').onclick = () => done(true);
+    ov.onclick = (ev) => { if (ev.target === ov) done(false); };
+    document.addEventListener('keydown', onKey, true);
+    ov.querySelector('[data-act=cancel]').focus();
+  });
+}
 // ---------- 截图直通车：系统截屏落盘 → 右下角浮出直通卡，终端/素材/标注一步到位 ----------
 const shotTray = {
   el: null, timer: null,
@@ -4970,9 +5013,36 @@ const skillsView = {
     if (!targetAgent) return;
     this.busy = true; this.render();
     try {
-      const r = await apiPost('/api/skills/import', { sourceDir: it.dir, targetAgent, cwd: state.cwd });
-      if (r && r.status === 'created') toast(`已导入到 ${r.targetLabel}；新会话可发现`);
-      else toast('导入失败：' + ((r && r.error) || '请重试'), true);
+      let r = await apiPost('/api/skills/import', { sourceDir: it.dir, targetAgent, cwd: state.cwd });
+      if (r && r.status === 'content_conflict') {
+        const overwrite = await skillImportConflictDialog(it, r);
+        if (!overwrite) return;
+        r = await apiPost('/api/skills/import', {
+          sourceDir: it.dir, targetAgent, cwd: state.cwd,
+          overwrite: true, sourceFingerprint: r.sourceFingerprint, conflictFingerprint: r.conflictFingerprint,
+        });
+      }
+      if (r && (r.status === 'created' || r.status === 'overwritten')) {
+        const disabled = r.targetDisabled ? '；目标仍处于停用状态，可用现有开关启用' : '';
+        toast(`已导入到 ${r.targetLabel}；新会话可发现${disabled}`);
+      } else if (r && r.status === 'identical') {
+        toast(`${r.targetLabel} 已有相同安装项`);
+      } else if (r && r.status === 'name_ambiguity') {
+        const reveal = await skillImportAmbiguityDialog(r);
+        if (reveal && r.conflict && r.conflict.dir) await navigate(dirOf(r.conflict.dir));
+      } else if (r && r.status === 'concurrent_changed') {
+        toast('目标内容已变化，请重试', true);
+      } else if (r && r.status === 'source_changed') {
+        toast('来源内容已变化，请重新检查后重试', true);
+      } else if (r && r.status === 'unsafe_content') {
+        toast(`来源包含不安全内容：${r.problemPath || '未知路径'}；请修复后重试`, true);
+      } else if (r && r.status === 'invalid_source') {
+        toast('来源已失效；请刷新并确认安装项后重试', true);
+      } else if (r && r.status === 'self_import') {
+        toast('来源已经位于该目标位置', true);
+      } else {
+        toast('导入失败：' + ((r && r.error) || '请重试'), true);
+      }
     } catch (err) {
       toast('导入失败：' + (err.message || '请求失败'), true);
     } finally {
@@ -5168,7 +5238,7 @@ const skillsView = {
           if (this.busy) return;
           this.busy = true; this.render();
           try {
-            const r = await apiPost('/api/skills/toggle', { dir, enable: it.disabled });
+            const r = await apiPost('/api/skills/toggle', { dir, enable: it.disabled, cwd: state.cwd });
                 if (r.ok) {
                   if (this.selected.has(dir) && r.dir && r.dir !== dir) { this.selected.delete(dir); this.selected.add(r.dir); }
                   const done = it.disabled ? '已启用 ' + it.name : '已停用 ' + it.name + '（文件还在，随时可启用）';
@@ -5197,7 +5267,7 @@ const skillsView = {
           if (!ok) return;
           this.busy = true; this.render();
           try {
-            const r = await apiPost('/api/skills/trash', { dir });
+            const r = await apiPost('/api/skills/trash', { dir, cwd: state.cwd });
             if (r.ok) { toast('已卸载，可从系统废纸篓恢复'); this.open.delete(dir); this.selected.delete(dir); }
             else toast('卸载失败：' + (r.error || ''), true);
           } catch (err) { toast('卸载失败：' + (err.message || '请求失败'), true); }
@@ -5205,7 +5275,7 @@ const skillsView = {
         }
         return;
       }
-      if (row) { this.open.has(dir) ? this.open.delete(dir) : this.open.add(dir); this.render(); }
+      if (row && !this.busy) { this.open.has(dir) ? this.open.delete(dir) : this.open.add(dir); this.render(); }
     });
     // 拖 skill 行 → 终端：带 skill 名专用类型；text/plain 给外部目标
     area.querySelectorAll('.sk-row').forEach((r) => {

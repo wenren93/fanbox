@@ -2081,6 +2081,7 @@ const CLAUDE_SETTINGS = path.join(HOME, '.claude', 'settings.json');
 const SKILL_DESC_CUT = 1536; // Claude Code 单条 description 的截断线（官方文档）
 const SKILL_BUDGET_CHARS = 15000; // 描述总预算的社区实测估算值（窗口的 1%），仅作预警参考
 let skillsCache = { at: 0, data: null };
+let skillsMutationGeneration = 0;
 
 async function atomicWriteText(file, text) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
@@ -2178,7 +2179,14 @@ async function setCodexSkillEnabled(skillFile, enable) {
 // 队列只包最外层请求，批量内部直接调用未入队的 item helper，避免递归等待自身。
 let _skillsWriteChain = Promise.resolve();
 function queueSkillsWrite(operation) {
-  const run = _skillsWriteChain.then(operation);
+  const run = _skillsWriteChain.then(async () => {
+    skillsMutationGeneration++;
+    try { return await operation(); }
+    finally {
+      skillsMutationGeneration++;
+      skillsCache = { at: 0, data: null };
+    }
+  });
   _skillsWriteChain = run.catch(() => {});
   return run;
 }
@@ -2417,6 +2425,7 @@ async function codexSkillEvents(cutoff) {
 async function skillsData(opts = {}) {
   const { force = false, extraCwds = [] } = opts;
   if (!force && skillsCache.data && Date.now() - skillsCache.at < 30000) return skillsCache.data;
+  const scanGeneration = skillsMutationGeneration;
   const cutoff = Date.now() - 45 * 86400000;
   const items = [];
   await scanSkillRoot(CLAUDE_SKILLS, 'claude', '~/.claude', items);
@@ -2556,17 +2565,18 @@ async function skillsData(opts = {}) {
       budgetChars, budgetLimit: SKILL_BUDGET_CHARS, descCut: SKILL_DESC_CUT,
     },
   };
-  skillsCache = { at: Date.now(), data };
+  if (scanGeneration === skillsMutationGeneration) skillsCache = { at: Date.now(), data };
   return data;
 }
 
 // 启停/卸载的路径校验：只允许动「最近一次扫描出来的 skill 目录」，杜绝任意路径移动/删除
-async function validateSkillDir(dir) {
-  if (!skillsCache.data) await skillsData();
+async function validateSkillDir(dir, extraCwds = []) {
+  const previous = skillsCache.data;
+  const latest = await skillsData({ force: true, extraCwds });
   const target = path.resolve(String(dir || ''));
-  const it = (skillsCache.data.items || []).find((x) => x.dir === target);
+  const it = (latest.items || []).find((x) => x.dir === target);
   if (!it) return { ok: false, error: '不在已扫描的 skills 清单里' };
-  return { ok: true, item: it };
+  return { ok: true, item: it, snapshot: previous || latest };
 }
 
 async function skillToggleItem(it, enable) {
@@ -2609,10 +2619,10 @@ async function skillToggleItem(it, enable) {
   return { ok: true, dir: dest, ...(enable && it.toggleStrategy === 'codex-config' ? { restartRequired: 'codex' } : {}) };
 }
 
-async function skillToggle(dir, enable) {
-  const v = await validateSkillDir(dir);
+async function skillToggle(dir, enable, cwd = null) {
+  const v = await validateSkillDir(dir, cwd ? [path.resolve(cwd)] : []);
   if (!v.ok) return v;
-  const snapshot = skillsCache.data;
+  const snapshot = v.snapshot;
   const r = await skillToggleItem(v.item, enable);
   if (r.ok) skillsCache = { at: 0, data: null };
   if (r.noop) return { ok: true, dir: r.dir };
@@ -2627,8 +2637,8 @@ async function skillTrashItem(it) {
   return trashPath(it.dir);
 }
 
-async function skillTrash(dir) {
-  const v = await validateSkillDir(dir);
+async function skillTrash(dir, cwd = null) {
+  const v = await validateSkillDir(dir, cwd ? [path.resolve(cwd)] : []);
   if (!v.ok) return v;
   const r = await skillTrashItem(v.item);
   if (r.ok) skillsCache = { at: 0, data: null };
@@ -2646,11 +2656,24 @@ function parseSkillImportRequest(body) {
   if (body.cwd !== undefined && (typeof body.cwd !== 'string' || !body.cwd.trim() || body.cwd.includes('\0'))) {
     return { ok: false, error: 'cwd 必须是非空路径字符串' };
   }
+  if (body.overwrite !== undefined && typeof body.overwrite !== 'boolean') {
+    return { ok: false, error: 'overwrite 必须是布尔值' };
+  }
+  if (body.conflictFingerprint !== undefined && (typeof body.conflictFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(body.conflictFingerprint))) {
+    return { ok: false, error: 'conflictFingerprint 格式错误' };
+  }
+  if (body.sourceFingerprint !== undefined && (typeof body.sourceFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(body.sourceFingerprint))) {
+    return { ok: false, error: 'sourceFingerprint 格式错误' };
+  }
+  if (body.overwrite && (!body.conflictFingerprint || !body.sourceFingerprint)) return { ok: false, error: '覆盖必须提供来源与冲突指纹' };
   return {
     ok: true,
     sourceDir: path.resolve(body.sourceDir),
     targetAgent: body.targetAgent,
     cwd: body.cwd === undefined ? null : path.resolve(body.cwd),
+    overwrite: body.overwrite === true,
+    conflictFingerprint: body.conflictFingerprint || null,
+    sourceFingerprint: body.sourceFingerprint || null,
   };
 }
 
@@ -2676,6 +2699,13 @@ async function canonicalFuturePath(candidate) {
   }
 }
 
+class UnsafeSkillContentError extends Error {
+  constructor(problemPath, message) {
+    super(message);
+    this.problemPath = problemPath || '.';
+  }
+}
+
 async function copySkillTree(sourceRoot, tempRoot) {
   const realSourceRoot = await fsp.realpath(sourceRoot);
   const rootStat = await fsp.stat(realSourceRoot);
@@ -2684,22 +2714,22 @@ async function copySkillTree(sourceRoot, tempRoot) {
   const copyEntry = async (sourcePath, destPath, relativePath, ancestors) => {
     let lst;
     try { lst = await fsp.lstat(sourcePath); }
-    catch (e) { throw new Error(`${relativePath || '.'}：无法读取（${e.message}）`); }
+    catch (e) { throw new UnsafeSkillContentError(relativePath, '无法读取'); }
 
     let effectivePath = sourcePath;
     let stat = lst;
     if (lst.isSymbolicLink()) {
       let resolved;
       try { resolved = await fsp.realpath(sourcePath); }
-      catch (e) { throw new Error(`${relativePath || '.'}：软链接无效或形成循环`); }
-      if (!isPathInside(realSourceRoot, resolved)) throw new Error(`${relativePath || '.'}：软链接指向 Skill 目录之外`);
+      catch (e) { throw new UnsafeSkillContentError(relativePath, '软链接无效或形成循环'); }
+      if (!isPathInside(realSourceRoot, resolved)) throw new UnsafeSkillContentError(relativePath, '软链接指向 Skill 目录之外');
       effectivePath = resolved;
       stat = await fsp.stat(resolved);
     }
 
     if (stat.isDirectory()) {
       const realDir = await fsp.realpath(effectivePath);
-      if (ancestors.has(realDir)) throw new Error(`${relativePath || '.'}：目录或软链接形成循环`);
+      if (ancestors.has(realDir)) throw new UnsafeSkillContentError(relativePath, '目录或软链接形成循环');
       if (relativePath) await fsp.mkdir(destPath, { mode: 0o755 });
       const nextAncestors = new Set(ancestors);
       nextAncestors.add(realDir);
@@ -2712,12 +2742,34 @@ async function copySkillTree(sourceRoot, tempRoot) {
     }
 
     if (stat.isFile()) {
-      await fsp.copyFile(effectivePath, destPath);
-      await fsp.chmod(destPath, stat.mode & 0o777);
+      const noFollow = fs.constants.O_NOFOLLOW || 0;
+      let sourceHandle = null;
+      let destHandle = null;
+      try {
+        sourceHandle = await fsp.open(effectivePath, fs.constants.O_RDONLY | noFollow);
+        const opened = await sourceHandle.stat();
+        if (!opened.isFile()) throw new UnsafeSkillContentError(relativePath, '条目在复制前发生变化');
+        destHandle = await fsp.open(destPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, opened.mode & 0o777);
+        const buffer = Buffer.allocUnsafe(64 * 1024);
+        let position = 0;
+        while (true) {
+          const { bytesRead } = await sourceHandle.read(buffer, 0, buffer.length, position);
+          if (!bytesRead) break;
+          await destHandle.write(buffer, 0, bytesRead, position);
+          position += bytesRead;
+        }
+        await destHandle.chmod(opened.mode & 0o777);
+      } catch (e) {
+        if (e instanceof UnsafeSkillContentError) throw e;
+        throw new UnsafeSkillContentError(relativePath, '无法安全复制');
+      } finally {
+        if (sourceHandle) await sourceHandle.close().catch(() => {});
+        if (destHandle) await destHandle.close().catch(() => {});
+      }
       return;
     }
 
-    throw new Error(`${relativePath || '.'}：不支持特殊文件`);
+    throw new UnsafeSkillContentError(relativePath, '不支持特殊文件');
   };
 
   await copyEntry(realSourceRoot, tempRoot, '', new Set());
@@ -2726,6 +2778,131 @@ async function copySkillTree(sourceRoot, tempRoot) {
   if (!skillStat.isFile()) throw new Error('来源缺少可读 SKILL.md');
   await fsp.access(skillFile, fs.constants.R_OK);
   return realSourceRoot;
+}
+
+async function skillTreeFingerprint(root) {
+  const hash = crypto.createHash('sha256');
+  const realRoot = await fsp.realpath(root);
+  const writeField = (value) => {
+    const data = Buffer.isBuffer(value) ? value : Buffer.from(String(value));
+    const length = Buffer.allocUnsafe(8);
+    length.writeBigUInt64BE(BigInt(data.length));
+    hash.update(length);
+    hash.update(data);
+  };
+  const hashFile = (file) => new Promise((resolve, reject) => {
+    const stream = fs.createReadStream(file);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.once('end', resolve);
+    stream.once('error', reject);
+  });
+  const visit = async (current, relativePath, ancestors) => {
+    let stat;
+    try { stat = await fsp.lstat(current); }
+    catch (e) { throw new Error(`${relativePath || '.'}：无法读取`); }
+    let effectivePath = current;
+    if (stat.isSymbolicLink()) {
+      let resolved;
+      try { resolved = await fsp.realpath(current); } catch { throw new Error(`${relativePath || '.'}：软链接无效或形成循环`); }
+      if (!isPathInside(realRoot, resolved)) throw new Error(`${relativePath || '.'}：软链接指向安装项目录之外`);
+      effectivePath = resolved;
+      stat = await fsp.stat(resolved);
+    }
+    const rel = relativePath.split(path.sep).join('/');
+    if (stat.isDirectory()) {
+      const realDir = await fsp.realpath(effectivePath);
+      if (ancestors.has(realDir)) throw new Error(`${relativePath || '.'}：目录或软链接形成循环`);
+      hash.update('d'); writeField(rel);
+      const nextAncestors = new Set(ancestors);
+      nextAncestors.add(realDir);
+      const names = await fsp.readdir(effectivePath);
+      names.sort((a, b) => Buffer.from(a).compare(Buffer.from(b)));
+      for (const name of names) await visit(path.join(effectivePath, name), relativePath ? path.join(relativePath, name) : name, nextAncestors);
+      return;
+    }
+    if (stat.isFile()) {
+      hash.update('f'); writeField(rel); writeField(stat.mode & 0o111); writeField(stat.size);
+      await hashFile(effectivePath);
+      return;
+    }
+    throw new Error(`${relativePath || '.'}：目标含不支持的条目`);
+  };
+  await visit(realRoot, '', new Set());
+  return hash.digest('hex');
+}
+
+async function skillNameFromDir(dir) {
+  try {
+    const text = await fsp.readFile(path.join(dir, 'SKILL.md'), 'utf8');
+    const fm = skillFrontmatter(text);
+    return fm && fm.name ? fm.name : path.basename(dir);
+  } catch {
+    return null;
+  }
+}
+
+function findSkillNameAmbiguity(items, target, targetDir, sourceSkillName) {
+  const targetRoot = path.resolve(target.root);
+  const workbuddyDisabledRoot = path.resolve(path.dirname(target.root), 'skills_disabled');
+  const sourceMatchesTarget = (item) => {
+    const dir = path.resolve(item.dir);
+    if (target.id === 'workbuddy') return isPathInside(targetRoot, dir) || isPathInside(workbuddyDisabledRoot, dir);
+    return item.source === target.id && isPathInside(targetRoot, dir);
+  };
+  const conflict = (items || []).find((item) => !item.residue
+    && sourceMatchesTarget(item)
+    && path.resolve(item.dir) !== path.resolve(targetDir)
+    && (item.skillName || item.name) === sourceSkillName);
+  return conflict ? { name: conflict.name, skillName: sourceSkillName, dir: conflict.dir, disabled: !!conflict.disabled } : null;
+}
+
+function importTargetDetails(target, targetDir) {
+  return { targetAgent: target.id, targetLabel: target.label, targetDir };
+}
+
+async function importSuccessResult(status, target, targetDir) {
+  skillsCache = { at: 0, data: null };
+  const refreshed = await skillsData({ force: true });
+  const item = (refreshed.items || []).find((candidate) => path.resolve(candidate.dir) === path.resolve(targetDir));
+  return { ok: true, status, ...importTargetDetails(target, targetDir), targetDisabled: !!(item && item.disabled) };
+}
+
+function skillImportTestFailure(stage) {
+  if (process.env.NODE_ENV === 'test' && process.env.FANBOX_TEST_SKILL_IMPORT_FAIL === stage) {
+    throw new Error(`测试注入：${stage}`);
+  }
+}
+
+async function trashImportedSkill(dir) {
+  skillImportTestFailure('trash');
+  if (process.env.NODE_ENV === 'test' && process.env.FANBOX_TEST_SKILL_TRASH) {
+    await fsp.mkdir(process.env.FANBOX_TEST_SKILL_TRASH, { recursive: true });
+    const destination = path.join(process.env.FANBOX_TEST_SKILL_TRASH, `${path.basename(dir)}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`);
+    await fsp.rename(dir, destination);
+    return { ok: true, destination };
+  }
+  return trashPath(dir);
+}
+
+async function removeImportScratch(dir) {
+  if (dir) await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+}
+
+async function rollbackSkillOverwrite(targetDir, rollbackDir, tempDir) {
+  let rollbackError = null;
+  let failedNewDir = null;
+  try {
+    try {
+      await fsp.lstat(targetDir);
+      failedNewDir = await fsp.mkdtemp(path.join(path.dirname(targetDir), '.fanbox-import-'));
+      await fsp.rmdir(failedNewDir);
+      await fsp.rename(targetDir, failedNewDir);
+    } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    await fsp.rename(rollbackDir, targetDir);
+  } catch (e) { rollbackError = e; }
+  await removeImportScratch(tempDir);
+  await removeImportScratch(failedNewDir);
+  if (rollbackError) throw rollbackError;
 }
 
 async function skillImport(parsed) {
@@ -2747,38 +2924,108 @@ async function skillImport(parsed) {
     return { ok: false, status: 'self_import', error: '来源已经位于该目标位置' };
   }
 
-  try {
-    await fsp.lstat(targetDir);
-    return { ok: false, status: 'target_exists', error: '目标已有同目录名安装项' };
-  } catch (e) {
-    if (e.code !== 'ENOENT') return { ok: false, status: 'failed', error: `无法检查目标：${e.message}` };
-  }
-
   let tempDir = null;
+  let rollbackDir = null;
   try {
     await fsp.mkdir(target.root, { recursive: true });
     tempDir = await fsp.mkdtemp(path.join(target.root, '.fanbox-import-'));
     await copySkillTree(source.dir, tempDir);
+    const sourceFingerprint = await skillTreeFingerprint(tempDir);
+    const sourceSkillName = await skillNameFromDir(tempDir) || source.skillName || source.name;
 
-    // 临时副本完成后再次确认来源仍是有效扫描项，并确保最终位置没有在预检后出现。
+    // 临时副本完成后再次扫描来源；若复制期间来源变化，丢弃临时内容并基于最新内容重新预检。
     const latest = await skillsData({ force: true, extraCwds: parsed.cwd ? [parsed.cwd] : [] });
     const latestSource = (latest.items || []).find((item) => path.resolve(item.dir) === parsed.sourceDir && !item.residue);
-    if (!latestSource) throw new Error('来源已变化，请重试');
+    if (!latestSource) return { ok: false, status: 'invalid_source', error: '来源已变化，请重试' };
+    const verifyDir = await fsp.mkdtemp(path.join(target.root, '.fanbox-import-'));
+    try {
+      await copySkillTree(latestSource.dir, verifyDir);
+      if (await skillTreeFingerprint(verifyDir) !== sourceFingerprint) {
+        await removeImportScratch(tempDir); tempDir = verifyDir;
+      } else {
+        await removeImportScratch(verifyDir);
+      }
+    } catch (e) {
+      await removeImportScratch(verifyDir);
+      throw e;
+    }
+
+    const finalSourceFingerprint = await skillTreeFingerprint(tempDir);
+    const finalSourceSkillName = await skillNameFromDir(tempDir) || sourceSkillName;
+    if (parsed.overwrite && finalSourceFingerprint !== parsed.sourceFingerprint) {
+      return { ok: false, status: 'source_changed', ...importTargetDetails(target, targetDir) };
+    }
+    const ambiguity = findSkillNameAmbiguity(latest.items, target, targetDir, finalSourceSkillName);
+    if (ambiguity) {
+      return { ok: false, status: 'name_ambiguity', conflict: ambiguity, ...importTargetDetails(target, targetDir) };
+    }
+
+    let targetFingerprint = null;
     try {
       await fsp.lstat(targetDir);
-      return { ok: false, status: 'target_exists', error: '目标已有同目录名安装项' };
+      targetFingerprint = await skillTreeFingerprint(targetDir);
     } catch (e) {
       if (e.code !== 'ENOENT') throw e;
     }
 
+    if (targetFingerprint) {
+      if (targetFingerprint === finalSourceFingerprint) {
+        return { ok: true, status: 'identical', ...importTargetDetails(target, targetDir) };
+      }
+      if (!parsed.overwrite) {
+        return { ok: false, status: 'content_conflict', sourceFingerprint: finalSourceFingerprint, conflictFingerprint: targetFingerprint, ...importTargetDetails(target, targetDir) };
+      }
+      if (targetFingerprint !== parsed.conflictFingerprint) {
+        return { ok: false, status: 'concurrent_changed', ...importTargetDetails(target, targetDir) };
+      }
+
+      // 覆盖确认之后再做一次读取；外部 Agent 刚写入的内容不能被旧确认抹掉。
+      if (await skillTreeFingerprint(targetDir) !== targetFingerprint) {
+        return { ok: false, status: 'concurrent_changed', ...importTargetDetails(target, targetDir) };
+      }
+
+      rollbackDir = await fsp.mkdtemp(path.join(target.root, '.fanbox-rollback-'));
+      await fsp.rmdir(rollbackDir);
+      skillImportTestFailure('swap');
+      await fsp.rename(targetDir, rollbackDir);
+      try {
+        if (await skillTreeFingerprint(rollbackDir) !== targetFingerprint) {
+          await fsp.rename(rollbackDir, targetDir);
+          rollbackDir = null;
+          return { ok: false, status: 'concurrent_changed', ...importTargetDetails(target, targetDir) };
+        }
+        await fsp.rename(tempDir, targetDir);
+        tempDir = null;
+        const trashed = await trashImportedSkill(rollbackDir);
+        if (!trashed.ok) throw new Error(trashed.error || '原目标移入废纸篓失败');
+        rollbackDir = null;
+      } catch (e) {
+        await rollbackSkillOverwrite(targetDir, rollbackDir, tempDir);
+        rollbackDir = null; tempDir = null;
+        throw e;
+      }
+      return importSuccessResult('overwritten', target, targetDir);
+    }
+
+    if (parsed.overwrite) {
+      return { ok: false, status: 'concurrent_changed', ...importTargetDetails(target, targetDir) };
+    }
+
+    skillImportTestFailure('create');
     await fsp.rename(tempDir, targetDir);
     tempDir = null;
-    skillsCache = { at: 0, data: null };
-    return { ok: true, status: 'created', targetAgent: target.id, targetLabel: target.label, targetDir };
+    return importSuccessResult('created', target, targetDir);
   } catch (e) {
+    if (e instanceof UnsafeSkillContentError) {
+      return { ok: false, status: 'unsafe_content', problemPath: e.problemPath, error: e.message };
+    }
     return { ok: false, status: 'failed', error: e.message || '导入失败' };
   } finally {
-    if (tempDir) await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    await removeImportScratch(tempDir);
+    // 回滚目录只会在旧目标已恢复或已成功进入废纸篓后清空；这里不永久删除仍需恢复的原安装项。
+    if (rollbackDir) {
+      try { await fsp.rename(rollbackDir, targetDir); rollbackDir = null; } catch { /* 保留回滚内容，避免数据丢失 */ }
+    }
   }
 }
 
@@ -3336,7 +3583,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/skills/install-builtin' && req.method === 'POST') {
       const b = await readBody(req);
-      return sendJSON(res, 200, await builtinSkillInstall(b.id));
+      return sendJSON(res, 200, await queueSkillsWrite(() => builtinSkillInstall(b.id)));
     }
     if (p === '/api/skills/refresh' && req.method === 'POST') {
       const b = await readBody(req);
@@ -3345,11 +3592,11 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/skills/toggle' && req.method === 'POST') {
       const b = await readBody(req);
-      return sendJSON(res, 200, await queueSkillsWrite(() => skillToggle(b.dir, !!b.enable)));
+      return sendJSON(res, 200, await queueSkillsWrite(() => skillToggle(b.dir, !!b.enable, b.cwd)));
     }
     if (p === '/api/skills/trash' && req.method === 'POST') {
       const b = await readBody(req);
-      return sendJSON(res, 200, await queueSkillsWrite(() => skillTrash(b.dir)));
+      return sendJSON(res, 200, await queueSkillsWrite(() => skillTrash(b.dir, b.cwd)));
     }
     if (p === '/api/skills/batch' && req.method === 'POST') {
       const parsed = parseSkillBatchRequest(await readBody(req));
