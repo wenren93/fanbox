@@ -31,11 +31,15 @@ test('Skills perspective keeps Installed and Discover as separate top-level tabs
 
 test('Discovery search is explicit and guards Chinese composition', () => {
   const js = source();
+  const css = styles();
   assert.match(js, /compositionstart/);
   assert.match(js, /compositionend/);
   assert.match(js, /key\s*===\s*['"]Enter['"]/);
   assert.match(js, /\/api\/skills\/discovery\/search/);
-  assert.match(js, /搜索词[\s\S]{0,180}skills\.sh/);
+  assert.match(js, /class="primary sk-disc-search-btn"[^>]*aria-label="搜索"[^>]*title="搜索"/);
+  assert.match(js, /:\s*ic\('search',\s*'currentColor',\s*17\)/);
+  assert.match(css, /\.sk-disc-search-btn\s*\{[^}]*width:\s*39px[^}]*height:\s*39px/s);
+  assert.doesNotMatch(js, /class="sk-disc-privacy"/);
 });
 
 test('Discovery results expose unchecked state, source link and inspection action', () => {
@@ -69,10 +73,11 @@ test('Discovery actions use accessible icon buttons instead of visible text labe
   assert.match(js, /sk-disc-spinner/);
 });
 
-test('Installation confirmation supports four controlled targets and enhanced acknowledgement', () => {
+test('Installation confirmation supports four controlled targets without risk acknowledgement gate', () => {
   const js = source();
   for (const target of ['claude', 'codex', 'agents', 'workbuddy']) assert.match(js, new RegExp(target));
-  assert.match(js, /acknowledge/);
+  assert.doesNotMatch(js, /sk-disc-ack|name="acknowledge"|acknowledge,/);
+  assert.doesNotMatch(js, /请先展开并确认风险明细/);
   assert.match(js, /\/api\/skills\/discovery\/install/);
   assert.match(js, /完整文件|文件清单/);
   assert.match(js, /binaryResources\)\s*\?\s*i\.binaryResources\s*:\s*\(Array\.isArray\(i\.binaries\)/);

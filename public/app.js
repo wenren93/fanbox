@@ -5174,9 +5174,7 @@ const skillsView = {
     if (!i || d.inspecting) return;
     const area = $('#file-area');
     const target = (area.querySelector('[name=discovery-target]:checked') || {}).value || d.defaultTargetAgent;
-    const acknowledge = Boolean(area.querySelector('#sk-disc-ack') && area.querySelector('#sk-disc-ack').checked);
     const overwrite = Boolean(area.querySelector('#sk-disc-overwrite') && area.querySelector('#sk-disc-overwrite').checked);
-    if (i.enhancedConfirmation && !acknowledge) { toast('请先展开并确认风险明细', true); return; }
     if (this.conflictNeedsOverwrite(i) && !overwrite) { toast('请明确确认替换现有安装项', true); return; }
     const remember = Boolean(area.querySelector('#sk-disc-remember') && area.querySelector('#sk-disc-remember').checked);
     d.inspecting = true; d.installError = ''; this.render();
@@ -5187,7 +5185,7 @@ const skillsView = {
       }
       const expected = i.expected || {};
       const r = await apiPost('/api/skills/discovery/install', {
-        inspectionId: i.id, targetAgent: target, acknowledge, overwrite,
+        inspectionId: i.id, targetAgent: target, overwrite,
         expectedTargetHash: expected.targetHash || i.expectedTargetHash,
         expectedSourceHash: expected.sourceHash || i.contentHash,
       });
@@ -5243,10 +5241,9 @@ const skillsView = {
     let h = `<div class="sk-wrap sk-discovery-wrap">
       ${this.tabsHtml()}
       <header class="sk-disc-head"><div><h2>发现新的 Skill</h2><p>搜索社区索引；外部条目与本机安装项始终分开。</p></div></header>
-      <div class="sk-disc-privacy">${ic('globe', 'currentColor', 16)}<span><b>隐私提示</b>：只有在你按回车或点击“搜索”后，搜索词才会从本机直接发送给 skills.sh；不会发送本机 Skill、项目路径、目标 Agent 或安装历史。</span></div>
       <form class="sk-disc-search" id="sk-disc-search-form" role="search">
         <input type="search" id="sk-disc-query" value="${escapeHtml(d.input)}" maxlength="160" placeholder="输入关键词，例如：代码审查" aria-label="搜索 skills.sh" autocomplete="off" spellcheck="false" ${d.searching ? 'disabled' : ''}>
-        <button class="primary" type="submit" ${d.searching || !d.input.trim() ? 'disabled' : ''}>${d.searching ? '搜索中…' : '搜索'}</button>
+        <button class="primary sk-disc-search-btn" type="submit" aria-label="搜索" title="搜索" ${d.searching || !d.input.trim() ? 'disabled' : ''}>${d.searching ? `<span class="sk-disc-spinner">${ic('clock', 'currentColor', 17)}</span>` : ic('search', 'currentColor', 17)}</button>
       </form>
       ${stateMessage}
       ${d.status === 'idle' ? '<div class="sk-disc-welcome"><b>只在明确提交时联网</b><span>结果最多 20 条，顺序与 skills.sh 一致。安装前 FanBox 会固定 GitHub commit 并在本机检查内容。</span></div>' : ''}
@@ -5300,7 +5297,7 @@ const skillsView = {
       ${this.discovery.installError ? `<div class="sk-disc-install-error" role="alert"><b>安装失败，确认内容已保留</b><span>${escapeHtml(this.discovery.installError)}</span></div>` : ''}
       <div class="sk-disc-facts">
         <dl><dt>公开仓库</dt><dd>${escapeHtml(i.repository || '—')}</dd><dt>作者</dt><dd>${escapeHtml(i.author || '—')}</dd><dt>Skill 路径</dt><dd>${escapeHtml(i.skillPath || '—')}</dd><dt>固定 commit</dt><dd><code>${escapeHtml((i.commit || '').slice(0, 12) || '—')}</code></dd><dt>许可证</dt><dd>${escapeHtml(i.license || '许可证未知')}</dd></dl>
-        <div class="sk-disc-check ${enhanced ? 'needs-confirm' : 'passed'}"><b>${blocked ? '结构性阻止' : enhanced ? '需要确认' : '检查通过'}</b><span>这只是可客观验证的本机检查，不是安全认证。</span></div>
+        <div class="sk-disc-check ${enhanced ? 'needs-confirm' : 'passed'}"><b>${blocked ? '结构性阻止' : enhanced ? '发现风险' : '检查通过'}</b><span>风险明细可自行查看；这不是安全认证。</span></div>
       </div>
       <div class="sk-disc-metrics"><span><b>${Number(i.fileCount ?? list.files.length).toLocaleString()}</b> 个文件</span><span><b>${escapeHtml(fmtSize(Number(i.totalSize || 0)) || '0 B')}</b> 总大小</span><span><b>${list.scripts.length}</b> 个脚本</span><span><b>${list.binaries.length}</b> 个二进制资源</span><span><b>${list.tools.length}</b> 项工具声明</span><span><b>${list.dependencies.length}</b> 项外部依赖</span></div>
       ${conflict ? `<div class="sk-disc-conflict"><b>${escapeHtml(conflict.title || (blocked ? '同名异源冲突' : '目标安装项需要明确处置'))}</b><span>${escapeHtml(conflict.message || conflict.reason || '现有安装项不会被静默覆盖。')}</span>${conflict.dir ? `<code>${escapeHtml(tilde(conflict.dir))}</code>` : ''}</div>` : ''}
@@ -5308,7 +5305,6 @@ const skillsView = {
         ${this.discoveryDetailGroup('风险', list.risks)}${this.discoveryDetailGroup('脚本 / 可执行文件', list.scripts)}${this.discoveryDetailGroup('二进制资源', list.binaries)}${this.discoveryDetailGroup('工具声明', list.tools)}${this.discoveryDetailGroup('外部依赖', list.dependencies)}
         <div class="sk-disc-file-list"><b>完整文件清单</b>${list.paths.length ? `<ul>${list.paths.map((p) => `<li><code>${escapeHtml(p)}</code></li>`).join('')}</ul>` : '<span>没有其他文件</span>'}</div>
       </details>
-      ${enhanced ? `<label class="sk-disc-confirm-check"><input type="checkbox" id="sk-disc-ack" name="acknowledge"><span>我已展开并查看风险明细，理解 FanBox 不会执行脚本、安装依赖，也不保证此 Skill 安全。</span></label>` : ''}
       ${overwrite ? `<label class="sk-disc-confirm-check danger"><input type="checkbox" id="sk-disc-overwrite"><span>我确认替换现有安装项；旧内容将移入系统废纸篓，可恢复。</span></label>` : ''}
       <fieldset class="sk-disc-targets"><legend>安装到目标 Agent</legend>${Object.entries(targetLabels).map(([id, label]) => `<label><input type="radio" name="discovery-target" value="${id}" ${this.discovery.defaultTargetAgent === id ? 'checked' : ''}><span>${label}</span></label>`).join('')}</fieldset>
       <label class="sk-disc-remember"><input type="checkbox" id="sk-disc-remember"><span>记住为以后安装的默认目标（确认页始终可以更改）</span></label>

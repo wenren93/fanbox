@@ -259,7 +259,7 @@ test('Inspection pins a full SHA, reports deterministic risks, then installs to 
     assert.ok(inspected.body.inspection.files.some((f) => f.path === 'run.sh'));
     assert.deepEqual(inspected.body.inspection.binaries, ['references/asset.bin']);
     assert.deepEqual(inspected.body.inspection.dependencies, ['references/package.json', 'local-runtime >= 1']);
-    const installed = await request('/api/skills/discovery/install', { inspectionId: inspected.body.inspection.id, targetAgent, acknowledge: true });
+    const installed = await request('/api/skills/discovery/install', { inspectionId: inspected.body.inspection.id, targetAgent });
     assert.equal(installed.body.ok, true, JSON.stringify(installed.body));
     const root = { claude: '.claude', codex: '.codex', agents: '.agents', workbuddy: '.workbuddy' }[targetAgent];
     const target = path.join(home, root, 'skills', 'fixture-skill');
