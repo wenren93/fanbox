@@ -43,6 +43,14 @@ test('Discovery results expose unchecked state, source link and inspection actio
   assert.match(js, /installationPrerequisite/);
 });
 
+test('Discovery inspection progress belongs only to the selected result', () => {
+  const js = source();
+  assert.match(js, /inspectingEntryId/);
+  assert.match(js, /entry\.id\s*===\s*d\.inspectingEntryId/);
+  assert.match(js, /正在固定来源并检查内容/);
+  assert.doesNotMatch(js, /\$\{d\.inspecting\s*\?\s*'检查中…'/);
+});
+
 test('Installation confirmation supports four controlled targets and enhanced acknowledgement', () => {
   const js = source();
   for (const target of ['claude', 'codex', 'agents', 'workbuddy']) assert.match(js, new RegExp(target));

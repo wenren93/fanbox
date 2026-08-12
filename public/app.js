@@ -4890,7 +4890,7 @@ const skillsView = {
   discovery: {
     input: '', query: '', results: [], status: 'idle', error: '', cached: false,
     cacheAgeMs: 0, installable: true, searching: false, inspecting: false,
-    inspection: null, installError: '', defaultTargetAgent: 'codex', settingsLoaded: false,
+    inspectingEntryId: null, selectedEntryId: null, inspection: null, installError: '', defaultTargetAgent: 'codex', settingsLoaded: false,
     installationPrerequisite: { ok: true },
   },
   async show() {
@@ -5113,7 +5113,7 @@ const skillsView = {
     const d = this.discovery;
     const query = d.input.trim();
     if (!query || d.searching) return;
-    d.searching = true; d.status = 'loading'; d.error = ''; d.inspection = null; d.installError = '';
+    d.searching = true; d.status = 'loading'; d.error = ''; d.inspection = null; d.installError = ''; d.selectedEntryId = null;
     this.render();
     try {
       const r = await apiPost('/api/skills/discovery/search', { query });
@@ -5141,7 +5141,7 @@ const skillsView = {
   async inspectDiscovery(entry) {
     const d = this.discovery;
     if (d.inspecting || d.searching || d.cached || d.installable === false || entry.installable === false) return;
-    d.inspecting = true; d.installError = '';
+    d.inspecting = true; d.inspectingEntryId = entry.id; d.selectedEntryId = entry.id; d.installError = '';
     this.render();
     try {
       const r = await apiPost('/api/skills/discovery/inspect', { entry });
@@ -5153,7 +5153,7 @@ const skillsView = {
         d.installError = '';
       }
     } catch (err) { d.installError = err.message || '检查失败，请稍后重试'; }
-    finally { d.inspecting = false; if (state.skillsMode && this.activeTab === 'discovery') this.render(); }
+    finally { d.inspecting = false; d.inspectingEntryId = null; if (state.skillsMode && this.activeTab === 'discovery') this.render(); }
   },
   inspectionLists(i) {
     const files = Array.isArray(i.files) ? i.files : [];
@@ -5251,9 +5251,16 @@ const skillsView = {
       ${stateMessage}
       ${d.status === 'idle' ? '<div class="sk-disc-welcome"><b>只在明确提交时联网</b><span>结果最多 20 条，顺序与 skills.sh 一致。安装前 FanBox 会固定 GitHub commit 并在本机检查内容。</span></div>' : ''}
       <section class="sk-disc-results" aria-live="polite">
-        ${d.results.map((entry, index) => this.discoveryResultHtml(entry, index)).join('')}
+        ${d.results.map((entry, index) => {
+          const selected = entry.id === d.selectedEntryId;
+          const detail = selected && d.inspection
+            ? this.discoveryInspectionHtml(d.inspection)
+            : selected && d.installError
+              ? `<div class="sk-disc-install-error" role="alert"><b>检查失败</b><span>${escapeHtml(d.installError)}</span></div>`
+              : '';
+          return this.discoveryResultHtml(entry, index) + detail;
+        }).join('')}
       </section>
-      ${d.inspection ? this.discoveryInspectionHtml(d.inspection) : d.installError ? `<div class="sk-disc-install-error" role="alert"><b>检查失败</b><span>${escapeHtml(d.installError)}</span></div>` : ''}
     </div>`;
     const area = $('#file-area');
     area.innerHTML = h;
@@ -5266,6 +5273,7 @@ const skillsView = {
     const count = Number(entry.installs ?? entry.installCount ?? entry.installations ?? 0);
     const prerequisite = d.installationPrerequisite || { ok: true };
     const canInspect = prerequisite.ok !== false && !d.searching && !d.cached && d.installable !== false && entry.installable !== false;
+    const isInspecting = d.inspecting && entry.id === d.inspectingEntryId;
     const reason = entry.installReason || entry.reason || (!canInspect
       ? (d.cached ? '缓存结果必须联网重新验证' : prerequisite.error || '此来源暂不支持安装') : '');
     return `<article class="sk-disc-card" data-result-index="${index}">
@@ -5273,8 +5281,8 @@ const skillsView = {
         <div class="sk-disc-repo">${ic('gitbranch', 'currentColor', 14)} ${escapeHtml(repo)}</div>
       </div>
       <div class="sk-disc-pop"><b>${count.toLocaleString()}</b><span>安装量</span></div>
-      <div class="sk-disc-actions"><button class="ghost-btn" data-disc-act="source">打开来源</button><button class="primary" data-disc-act="inspect" ${!canInspect || d.inspecting ? 'disabled' : ''}>${d.inspecting ? '检查中…' : (entry.actionLabel || '检查并安装')}</button></div>
-      ${reason ? `<div class="sk-disc-reason">${escapeHtml(reason)}</div>` : ''}
+      <div class="sk-disc-actions"><button class="ghost-btn" data-disc-act="source">打开来源</button><button class="primary" data-disc-act="inspect" ${!canInspect || d.inspecting ? 'disabled' : ''}>${isInspecting ? '检查中…' : (entry.actionLabel || '检查并安装')}</button></div>
+      ${isInspecting ? '<div class="sk-disc-reason" role="status">正在固定来源并检查内容，请稍候…</div>' : reason ? `<div class="sk-disc-reason">${escapeHtml(reason)}</div>` : ''}
     </article>`;
   },
   discoveryInspectionHtml(i) {
@@ -5333,7 +5341,7 @@ const skillsView = {
       if (inspect) inspect.onclick = () => this.inspectDiscovery(entry);
     });
     const close = area.querySelector('[data-disc-act=close-inspection]');
-    if (close) close.onclick = () => { this.discovery.inspection = null; this.discovery.installError = ''; this.render(); };
+    if (close) close.onclick = () => { this.discovery.inspection = null; this.discovery.installError = ''; this.discovery.selectedEntryId = null; this.render(); };
     const sourceInspection = area.querySelector('[data-disc-act=source-inspection]');
     if (sourceInspection) sourceInspection.onclick = () => this.openDiscoverySource(sourceInspection.dataset.source);
     const install = area.querySelector('[data-disc-act=install]');
