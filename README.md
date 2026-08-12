@@ -111,8 +111,8 @@ The UI was designed with [huashu-design](https://github.com/alchaincyf/huashu-de
   AI proposes a cleanup plan from metadata only (it never reads content or touches the filesystem); you approve each move; FanBox executes with a rollback log and one-click undo. Engine selectable (Claude Code / Codex), strategy prompt fully editable.
 - **发版向导 / Release wizard** — node 项目一键串起版本号、CHANGELOG、打包、推送、GitHub Release，整条命令序列在内嵌终端可见地跑。  
   For node projects: version bump, CHANGELOG promotion, build, push and GitHub Release composed into one command sequence that runs visibly in the embedded terminal.
-- **Skills 透视 / Skills X-ray** — 本机全部 agent skills 一个视图：触发统计、健康检查、context 预算、不删文件的启停开关。  
-  Every agent skill on your machine in one view: trigger statistics, health checks (description truncation, missing frontmatter), context budget, enable/disable without deleting.
+- **Skills 透视 / Skills X-ray** — “已安装”保留本机全部 agent skills 的触发统计、健康检查、context 预算和启停管理；“发现”在用户明确提交关键词后搜索 skills.sh，并可把公开 GitHub Skill 固定到具体 commit，经本机结构与风险检查后安装到 Claude、Codex、Agents 或 WorkBuddy。\
+  “Installed” keeps local trigger statistics, health checks, context budget, and enable/disable management. “Discover” searches skills.sh only after explicit submission and can pin a public GitHub Skill to a commit, inspect it locally, and install it to Claude, Codex, Agents, or WorkBuddy.
 - **Agent 用量 / Agent usage** — Claude Code 官方 5h 窗口/周配额（和 `/usage` 同源）+ 本地 token 统计；Codex 限额快照 + 窗口重置识别。  
   Claude Code official 5h window / weekly quota (same source as `/usage`) plus local token statistics; Codex window snapshots with reset detection.
 - **磁盘占用透视 / Disk usage lens** — `du` 口径的真实占用条形榜，可下钻，专治「电脑空间又满了」。  
@@ -233,10 +233,14 @@ SANDCASTLE_BRANCH=one/my-task CODEX_MODEL=gpt-5.6-sol CODEX_EFFORT=high \
 <a id="privacy"></a>
 ## Privacy & security · 隐私与安全
 
-- 后端只在本机回环地址监听 + 校验 Host 头（挡 DNS rebinding），**数据不出本机**。  
-  The backend listens on loopback only and validates the Host header (anti DNS-rebinding). **Data never leaves your machine.**
-- 全部前端资源（含渲染器、字体）本地内置，**离线完全可用**。仅有的出网请求：Claude 用量接口（可选）和 GitHub 更新检查。  
-  All frontend assets (including renderers and fonts) are vendored locally — **fully usable offline**. The only outbound calls: the Claude usage API (optional) and the GitHub release check.
+- 后端只在本机回环地址监听并校验 Host 头（挡 DNS rebinding）；本机文件浏览、Skills 管理和全部前端资源仍可离线使用。\
+  The backend listens on loopback and validates the Host header (anti DNS-rebinding). Local file browsing, installed-Skill management, and all frontend assets remain usable offline.
+- “发现”只在你按回车或点击搜索后从本机直连 skills.sh；skills.sh 收到搜索词和固定的结果上限，不会收到本机 Skill 清单、项目路径、目标 Agent 或安装历史。FanBox 只保留最近一次成功查询和最多 20 条结果（24 小时），不建立搜索历史，也不新增产品遥测。\
+  Discover contacts skills.sh directly from your Mac only after explicit submission. It receives the query and fixed result limit—not your local Skills, project path, target Agent, or install history. FanBox retains only the latest successful query and up to 20 results for 24 hours, with no search-history log or new product telemetry.
+- 发起“检查并安装”时，GitHub Git 服务收到公开仓库地址以解析 HEAD；GitHub codeload 收到仓库与完整 40 位 commit SHA 以下载固定归档。FanBox 不发送 GitHub 凭证，不支持私有仓库，不执行外部脚本、安装依赖或调用 Agent 审查远端内容。\
+  Check and Install sends the public repository address to GitHub's Git service to resolve HEAD, then sends the repository and full 40-character commit SHA to GitHub codeload for a pinned archive. FanBox sends no GitHub credentials, does not support private repositories, and never runs external scripts, installs dependencies, or asks an Agent to judge remote content.
+- 其他现有可选出网行为仍包括 Claude 用量接口和 GitHub Release 更新检查。\
+  Other existing optional outbound calls remain the Claude usage API and GitHub Release update check.
 - HTML 预览在隔离 origin 的沙箱 iframe 里渲染，预览不可信网页也碰不到终端能力。  
   HTML previews render in a sandboxed iframe with an opaque origin; an untrusted page can never reach terminal capabilities.
 - 配置写入走串行化读-改-写 + 原子写（temp + fsync + rename），不丢数据、不留半截 JSON。  

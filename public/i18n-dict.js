@@ -19,7 +19,7 @@ window.FANBOX_DICT = {
   '暖色纸感档案馆': 'Warm paper archive',
   '终端核 Volt': 'Terminal-core Volt',
   '编辑式 · 索引日报': 'Editorial · index daily',
-  '本地运行 · 数据不出本机': 'Runs locally · data never leaves this Mac',
+  '本地运行 · 出网由你触发': 'Runs locally · outbound access is user-triggered',
   // 侧栏「离开电脑」电源开关 + 版本号
   '离开电脑': 'Away from Mac',
   '合盖继续干活': 'Keep working, lid closed',

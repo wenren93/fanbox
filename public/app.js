@@ -4886,13 +4886,22 @@ const usagePanel = {
 const skillsView = {
   data: null, filter: 'all', sort: 'hits', query: '', open: new Set(),
   batchMode: false, selected: new Set(), busy: false, refreshing: false, batchResult: null,
+  activeTab: 'installed',
+  discovery: {
+    input: '', query: '', results: [], status: 'idle', error: '', cached: false,
+    cacheAgeMs: 0, installable: true, searching: false, inspecting: false,
+    inspection: null, installError: '', defaultTargetAgent: 'codex', settingsLoaded: false,
+    installationPrerequisite: { ok: true },
+  },
   async show() {
     state.skillsMode = true; state.recentMode = false; state.cursor = -1;
+    this.activeTab = 'installed';
     this.batchMode = false; this.selected.clear(); this.busy = false; this.batchResult = null;
     renderBreadcrumb();
     $('#file-area').innerHTML = '<div class="cmdk-loading">扫描本机 skills…</div>';
     try { this.data = await apiPost('/api/skills/refresh', { cwd: state.cwd }); } catch { $('#file-area').innerHTML = '<div class="nav-empty">扫描失败</div>'; return; }
     this.render();
+    this.loadDiscoverySettings();
   },
   async reload() {
     try {
@@ -5050,7 +5059,287 @@ const skillsView = {
       await this.reload();
     }
   },
+  async loadDiscoverySettings() {
+    if (this.discovery.settingsLoaded) return;
+    this.discovery.settingsLoaded = true;
+    try {
+      const r = await api('/api/skills/discovery/settings');
+      const target = r && (r.defaultTargetAgent || (r.settings && r.settings.defaultTargetAgent));
+      if (['claude', 'codex', 'agents', 'workbuddy'].includes(target)) this.discovery.defaultTargetAgent = target;
+      if (r && r.installationPrerequisite) this.discovery.installationPrerequisite = r.installationPrerequisite;
+      if (state.skillsMode && this.activeTab === 'discovery') this.render();
+    } catch { /* 默认目标是便利设置，读取失败不影响发现或安装 */ }
+  },
+  switchTab(tab) {
+    if (!['installed', 'discovery'].includes(tab) || tab === this.activeTab) return;
+    this.activeTab = tab;
+    this.render();
+  },
   render() {
+    if (this.activeTab === 'discovery') { this.renderDiscovery(); return; }
+    this.renderInstalled();
+  },
+  tabsHtml() {
+    return `<nav class="sk-tabs" aria-label="Skills 视图">
+      <button class="sk-tab ${this.activeTab === 'installed' ? 'on' : ''}" data-sk-tab="installed" aria-selected="${this.activeTab === 'installed'}">已安装</button>
+      <button class="sk-tab ${this.activeTab === 'discovery' ? 'on' : ''}" data-sk-tab="discovery" aria-selected="${this.activeTab === 'discovery'}">发现</button>
+    </nav>`;
+  },
+  bindTabs(area) {
+    area.querySelectorAll('[data-sk-tab]').forEach((button) => {
+      button.onclick = () => this.switchTab(button.dataset.skTab);
+    });
+  },
+  discoveryAge(ms) {
+    const minutes = Math.max(0, Math.floor(Number(ms || 0) / 60000));
+    if (minutes < 1) return '刚刚';
+    if (minutes < 60) return `${minutes} 分钟前`;
+    return `${Math.floor(minutes / 60)} 小时前`;
+  },
+  discoverySource(entry) {
+    return entry.sourceUrl || entry.url || entry.repositoryUrl || entry.repository || entry.source || '';
+  },
+  openDiscoverySource(value) {
+    const raw = typeof value === 'string' ? value : this.discoverySource(value || {});
+    let url = raw;
+    if (/^[\w.-]+\/[\w.-]+$/.test(url)) url = `https://github.com/${url}`;
+    try {
+      const parsed = new URL(url);
+      if (!['https:', 'http:'].includes(parsed.protocol)) throw new Error('unsupported');
+      window.fanboxUpdate ? window.fanboxUpdate.open(parsed.href) : window.open(parsed.href, '_blank', 'noopener');
+    } catch { toast('来源地址无效', true); }
+  },
+  async searchDiscovery() {
+    const d = this.discovery;
+    const query = d.input.trim();
+    if (!query || d.searching) return;
+    d.searching = true; d.status = 'loading'; d.error = ''; d.inspection = null; d.installError = '';
+    this.render();
+    try {
+      const r = await apiPost('/api/skills/discovery/search', { query });
+      d.query = String((r && r.query) || query);
+      d.results = Array.isArray(r && r.results) ? r.results.slice(0, 20) : [];
+      d.cached = Boolean(r && (r.cached || r.status === 'cached'));
+      d.cacheAgeMs = Number((r && r.cacheAgeMs) || 0);
+      d.installable = Boolean(r && r.installable !== false && !d.cached && r.status !== 'failed');
+      if (!r || r.ok === false || r.status === 'failed') {
+        d.status = d.cached && d.results.length ? 'cached' : 'failed';
+        if (d.cached && r.cachedQuery) d.query = String(r.cachedQuery);
+        d.error = String((r && r.error) || 'skills.sh 暂时不可用，请稍后重试');
+      } else if (d.cached) d.status = 'cached';
+      else if (r.status === 'empty' || !d.results.length) d.status = 'empty';
+      else d.status = r.status === 'reused' ? 'reused' : 'success';
+    } catch (err) {
+      d.status = d.cached && d.results.length ? 'cached' : 'failed';
+      d.error = err.message || '无法连接 skills.sh';
+      d.installable = false;
+    } finally {
+      d.searching = false;
+      if (state.skillsMode && this.activeTab === 'discovery') this.render();
+    }
+  },
+  async inspectDiscovery(entry) {
+    const d = this.discovery;
+    if (d.inspecting || d.searching || d.cached || d.installable === false || entry.installable === false) return;
+    d.inspecting = true; d.installError = '';
+    this.render();
+    try {
+      const r = await apiPost('/api/skills/discovery/inspect', { entry });
+      if (!r || r.ok === false || !r.inspection) {
+        d.installError = String((r && r.error) || '检查失败，请查看来源后重试');
+        d.inspection = r && r.inspection ? r.inspection : null;
+      } else {
+        d.inspection = r.inspection;
+        d.installError = '';
+      }
+    } catch (err) { d.installError = err.message || '检查失败，请稍后重试'; }
+    finally { d.inspecting = false; if (state.skillsMode && this.activeTab === 'discovery') this.render(); }
+  },
+  inspectionLists(i) {
+    const files = Array.isArray(i.files) ? i.files : [];
+    const paths = files.map((f) => typeof f === 'string' ? f : (f.path || f.name || '')).filter(Boolean);
+    const scripts = Array.isArray(i.scripts) ? i.scripts : [];
+    const binaries = Array.isArray(i.binaryResources) ? i.binaryResources : (Array.isArray(i.binaries) ? i.binaries : []);
+    const tools = Array.isArray(i.tools) ? i.tools : (Array.isArray(i.allowedTools) ? i.allowedTools : []);
+    const dependencies = Array.isArray(i.dependencies) ? i.dependencies : [];
+    const risks = Array.isArray(i.risks) ? i.risks : [];
+    return { files, paths, scripts, binaries, tools, dependencies, risks };
+  },
+  conflictNeedsOverwrite(i) {
+    const c = i && i.conflict;
+    return Boolean(c && (c.requiresOverwrite || c.kind === 'unknown_source' || c.kind === 'local_modified' || c.status === 'unknown_conflict' || c.status === 'locally_modified'));
+  },
+  async installDiscovery() {
+    const d = this.discovery, i = d.inspection;
+    if (!i || d.inspecting) return;
+    const area = $('#file-area');
+    const target = (area.querySelector('[name=discovery-target]:checked') || {}).value || d.defaultTargetAgent;
+    const acknowledge = Boolean(area.querySelector('#sk-disc-ack') && area.querySelector('#sk-disc-ack').checked);
+    const overwrite = Boolean(area.querySelector('#sk-disc-overwrite') && area.querySelector('#sk-disc-overwrite').checked);
+    if (i.enhancedConfirmation && !acknowledge) { toast('请先展开并确认风险明细', true); return; }
+    if (this.conflictNeedsOverwrite(i) && !overwrite) { toast('请明确确认替换现有安装项', true); return; }
+    const remember = Boolean(area.querySelector('#sk-disc-remember') && area.querySelector('#sk-disc-remember').checked);
+    d.inspecting = true; d.installError = ''; this.render();
+    try {
+      if (remember) {
+        const sr = await apiPost('/api/skills/discovery/settings', { defaultTargetAgent: target });
+        if (!sr || sr.ok !== false) d.defaultTargetAgent = target;
+      }
+      const expected = i.expected || {};
+      const r = await apiPost('/api/skills/discovery/install', {
+        inspectionId: i.id, targetAgent: target, acknowledge, overwrite,
+        expectedTargetHash: expected.targetHash || i.expectedTargetHash,
+        expectedSourceHash: expected.sourceHash || i.contentHash,
+      });
+      if (!r || r.ok === false) {
+        if (r && r.status === 'different_source_conflict') {
+          i.conflict = {
+            status: r.status, kind: 'different_source', blocked: true,
+            title: '同名 Skill 来自不同来源',
+            message: r.error || 'Skill 名称不能作为更新身份；请先查看并处置现有安装项。',
+            dir: (r.conflict && (r.conflict.targetDir || r.conflict.dir)) || r.targetDir,
+          };
+        }
+        if (r && ['unknown_conflict', 'locally_modified', 'local_modified', 'content_conflict'].includes(r.status)) {
+          const targetHash = r.expectedTargetHash || r.targetHash;
+          i.conflict = {
+            ...(i.conflict || {}), status: r.status,
+            kind: r.status === 'unknown_conflict' ? 'unknown_source' : 'local_modified',
+            requiresOverwrite: true,
+            title: r.status === 'unknown_conflict' ? '目标已有来源未知的安装项' : '检测到安装后发生的本地修改',
+            message: r.error || r.message || '需要明确确认后才能替换；原内容会移入系统废纸篓。',
+            dir: r.targetDir || (i.conflict && i.conflict.dir),
+          };
+          i.expected = { ...(i.expected || {}), targetHash };
+        }
+        d.installError = String((r && r.error) || '安装失败，请检查后重试');
+        if (r && ['concurrent_changed', 'source_changed', 'target_changed'].includes(r.status)) d.installError = '安装确认后来源或目标发生了变化，请重新检查后重试。';
+        return;
+      }
+      const targetDir = (r.installedItem && r.installedItem.dir) || (r.item && r.item.dir) || r.targetDir;
+      this.activeTab = 'installed';
+      await this.reload();
+      if (targetDir) this.open.add(targetDir);
+      const found = targetDir && (this.data.items || []).find((x) => x.dir === targetDir);
+      if (found) this.open.add(found.dir);
+      this.render();
+      toast(r.restartGuidance || r.message || `安装完成；新会话可发现${target === 'codex' ? '，Codex 可能需要重启' : ''}`);
+    } catch (err) { d.installError = err.message || '安装失败，请重试'; }
+    finally {
+      d.inspecting = false;
+      if (state.skillsMode && this.activeTab === 'discovery') this.render();
+    }
+  },
+  renderDiscovery() {
+    const d = this.discovery;
+    const stateMessage = d.status === 'empty'
+      ? `<div class="sk-disc-state"><b>没有找到</b><span>skills.sh 没有返回与“${escapeHtml(d.query)}”匹配的 Skill 条目。</span></div>`
+      : d.status === 'failed'
+        ? `<div class="sk-disc-state error" role="alert"><b>外部搜索失败</b><span>${escapeHtml(d.error || 'skills.sh 暂时不可用')}</span></div>`
+        : d.status === 'cached'
+          ? `<div class="sk-disc-state cached" role="status"><b>正在显示缓存结果 · ${this.discoveryAge(d.cacheAgeMs)}</b><span>${escapeHtml(d.error || '当前无法在线重新验证来源')}。缓存仅供查看，检查并安装已禁用。</span></div>`
+          : d.status === 'reused'
+            ? '<div class="sk-disc-state quiet" role="status">已复用 10 分钟内的同一查询结果。</div>' : '';
+    let h = `<div class="sk-wrap sk-discovery-wrap">
+      ${this.tabsHtml()}
+      <header class="sk-disc-head"><div><h2>发现新的 Skill</h2><p>搜索社区索引；外部条目与本机安装项始终分开。</p></div></header>
+      <div class="sk-disc-privacy">${ic('globe', 'currentColor', 16)}<span><b>隐私提示</b>：只有在你按回车或点击“搜索”后，搜索词才会从本机直接发送给 skills.sh；不会发送本机 Skill、项目路径、目标 Agent 或安装历史。</span></div>
+      <form class="sk-disc-search" id="sk-disc-search-form" role="search">
+        <input type="search" id="sk-disc-query" value="${escapeHtml(d.input)}" maxlength="160" placeholder="输入关键词，例如：代码审查" aria-label="搜索 skills.sh" autocomplete="off" spellcheck="false" ${d.searching ? 'disabled' : ''}>
+        <button class="primary" type="submit" ${d.searching || !d.input.trim() ? 'disabled' : ''}>${d.searching ? '搜索中…' : '搜索'}</button>
+      </form>
+      ${stateMessage}
+      ${d.status === 'idle' ? '<div class="sk-disc-welcome"><b>只在明确提交时联网</b><span>结果最多 20 条，顺序与 skills.sh 一致。安装前 FanBox 会固定 GitHub commit 并在本机检查内容。</span></div>' : ''}
+      <section class="sk-disc-results" aria-live="polite">
+        ${d.results.map((entry, index) => this.discoveryResultHtml(entry, index)).join('')}
+      </section>
+      ${d.inspection ? this.discoveryInspectionHtml(d.inspection) : d.installError ? `<div class="sk-disc-install-error" role="alert"><b>检查失败</b><span>${escapeHtml(d.installError)}</span></div>` : ''}
+    </div>`;
+    const area = $('#file-area');
+    area.innerHTML = h;
+    this.bindDiscovery(area);
+  },
+  discoveryResultHtml(entry, index) {
+    const d = this.discovery;
+    const name = entry.name || entry.skill || entry.id || '未命名 Skill';
+    const repo = entry.repository || entry.source || '来源未知';
+    const count = Number(entry.installs ?? entry.installCount ?? entry.installations ?? 0);
+    const prerequisite = d.installationPrerequisite || { ok: true };
+    const canInspect = prerequisite.ok !== false && !d.searching && !d.cached && d.installable !== false && entry.installable !== false;
+    const reason = entry.installReason || entry.reason || (!canInspect
+      ? (d.cached ? '缓存结果必须联网重新验证' : prerequisite.error || '此来源暂不支持安装') : '');
+    return `<article class="sk-disc-card" data-result-index="${index}">
+      <div class="sk-disc-card-main"><div class="sk-disc-name"><b>${escapeHtml(name)}</b><span class="sk-disc-unchecked">尚未检查</span></div>
+        <div class="sk-disc-repo">${ic('gitbranch', 'currentColor', 14)} ${escapeHtml(repo)}</div>
+      </div>
+      <div class="sk-disc-pop"><b>${count.toLocaleString()}</b><span>安装量</span></div>
+      <div class="sk-disc-actions"><button class="ghost-btn" data-disc-act="source">打开来源</button><button class="primary" data-disc-act="inspect" ${!canInspect || d.inspecting ? 'disabled' : ''}>${d.inspecting ? '检查中…' : (entry.actionLabel || '检查并安装')}</button></div>
+      ${reason ? `<div class="sk-disc-reason">${escapeHtml(reason)}</div>` : ''}
+    </article>`;
+  },
+  discoveryInspectionHtml(i) {
+    const list = this.inspectionLists(i);
+    const source = i.sourceUrl || i.repository;
+    const targetLabels = { claude: 'Claude', codex: 'Codex', agents: 'Agents', workbuddy: 'WorkBuddy' };
+    const enhanced = Boolean(i.enhancedConfirmation);
+    const conflict = i.conflict || null;
+    const overwrite = this.conflictNeedsOverwrite(i);
+    const blocked = Boolean(i.blocked || i.installable === false || (conflict && (conflict.blocked || conflict.kind === 'different_source')));
+    return `<section class="sk-disc-inspection" aria-labelledby="sk-disc-confirm-title">
+      <div class="sk-disc-inspection-head"><div><span class="sk-disc-kicker">固定来源 · 本机风险检查</span><h2 id="sk-disc-confirm-title">${escapeHtml(i.name || 'Skill 安装确认')}</h2><p>${escapeHtml(i.description || '（无 description）')}</p></div><button class="ghost-btn" data-disc-act="close-inspection">返回结果</button></div>
+      ${this.discovery.installError ? `<div class="sk-disc-install-error" role="alert"><b>安装失败，确认内容已保留</b><span>${escapeHtml(this.discovery.installError)}</span></div>` : ''}
+      <div class="sk-disc-facts">
+        <dl><dt>公开仓库</dt><dd>${escapeHtml(i.repository || '—')}</dd><dt>作者</dt><dd>${escapeHtml(i.author || '—')}</dd><dt>Skill 路径</dt><dd>${escapeHtml(i.skillPath || '—')}</dd><dt>固定 commit</dt><dd><code>${escapeHtml((i.commit || '').slice(0, 12) || '—')}</code></dd><dt>许可证</dt><dd>${escapeHtml(i.license || '许可证未知')}</dd></dl>
+        <div class="sk-disc-check ${enhanced ? 'needs-confirm' : 'passed'}"><b>${blocked ? '结构性阻止' : enhanced ? '需要确认' : '检查通过'}</b><span>这只是可客观验证的本机检查，不是安全认证。</span></div>
+      </div>
+      <div class="sk-disc-metrics"><span><b>${Number(i.fileCount ?? list.files.length).toLocaleString()}</b> 个文件</span><span><b>${escapeHtml(fmtSize(Number(i.totalSize || 0)) || '0 B')}</b> 总大小</span><span><b>${list.scripts.length}</b> 个脚本</span><span><b>${list.binaries.length}</b> 个二进制资源</span><span><b>${list.tools.length}</b> 项工具声明</span><span><b>${list.dependencies.length}</b> 项外部依赖</span></div>
+      ${conflict ? `<div class="sk-disc-conflict"><b>${escapeHtml(conflict.title || (blocked ? '同名异源冲突' : '目标安装项需要明确处置'))}</b><span>${escapeHtml(conflict.message || conflict.reason || '现有安装项不会被静默覆盖。')}</span>${conflict.dir ? `<code>${escapeHtml(tilde(conflict.dir))}</code>` : ''}</div>` : ''}
+      <details class="sk-disc-details" ${enhanced ? 'open' : ''}><summary>风险明细与完整文件清单</summary>
+        ${this.discoveryDetailGroup('风险', list.risks)}${this.discoveryDetailGroup('脚本 / 可执行文件', list.scripts)}${this.discoveryDetailGroup('二进制资源', list.binaries)}${this.discoveryDetailGroup('工具声明', list.tools)}${this.discoveryDetailGroup('外部依赖', list.dependencies)}
+        <div class="sk-disc-file-list"><b>完整文件清单</b>${list.paths.length ? `<ul>${list.paths.map((p) => `<li><code>${escapeHtml(p)}</code></li>`).join('')}</ul>` : '<span>没有其他文件</span>'}</div>
+      </details>
+      ${enhanced ? `<label class="sk-disc-confirm-check"><input type="checkbox" id="sk-disc-ack" name="acknowledge"><span>我已展开并查看风险明细，理解 FanBox 不会执行脚本、安装依赖，也不保证此 Skill 安全。</span></label>` : ''}
+      ${overwrite ? `<label class="sk-disc-confirm-check danger"><input type="checkbox" id="sk-disc-overwrite"><span>我确认替换现有安装项；旧内容将移入系统废纸篓，可恢复。</span></label>` : ''}
+      <fieldset class="sk-disc-targets"><legend>安装到目标 Agent</legend>${Object.entries(targetLabels).map(([id, label]) => `<label><input type="radio" name="discovery-target" value="${id}" ${this.discovery.defaultTargetAgent === id ? 'checked' : ''}><span>${label}</span></label>`).join('')}</fieldset>
+      <label class="sk-disc-remember"><input type="checkbox" id="sk-disc-remember"><span>记住为以后安装的默认目标（确认页始终可以更改）</span></label>
+      <div class="sk-disc-confirm-actions"><button class="ghost-btn" data-disc-act="source-inspection" data-source="${escapeHtml(source || '')}">打开来源</button><button class="primary" data-disc-act="install" ${blocked || this.discovery.inspecting ? 'disabled' : ''}>${this.discovery.inspecting ? '正在安装…' : (i.actionLabel || (i.update ? '确认更新' : '确认安装'))}</button></div>
+    </section>`;
+  },
+  discoveryDetailGroup(title, values) {
+    if (!values.length) return '';
+    return `<div class="sk-disc-detail-group"><b>${escapeHtml(title)}</b><ul>${values.map((v) => `<li>${escapeHtml(typeof v === 'string' ? v : (v.path || v.name || v.tool || JSON.stringify(v)))}</li>`).join('')}</ul></div>`;
+  },
+  bindDiscovery(area) {
+    this.bindTabs(area);
+    const form = area.querySelector('#sk-disc-search-form');
+    const input = area.querySelector('#sk-disc-query');
+    if (input) {
+      let composing = false;
+      const submit = form && form.querySelector('[type=submit]');
+      const syncSubmit = () => { if (submit) submit.disabled = this.discovery.searching || !input.value.trim(); };
+      input.oncompositionstart = () => { composing = true; };
+      input.oncompositionend = (e) => { composing = false; this.discovery.input = e.target.value; syncSubmit(); };
+      input.oninput = (e) => { if (!composing && !e.isComposing) this.discovery.input = e.target.value; syncSubmit(); };
+      input.onkeydown = (e) => {
+        if (e.key === 'Enter' && !composing && !e.isComposing) { e.preventDefault(); this.discovery.input = e.target.value; this.searchDiscovery(); }
+      };
+    }
+    if (form) form.onsubmit = (e) => { e.preventDefault(); if (input) this.discovery.input = input.value; this.searchDiscovery(); };
+    area.querySelectorAll('[data-result-index]').forEach((card) => {
+      const entry = this.discovery.results[Number(card.dataset.resultIndex)];
+      const source = card.querySelector('[data-disc-act=source]');
+      const inspect = card.querySelector('[data-disc-act=inspect]');
+      if (source) source.onclick = () => this.openDiscoverySource(entry);
+      if (inspect) inspect.onclick = () => this.inspectDiscovery(entry);
+    });
+    const close = area.querySelector('[data-disc-act=close-inspection]');
+    if (close) close.onclick = () => { this.discovery.inspection = null; this.discovery.installError = ''; this.render(); };
+    const sourceInspection = area.querySelector('[data-disc-act=source-inspection]');
+    if (sourceInspection) sourceInspection.onclick = () => this.openDiscoverySource(sourceInspection.dataset.source);
+    const install = area.querySelector('[data-disc-act=install]');
+    if (install) install.onclick = () => this.installDiscovery();
+  },
+  renderInstalled() {
     const o = this.data.overview;
     const items = this.data.items || [];
     const rows = this.rows();
@@ -5062,6 +5351,7 @@ const skillsView = {
     const ratio = (o.budgetChars / o.budgetLimit).toFixed(1);
     const locked = this.busy || this.refreshing;
     let h = `<div class="sk-wrap ${this.batchMode ? 'is-batch' : ''} ${locked ? 'is-busy' : ''}">
+      ${this.tabsHtml()}
       <div class="sk-stats">
         <div class="sk-stat"><div class="sk-num">${o.unique}<small>/${o.total}</small></div><div class="sk-lbl">全部 skills</div><div class="sk-note">唯一 / 含跨端副本</div></div>
         <div class="sk-stat"><div class="sk-num good">${o.active}</div><div class="sk-lbl">45 天内活跃</div><div class="sk-note">共 ${o.totalHits} 次触发</div></div>
@@ -5178,6 +5468,7 @@ const skillsView = {
     this.bind(area);
   },
   bind(area) {
+    this.bindTabs(area);
     const refresh = area.querySelector('#sk-refresh');
     if (refresh) refresh.onclick = () => this.refreshScan();
     const batchToggle = area.querySelector('#sk-batch-toggle');
