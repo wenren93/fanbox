@@ -34,6 +34,9 @@ const SVG = {
   globe: '<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
   gitbranch: '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
   eye: '<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/>',
+  chevronleft: '<polyline points="15 18 9 12 15 6"/>',
+  x: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
+  alert: '<path d="M10.3 2.9 1.8 17a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 2.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
   maximize: '<polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>',
   minimize: '<polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/>',
   undo: '<polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>',
@@ -5292,28 +5295,41 @@ const skillsView = {
     const overwrite = this.conflictNeedsOverwrite(i);
     const blocked = Boolean(i.blocked || i.installable === false || (conflict && (conflict.blocked || conflict.kind === 'different_source')));
     const installLabel = this.discovery.inspecting ? '正在安装' : (i.actionLabel || (i.update ? '确认更新' : '确认安装'));
-    return `<section class="sk-disc-inspection" aria-labelledby="sk-disc-confirm-title">
-      <div class="sk-disc-inspection-head"><div><span class="sk-disc-kicker">固定来源 · 本机风险检查</span><h2 id="sk-disc-confirm-title">${escapeHtml(i.name || 'Skill 安装确认')}</h2><p>${escapeHtml(i.description || '（无 description）')}</p></div><button class="ghost-btn" data-disc-act="close-inspection">返回结果</button></div>
-      ${this.discovery.installError ? `<div class="sk-disc-install-error" role="alert"><b>安装失败，确认内容已保留</b><span>${escapeHtml(this.discovery.installError)}</span></div>` : ''}
-      <div class="sk-disc-facts">
-        <dl><dt>公开仓库</dt><dd>${escapeHtml(i.repository || '—')}</dd><dt>作者</dt><dd>${escapeHtml(i.author || '—')}</dd><dt>Skill 路径</dt><dd>${escapeHtml(i.skillPath || '—')}</dd><dt>固定 commit</dt><dd><code>${escapeHtml((i.commit || '').slice(0, 12) || '—')}</code></dd><dt>许可证</dt><dd>${escapeHtml(i.license || '许可证未知')}</dd></dl>
-        <div class="sk-disc-check ${enhanced ? 'needs-confirm' : 'passed'}"><b>${blocked ? '结构性阻止' : enhanced ? '发现风险' : '检查通过'}</b><span>风险明细可自行查看；这不是安全认证。</span></div>
+    const fileCount = Number(i.fileCount ?? list.files.length);
+    const declaredCount = list.scripts.length + list.binaries.length + list.tools.length + list.dependencies.length;
+    const riskCount = Math.max(list.risks.length, enhanced ? 1 : 0);
+    const firstRisk = list.risks[0];
+    const firstRiskText = typeof firstRisk === 'string' ? firstRisk : firstRisk && (firstRisk.message || firstRisk.name || firstRisk.code);
+    const riskText = firstRiskText || (/未知|unknown/i.test(i.license || '') ? '仓库未声明许可证' : enhanced ? '检查发现需要留意的内容' : '未发现额外风险');
+    const repoLabel = i.author || String(i.repository || '').replace(/^https?:\/\/github\.com\//, '').split('/')[0] || '固定来源';
+    return `<section class="sk-disc-inspection sk-disc-decision" aria-labelledby="sk-disc-confirm-title">
+      <div class="sk-disc-decision-head">
+        <button class="ghost-btn sk-disc-icon-btn" data-disc-act="close-inspection" aria-label="返回结果" title="返回结果">${ic('chevronleft', 'currentColor', 17)}</button>
+        <div class="sk-disc-decision-title"><h2 id="sk-disc-confirm-title">${escapeHtml(i.name || 'Skill 安装确认')}</h2><span>${escapeHtml(repoLabel)}</span></div>
       </div>
-      <div class="sk-disc-metrics"><span><b>${Number(i.fileCount ?? list.files.length).toLocaleString()}</b> 个文件</span><span><b>${escapeHtml(fmtSize(Number(i.totalSize || 0)) || '0 B')}</b> 总大小</span><span><b>${list.scripts.length}</b> 个脚本</span><span><b>${list.binaries.length}</b> 个二进制资源</span><span><b>${list.tools.length}</b> 项工具声明</span><span><b>${list.dependencies.length}</b> 项外部依赖</span></div>
+      <p class="sk-disc-decision-desc">${escapeHtml(i.description || '（无 description）')}</p>
+      <div class="sk-disc-decision-summary"><span>${fileCount.toLocaleString()} 个文件</span><i></i><span>${escapeHtml(fmtSize(Number(i.totalSize || 0)) || '0 B')}</span><i></i><span>${declaredCount ? `${declaredCount} 项脚本、工具或依赖声明` : '无脚本与外部依赖'}</span>${riskCount ? `<i></i><b>${riskCount} 项风险</b>` : ''}</div>
+      <div class="sk-disc-decision-risk ${riskCount || blocked ? 'warn' : 'safe'}">${ic(riskCount || blocked ? 'alert' : 'eye', 'currentColor', 16)}<span>${riskCount || blocked ? `需要留意：<b>${escapeHtml(riskText)}</b>` : '<b>本机检查未发现额外风险</b>'}</span></div>
+      ${this.discovery.installError ? `<div class="sk-disc-install-error" role="alert"><b>安装失败，确认内容已保留</b><span>${escapeHtml(this.discovery.installError)}</span></div>` : ''}
       ${conflict ? `<div class="sk-disc-conflict"><b>${escapeHtml(conflict.title || (blocked ? '同名异源冲突' : '目标安装项需要明确处置'))}</b><span>${escapeHtml(conflict.message || conflict.reason || '现有安装项不会被静默覆盖。')}</span>${conflict.dir ? `<code>${escapeHtml(tilde(conflict.dir))}</code>` : ''}</div>` : ''}
-      <details class="sk-disc-details" ${enhanced ? 'open' : ''}><summary>风险明细与完整文件清单</summary>
+      ${overwrite ? `<label class="sk-disc-confirm-check danger"><input type="checkbox" id="sk-disc-overwrite"><span>我确认替换现有安装项；旧内容将移入系统废纸篓，可恢复。</span></label>` : ''}
+      <div class="sk-disc-decision-bar">
+        <fieldset class="sk-disc-targets sk-disc-segments"><legend>安装到</legend><div>${Object.entries(targetLabels).map(([id, label]) => `<label><input type="radio" name="discovery-target" value="${id}" ${this.discovery.defaultTargetAgent === id ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div></fieldset>
+        <div class="sk-disc-confirm-actions"><button class="ghost-btn sk-disc-tech-btn" data-disc-act="open-details" aria-expanded="false">技术详情</button><button class="ghost-btn sk-disc-icon-btn" data-disc-act="source-inspection" data-source="${escapeHtml(source || '')}" aria-label="打开来源" title="打开来源">${ic('link', 'currentColor', 16)}</button><button class="primary sk-disc-icon-btn" data-disc-act="install" aria-label="${escapeHtml(installLabel)}" title="${escapeHtml(installLabel)}" ${blocked || this.discovery.inspecting ? 'disabled' : ''}>${this.discovery.inspecting ? `<span class="sk-disc-spinner">${ic('clock', 'currentColor', 16)}</span>` : ic('box', 'currentColor', 16)}</button></div>
+      </div>
+      <aside class="sk-disc-tech-drawer" aria-hidden="true" aria-labelledby="sk-disc-tech-title">
+        <div class="sk-disc-tech-head"><h3 id="sk-disc-tech-title">技术详情</h3><button class="ghost-btn sk-disc-icon-btn" data-disc-act="close-details" aria-label="关闭技术详情" title="关闭技术详情">${ic('x', 'currentColor', 16)}</button></div>
+        <section><h4>来源</h4><dl><dt>公开仓库</dt><dd>${escapeHtml(i.repository || '—')}</dd><dt>作者</dt><dd>${escapeHtml(i.author || '—')}</dd><dt>Skill 路径</dt><dd><code>${escapeHtml(i.skillPath || '—')}</code></dd><dt>固定 commit</dt><dd><code>${escapeHtml((i.commit || '').slice(0, 12) || '—')}</code></dd></dl></section>
+        <section><h4>本机检查</h4><dl><dt>脚本</dt><dd>${list.scripts.length}</dd><dt>二进制资源</dt><dd>${list.binaries.length}</dd><dt>工具声明</dt><dd>${list.tools.length}</dd><dt>外部依赖</dt><dd>${list.dependencies.length}</dd><dt>许可证</dt><dd>${escapeHtml(i.license || '许可证未知')}</dd></dl></section>
         ${this.discoveryDetailGroup('风险', list.risks)}${this.discoveryDetailGroup('脚本 / 可执行文件', list.scripts)}${this.discoveryDetailGroup('二进制资源', list.binaries)}${this.discoveryDetailGroup('工具声明', list.tools)}${this.discoveryDetailGroup('外部依赖', list.dependencies)}
         <div class="sk-disc-file-list"><b>完整文件清单</b>${list.paths.length ? `<ul>${list.paths.map((p) => `<li><code>${escapeHtml(p)}</code></li>`).join('')}</ul>` : '<span>没有其他文件</span>'}</div>
-      </details>
-      ${overwrite ? `<label class="sk-disc-confirm-check danger"><input type="checkbox" id="sk-disc-overwrite"><span>我确认替换现有安装项；旧内容将移入系统废纸篓，可恢复。</span></label>` : ''}
-      <fieldset class="sk-disc-targets"><legend>安装到目标 Agent</legend>${Object.entries(targetLabels).map(([id, label]) => `<label><input type="radio" name="discovery-target" value="${id}" ${this.discovery.defaultTargetAgent === id ? 'checked' : ''}><span>${label}</span></label>`).join('')}</fieldset>
-      <label class="sk-disc-remember"><input type="checkbox" id="sk-disc-remember"><span>记住为以后安装的默认目标（确认页始终可以更改）</span></label>
-      <div class="sk-disc-confirm-actions"><button class="ghost-btn sk-disc-icon-btn" data-disc-act="source-inspection" data-source="${escapeHtml(source || '')}" aria-label="打开来源" title="打开来源">${ic('link', 'currentColor', 16)}</button><button class="primary sk-disc-icon-btn" data-disc-act="install" aria-label="${escapeHtml(installLabel)}" title="${escapeHtml(installLabel)}" ${blocked || this.discovery.inspecting ? 'disabled' : ''}>${this.discovery.inspecting ? `<span class="sk-disc-spinner">${ic('clock', 'currentColor', 16)}</span>` : ic('box', 'currentColor', 16)}</button></div>
+        <label class="sk-disc-remember"><input type="checkbox" id="sk-disc-remember"><span>记住为以后安装的默认目标</span></label>
+      </aside>
     </section>`;
   },
   discoveryDetailGroup(title, values) {
     if (!values.length) return '';
-    return `<div class="sk-disc-detail-group"><b>${escapeHtml(title)}</b><ul>${values.map((v) => `<li>${escapeHtml(typeof v === 'string' ? v : (v.path || v.name || v.tool || JSON.stringify(v)))}</li>`).join('')}</ul></div>`;
+    return `<div class="sk-disc-detail-group"><b>${escapeHtml(title)}</b><ul>${values.map((v) => `<li>${escapeHtml(typeof v === 'string' ? v : (v.message || v.path || v.name || v.tool || JSON.stringify(v)))}</li>`).join('')}</ul></div>`;
   },
   bindDiscovery(area) {
     this.bindTabs(area);
@@ -5342,6 +5358,22 @@ const skillsView = {
     if (close) close.onclick = () => { this.discovery.inspection = null; this.discovery.installError = ''; this.discovery.selectedEntryId = null; this.render(); };
     const sourceInspection = area.querySelector('[data-disc-act=source-inspection]');
     if (sourceInspection) sourceInspection.onclick = () => this.openDiscoverySource(sourceInspection.dataset.source);
+    const drawer = area.querySelector('.sk-disc-tech-drawer');
+    const openDetails = area.querySelector('[data-disc-act=open-details]');
+    const closeDetails = area.querySelector('[data-disc-act=close-details]');
+    const setDetailsOpen = (open) => {
+      if (!drawer) return;
+      const inspection = drawer.closest('.sk-disc-inspection');
+      drawer.classList.toggle('open', open);
+      drawer.setAttribute('aria-hidden', String(!open));
+      if (openDetails) openDetails.setAttribute('aria-expanded', String(open));
+      if (open && closeDetails) closeDetails.focus({ preventScroll: true });
+      else if (!open && openDetails) openDetails.focus({ preventScroll: true });
+      if (inspection) inspection.scrollLeft = 0;
+    };
+    if (openDetails) openDetails.onclick = () => setDetailsOpen(true);
+    if (closeDetails) closeDetails.onclick = () => setDetailsOpen(false);
+    if (drawer) drawer.onkeydown = (e) => { if (e.key === 'Escape') setDetailsOpen(false); };
     const install = area.querySelector('[data-disc-act=install]');
     if (install) install.onclick = () => this.installDiscovery();
   },

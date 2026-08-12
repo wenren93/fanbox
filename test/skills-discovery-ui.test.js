@@ -83,6 +83,19 @@ test('Installation confirmation supports four controlled targets without risk ac
   assert.match(js, /binaryResources\)\s*\?\s*i\.binaryResources\s*:\s*\(Array\.isArray\(i\.binaries\)/);
 });
 
+test('Discovery detail prioritizes the install decision and moves technical data into a drawer', () => {
+  const js = source();
+  const css = styles();
+  assert.match(js, /class="sk-disc-inspection sk-disc-decision"/);
+  assert.match(js, /class="sk-disc-decision-summary"/);
+  assert.match(js, /data-disc-act="open-details"[^>]*aria-expanded="false"/);
+  assert.match(js, /class="sk-disc-tech-drawer"[^>]*aria-hidden="true"/);
+  assert.match(js, /data-disc-act="close-details"/);
+  assert.match(js, /setDetailsOpen/);
+  assert.match(css, /\.sk-disc-tech-drawer\s*\{[^}]*position:absolute[^}]*transform:translateX\(105%\)/s);
+  assert.match(css, /\.sk-disc-tech-drawer\.open\s*\{[^}]*transform:none/s);
+});
+
 test('Discovery presents cached and failed states without treating them as empty results', () => {
   const js = source();
   assert.match(js, /cached|缓存/);
