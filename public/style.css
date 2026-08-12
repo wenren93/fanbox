@@ -940,6 +940,12 @@ kbd {
   font-size: 14px; font-family: var(--font-ui);
 }
 .input-field:focus { outline: none; border-color: var(--accent); }
+.goto-dialog { width: 520px; }
+.goto-input { font-family: var(--font-mono); font-size: 13px; }
+.goto-input.invalid { border-color: #b5483a; box-shadow: 0 0 0 2px color-mix(in srgb, #b5483a 14%, transparent); }
+.goto-help { margin-top: 8px; color: var(--text-faint); font-size: 11px; }
+.goto-help code { color: var(--text-dim); font-family: var(--font-mono); }
+.goto-error { min-height: 16px; margin-top: 6px; color: #b5483a; font-size: 11.5px; }
 .input-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .input-actions button {
   padding: 7px 16px; border-radius: var(--radius); cursor: pointer; font-size: 13px;
@@ -1130,6 +1136,8 @@ kbd {
 .term-tab.active { background: var(--bg-3); color: var(--text); }
 .term-tab .tab-x { opacity: 0.45; margin-left: 2px; }
 .term-tab .tab-x:hover { opacity: 1; color: var(--accent); }
+.term-tab .tab-term-id { padding: 1px 5px; border: 1px solid color-mix(in srgb, var(--text-dim) 32%, transparent); border-radius: 4px; color: var(--text-dim); background: color-mix(in srgb, var(--bg) 62%, transparent); font-size: 10px; line-height: 1.2; letter-spacing: 0.15px; }
+.term-tab.active .tab-term-id { color: var(--text); border-color: color-mix(in srgb, var(--text) 28%, transparent); }
 .term-tab .tab-count { min-width: 13px; height: 13px; padding: 0 4px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; line-height: 1; background: var(--bg); color: var(--text-dim); }
 /* agent 态势小圆点：运行中(绿/呼吸) · 空闲(灰) · 已退出(红) */
 .term-tab .tab-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--text-dim); }
@@ -1185,6 +1193,8 @@ kbd {
 .term-split-col { flex-direction: column; }
 .term-pane { flex: 1 1 0; min-width: 0; min-height: 0; position: relative; overflow: hidden; border: 1px solid transparent; background: var(--bg); }
 .term-pane.active { border-color: color-mix(in srgb, var(--accent) 48%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent); }
+.term-pane-id { position: absolute; top: 6px; right: 30px; z-index: 6; padding: 1px 5px; border: 1px solid color-mix(in srgb, var(--text-dim) 24%, transparent); border-radius: 4px; color: var(--text-dim); background: color-mix(in srgb, var(--bg-2) 86%, transparent); font: 10px/1.3 var(--font-mono); pointer-events: none; opacity: 0.72; }
+.term-pane.active .term-pane-id, .term-pane:hover .term-pane-id { opacity: 1; }
 .term-pane-close { position: absolute; top: 5px; right: 7px; z-index: 6; width: 18px; height: 18px; border: none; border-radius: 5px; display: flex; align-items: center; justify-content: center; background: color-mix(in srgb, var(--bg-2) 82%, transparent); color: var(--text-dim); opacity: 0; cursor: pointer; font-size: 14px; line-height: 1; }
 .term-pane:hover .term-pane-close, .term-pane.active .term-pane-close, .term-pane-close:focus-visible { opacity: 0.72; }
 .term-pane-close:hover { opacity: 1; color: var(--accent); background: var(--bg-3); }

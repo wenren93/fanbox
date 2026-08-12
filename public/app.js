@@ -1673,6 +1673,68 @@ function inputDialog(title, value = '', placeholder = '') {
     });
   });
 }
+
+// Finder「前往文件夹」式快捷跳转：文件夹直接进入，文件进入父目录后沿用现有本地预览。
+const gotoPath = {
+  overlay: null,
+  open() {
+    if (this.overlay) { this.overlay.querySelector('.goto-input').focus(); return; }
+    cmdk.close();
+    const ov = document.createElement('div');
+    ov.className = 'input-overlay goto-overlay';
+    ov.innerHTML = `<div class="input-dialog goto-dialog" role="dialog" aria-modal="true" aria-labelledby="goto-title">
+      <div class="input-title" id="goto-title">前往文件或文件夹</div>
+      <input class="input-field goto-input" value="${escapeHtml(tilde(state.cwd || state.home || ''))}" placeholder="输入路径，如 ~/Documents/report.pdf" aria-label="文件或文件夹路径" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <div class="goto-help">支持绝对路径、<code>~</code>、<code>file://</code>，以及相对当前目录的路径</div>
+      <div class="goto-error" role="alert" aria-live="polite"></div>
+      <div class="input-actions"><button class="ghost-btn" data-act="cancel">取消</button><button class="primary" data-act="go">前往</button></div>
+    </div>`;
+    document.body.appendChild(ov);
+    this.overlay = ov;
+    const inp = ov.querySelector('.goto-input');
+    const go = ov.querySelector('[data-act=go]');
+    const close = () => { if (this.overlay !== ov) return; this.overlay = null; ov.remove(); document.removeEventListener('keydown', onKey, true); };
+    const submit = async () => {
+      if (go.disabled) return;
+      const value = inp.value.trim();
+      const err = ov.querySelector('.goto-error');
+      err.textContent = '';
+      inp.classList.remove('invalid');
+      if (!value) { err.textContent = '请输入文件或文件夹路径'; inp.classList.add('invalid'); inp.focus(); return; }
+      go.disabled = true; go.textContent = '正在打开…';
+      try {
+        const info = await api('/api/path-info?path=' + encodeURIComponent(value) + '&cwd=' + encodeURIComponent(state.cwd || state.home || ''));
+        if (!info.ok) { err.textContent = info.error || '无法打开这个路径'; inp.classList.add('invalid'); inp.focus(); inp.select(); return; }
+        if (info.isDir) {
+          if (await navigate(info.path)) close();
+          return;
+        }
+        if (!await navigate(info.parent)) return;
+        const entry = state.entries.find((x) => x.path === info.path) || info;
+        applySelection(info.path);
+        await openPreview(entry);
+        recordRecent(info.path);
+        renderFiles();
+        close();
+      } catch (e) {
+        err.textContent = e.message || '无法打开这个路径';
+        inp.classList.add('invalid'); inp.focus(); inp.select();
+      } finally {
+        if (this.overlay === ov) { go.disabled = false; go.textContent = '前往'; }
+      }
+    };
+    function onKey(ev) {
+      if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); close(); }
+      else if (ev.key === 'Enter') { ev.preventDefault(); ev.stopPropagation(); submit(); }
+    }
+    document.addEventListener('keydown', onKey, true);
+    ov.querySelector('[data-act=cancel]').onclick = close;
+    go.onclick = submit;
+    ov.onclick = (ev) => { if (ev.target === ov) close(); };
+    inp.oninput = () => { inp.classList.remove('invalid'); ov.querySelector('.goto-error').textContent = ''; };
+    inp.focus(); inp.select();
+  },
+};
 // 是/否确认弹窗
 function confirmDialog(msg) {
   return new Promise((resolve) => {
@@ -2616,10 +2678,10 @@ const wechatView = {
 };
 
 // ---------- coding agent 启动按钮（#38：内置注册表 + 设置面板开关 + config 自定义） ----------
-// 三层：① AGENT_REGISTRY 内置 11 个主流 agent（图标在 /assets/agents/）
+// 三层：① AGENT_REGISTRY 内置主流 agent（图标在 /assets/agents/）
 //      ② 设置面板（⚙ 滑杆按钮）勾选启用哪些，存 config.json 的 enabledAgents，默认 claude + codex
 //      ③ config.json 的 agents 数组做高级自定义：同 id 覆盖内置命令，新 id 追加按钮
-// app: true 的是桌面应用（无终端 CLI 形态，官方确认），按钮改为 open -a 拉起，检测走 open -Ra
+// app: true 的是桌面应用入口，按钮用 open -a 拉起，安装检测走 open -Ra
 // sessions: 有会话适配器的 agent 声明续接方式——badge 是项目记忆面板的徽标，resumeCmd 里 {id} 占位符替换成会话 id；
 //           没有 sessions 字段 = 该 agent 暂不支持会话回溯（服务端也没有对应适配器）
 const AGENT_REGISTRY = [
@@ -2634,6 +2696,7 @@ const AGENT_REGISTRY = [
   { id: 'codebuddy', label: 'CodeBuddy', cmd: 'codebuddy', bin: 'codebuddy', install: 'npm install -g @tencent-ai/codebuddy-code' },
   { id: 'workbuddy', label: 'WorkBuddy', cmd: 'open -a WorkBuddy', app: 'WorkBuddy', install: 'https://codebuddy.cn/work （桌面应用，官网下载）' },
   { id: 'qoder', label: 'Qoder CLI', cmd: 'qodercli', bin: 'qodercli', install: 'curl -fsSL https://qoder.com/install | bash' },
+  { id: 'codex-app', label: 'Codex 桌面应用', cmd: 'open -a Codex', app: 'Codex', icon: 'codex', install: 'https://openai.com/codex/ （桌面应用，官网下载）' },
 ];
 const AGENT_DEFAULTS = ['claude', 'codex'];
 const agentState = { enabled: null, custom: [] };
@@ -2687,8 +2750,8 @@ async function renderAgentButtons() {
     b.className = 'agent-launch';
     b.dataset.agent = a.id;
     b.id = 'term-' + String(a.id).replace(/[^\w-]/g, '');
-    b.title = a.app ? `打开 ${a.label} 桌面应用（该产品无终端 CLI 形态）` : `启动 ${a.label}：空闲终端就地启动，正跑着任务则新开标签`;
-    b.innerHTML = (await agentIconHtml(a.id)) || `<span class="agent-abbr">${escapeHtml(String(a.label || a.id).slice(0, 2))}</span>`;
+    b.title = a.app ? `打开 ${a.label}` : `启动 ${a.label}：空闲终端就地启动，正跑着任务则新开标签`;
+    b.innerHTML = (await agentIconHtml(a.icon || a.id)) || `<span class="agent-abbr">${escapeHtml(String(a.label || a.id).slice(0, 2))}</span>`;
     b.onclick = () => { wechatView.close(); term.launchAgent(a.cmd); };
     anchor.parentElement.insertBefore(b, anchor);
   }
@@ -2727,7 +2790,7 @@ const agentsPop = {
     pop.style.top = Math.round(r.bottom + 6) + 'px';
     pop.style.right = Math.max(8, Math.round(window.innerWidth - r.right - 8)) + 'px';
     this.el = pop;
-    AGENT_REGISTRY.forEach(async (a) => { const el = pop.querySelector(`[data-ic="${a.id}"]`); const ic = await agentIconHtml(a.id); if (el) el.innerHTML = ic || `<span class="agent-abbr">${escapeHtml(a.label.slice(0, 2))}</span>`; });
+    AGENT_REGISTRY.forEach(async (a) => { const el = pop.querySelector(`[data-ic="${a.id}"]`); const ic = await agentIconHtml(a.icon || a.id); if (el) el.innerHTML = ic || `<span class="agent-abbr">${escapeHtml(a.label.slice(0, 2))}</span>`; });
     this.markInstalled(pop);
     this.markSkill(pop);
     const wgCb = pop.querySelector('[data-webgl] input');
@@ -2960,9 +3023,11 @@ function bindEvents() {
   }, true);
   document.addEventListener('keydown', (e) => {
     if (!$('#replay-overlay').classList.contains('hidden')) return; // 录像回放开着时，交给它自己的快捷键
+    if (gotoPath.overlay) return; // 跳转框独占 Enter / Escape 等输入按键
     if (e.key === 'Escape' && $('#context-menu')) { closeContextMenu(); return; }
     const cmdkOpen = !$('#cmdk').classList.contains('hidden');
     const lbOpen = !!document.querySelector('.lightbox');
+    if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'g' || e.key === 'G')) { e.preventDefault(); gotoPath.open(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); cmdkOpen ? cmdk.close() : cmdk.open(); return; }
     if (cmdkOpen) {
       if (e.key === 'Escape') cmdk.close();
@@ -3635,6 +3700,11 @@ const term = {
         });
         if (pane && pane.sessionId) {
           mountHost(el, pane.sessionId);
+          const idBadge = document.createElement('span');
+          idBadge.className = 'term-pane-id';
+          idBadge.title = '终端窗口 ID（供 agent 指定窗口）';
+          idBadge.textContent = pane.sessionId;
+          el.appendChild(idBadge);
           const close = document.createElement('button');
           close.className = 'term-pane-close';
           close.title = '关闭此终端';
@@ -4637,7 +4707,9 @@ const term = {
       const eye = followed ? `<span class="tab-eye" title="文件跟随盯着它">${ic('eye', 'currentColor', 11)}</span>` : '';
       const zap = members.some((s) => s.agentTouch && Date.now() - s.agentTouch < 8000) ? '<span class="tab-zap" title="正被 agent 控制">⚡</span>' : ''; // 被 agent 遥控过闪 8 秒：审计 + 围观
       const count = paneCount > 1 ? `<span class="tab-count">${paneCount}</span>` : '';
-      t.innerHTML = `<span class="tab-dot ${dotState}" title="${dotTitle}"></span>${eye}${zap}${ic('term', `hsl(${hue} 62% 48%)`, 12)}<span>${escapeHtml(g.title || activeMember.title)}</span>${count}<span class="tab-x" title="关闭">✕</span>`;
+      const ids = members.map((s) => s.id).join(' · ');
+      const idBadge = `<span class="tab-term-id" title="终端窗口 ID（供 agent 指定窗口）">${escapeHtml(ids)}</span>`;
+      t.innerHTML = `<span class="tab-dot ${dotState}" title="${dotTitle}"></span>${eye}${zap}${ic('term', `hsl(${hue} 62% 48%)`, 12)}<span>${escapeHtml(g.title || activeMember.title)}</span>${idBadge}${count}<span class="tab-x" title="关闭">✕</span>`;
       t.onclick = (e) => { if (e.target.classList.contains('tab-x')) { this.closeGroup(g.id); return; } this.activateGroup(g.id); };
       t.ondblclick = (e) => { if (e.target.classList.contains('tab-x')) return; this.locateCwd(); };
       bar.appendChild(t);

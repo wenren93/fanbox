@@ -201,6 +201,44 @@ async function listDir(dirPath) {
   return { path: dir, parent: path.dirname(dir), entries, breadcrumb, project };
 }
 
+// Finder「前往文件夹」式路径解析：只读校验目标并返回足够的导航/预览元数据。
+// 相对路径以当前浏览目录为基准；file:// 路径方便直接粘贴自浏览器或终端输出。
+async function pathInfo(input, cwd) {
+  if (typeof input !== 'string' || !input.trim()) return { ok: false, error: '请输入文件或文件夹路径' };
+  let raw = input.trim();
+  if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) raw = raw.slice(1, -1);
+  if (/^file:\/\//i.test(raw)) {
+    try { raw = decodeURIComponent(new URL(raw).pathname); }
+    catch { return { ok: false, error: 'file:// 路径格式不正确' }; }
+  }
+  // 接受终端常见的反斜杠转义空格；Windows 上反斜杠是目录分隔符，不做转换。
+  if (PLATFORM !== 'win32') raw = raw.replace(/\\([ \\()'"&;])/g, '$1');
+  let target;
+  try {
+    if (raw.startsWith('~')) target = resolvePath(raw);
+    else if (path.isAbsolute(raw)) target = path.normalize(raw);
+    else target = path.resolve(cwd ? resolvePath(cwd) : HOME, raw);
+  } catch { return { ok: false, error: '路径格式不正确' }; }
+  try {
+    const st = await fsp.stat(target); // 跟随 symlink，和目录列表行为一致
+    const isDir = st.isDirectory();
+    return {
+      ok: true,
+      path: target,
+      parent: isDir ? path.dirname(target) : path.dirname(target),
+      name: path.basename(target) || target,
+      isDir,
+      kind: kindOf(path.basename(target), isDir),
+      size: st.size,
+      mtime: st.mtimeMs,
+    };
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return { ok: false, error: '找不到这个路径' };
+    if (e && (e.code === 'EACCES' || e.code === 'EPERM')) return { ok: false, error: '没有权限访问这个路径' };
+    return { ok: false, error: '无法打开这个路径' };
+  }
+}
+
 async function readFile(filePath) {
   const file = resolvePath(filePath);
   const st = await fsp.stat(file);
@@ -2952,6 +2990,9 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/read') {
       return sendJSON(res, 200, await readFile(qp.get('path')));
+    }
+    if (p === '/api/path-info') {
+      return sendJSON(res, 200, await pathInfo(qp.get('path'), qp.get('cwd')));
     }
     if (p === '/api/raw') {
       return serveRaw(req, res, qp.get('path'));

@@ -47,4 +47,9 @@ test('terminal exposes equal split pane controls and layout plumbing', () => {
   assert.match(css, /row-resize/);
   assert.match(css, /\.term-pane\.active/);
   assert.match(css, /\.term-tab \.tab-count/);
+  assert.match(js, /className = 'term-pane-id'/);
+  assert.match(js, /class="tab-term-id"/);
+  assert.match(js, /members\.map\(\(s\) => s\.id\)\.join\(' · '\)/);
+  assert.match(css, /\.term-tab \.tab-term-id/);
+  assert.match(css, /\.term-pane-id/);
 });
