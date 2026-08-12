@@ -198,6 +198,29 @@ npm run dist         # 打包签名 .dmg（产物在 dist/，不入 git）/ buil
 
 > 打包遇到 Electron 下载被墙：`ELECTRON_MIRROR="https://registry.npmmirror.com/-/binary/electron/" npm run dist`
 
+### Sandcastle + 本机 Codex（非沙盒）
+
+使用 Node.js 20.12+，安装并登录 Codex CLI 后，可通过 Sandcastle 在独立 worktree 中启动 Codex 交互界面：
+
+```bash
+npm run sandcastle:codex
+```
+
+也可以在启动时直接给出初始任务，进入界面后继续对话和接管：
+
+```bash
+npm run sandcastle:codex -- "完成任务，并写明修改范围、验证命令和验收标准"
+```
+
+默认每次运行创建独立的 `sandcastle/fanbox-*` 分支和 worktree，不直接修改当前分支。也可以显式指定任务分支、模型和推理强度：
+
+```bash
+SANDCASTLE_BRANCH=one/my-task CODEX_MODEL=gpt-5.6-sol CODEX_EFFORT=high \
+  npm run sandcastle:codex -- "完成这个任务并运行相关测试"
+```
+
+> 此入口使用 Sandcastle 的 `interactive()` 和 `noSandbox()`：不增加 Docker 等 Sandcastle 容器隔离，Codex TUI 会直接接管当前终端；Codex 自身的审批与沙盒策略仍按本机配置执行。仅用于可信任务，输入 `/exit` 或按 `Ctrl+C` 退出。
+
 ## Shortcuts · 快捷键
 
 | 操作 / Action | 键 / Key | 操作 / Action | 键 / Key |
