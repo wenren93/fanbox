@@ -32,7 +32,7 @@ const IGNORE_DIRS = new Set([
 ]);
 
 const TEXT_EXT = new Set([
-  'txt', 'md', 'markdown', 'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'json', 'json5',
+  'txt', 'md', 'markdown', 'js', 'jsx', 'ts', 'tsx', 'mts', 'cts', 'mjs', 'cjs', 'json', 'json5',
   'html', 'htm', 'css', 'scss', 'less', 'py', 'rb', 'go', 'rs', 'java', 'kt', 'swift',
   'c', 'h', 'cpp', 'hpp', 'cc', 'm', 'mm', 'sh', 'bash', 'zsh', 'fish', 'sql', 'yml',
   'yaml', 'toml', 'ini', 'env', 'conf', 'xml', 'svg', 'vue', 'astro', 'php', 'lua',
