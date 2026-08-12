@@ -160,3 +160,78 @@ test('existing target is not modified by phase-one import', async (t) => {
     assert.deepEqual((await fs.readdir(path.dirname(target))).filter((entry) => entry.startsWith('.fanbox-import-')), []);
   });
 });
+
+test('disabled and plugin installations remain valid import sources without changing agent configuration', async (t) => {
+  await withServer(t, async ({ home, post }) => {
+    const disabledSource = path.join(home, '.workbuddy', 'skills_disabled', 'disabled-source');
+    const pluginRoot = path.join(home, 'plugin-fixture');
+    const pluginSource = path.join(pluginRoot, 'skills', 'plugin-source');
+    const claudeSettings = path.join(home, '.claude', 'settings.json');
+    const codexConfig = path.join(home, '.codex', 'config.toml');
+    const installedPlugins = path.join(home, '.claude', 'plugins', 'installed_plugins.json');
+    await createComplexSkill(disabledSource, 'disabled-source');
+    await createComplexSkill(pluginSource, 'plugin-source');
+    await fs.mkdir(path.dirname(claudeSettings), { recursive: true });
+    await fs.mkdir(path.dirname(codexConfig), { recursive: true });
+    await fs.mkdir(path.dirname(installedPlugins), { recursive: true });
+    await fs.writeFile(claudeSettings, JSON.stringify({ skillOverrides: { 'disabled-source': 'off' } }, null, 2) + '\n');
+    await fs.writeFile(codexConfig, '[skills]\n', 'utf8');
+    await fs.writeFile(installedPlugins, JSON.stringify({ plugins: { 'fixture@example': [{ installPath: pluginRoot }] } }), 'utf8');
+    const settingsBefore = await fs.readFile(claudeSettings);
+    const configBefore = await fs.readFile(codexConfig);
+
+    const disabled = await post('/api/skills/import', { sourceDir: disabledSource, targetAgent: 'codex' });
+    assert.equal(disabled.body.status, 'created');
+    assert.equal(await fs.readFile(path.join(home, '.codex', 'skills', 'disabled-source', 'run.sh'), 'utf8'), '#!/bin/sh\necho imported\n');
+    assert.equal((await fs.stat(disabledSource)).isDirectory(), true);
+
+    const plugin = await post('/api/skills/import', { sourceDir: pluginSource, targetAgent: 'workbuddy' });
+    assert.equal(plugin.body.status, 'created');
+    assert.equal(await fs.readFile(path.join(home, '.workbuddy', 'skills', 'plugin-source', 'SKILL.md'), 'utf8'), await fs.readFile(path.join(pluginSource, 'SKILL.md'), 'utf8'));
+
+    assert.deepEqual(await fs.readFile(claudeSettings), settingsBefore);
+    assert.deepEqual(await fs.readFile(codexConfig), configBefore);
+  });
+});
+
+test('top-level and safe internal symlinks become independent imported content', async (t) => {
+  await withServer(t, async ({ home, post }) => {
+    const realSource = path.join(home, 'real-skill-source');
+    const sourceLink = path.join(home, '.claude', 'skills', 'linked-source');
+    await createComplexSkill(realSource, 'linked-source');
+    await fs.writeFile(path.join(realSource, 'shared.txt'), 'independent content', 'utf8');
+    await fs.symlink('shared.txt', path.join(realSource, 'linked-file.txt'));
+    await fs.symlink('references', path.join(realSource, 'linked-references'));
+    await fs.mkdir(path.dirname(sourceLink), { recursive: true });
+    await fs.symlink(realSource, sourceLink);
+
+    const response = await post('/api/skills/import', { sourceDir: sourceLink, targetAgent: 'codex' });
+    assert.equal(response.body.status, 'created');
+    const target = path.join(home, '.codex', 'skills', 'linked-source');
+    assert.equal((await fs.lstat(target)).isSymbolicLink(), false);
+    assert.equal((await fs.lstat(path.join(target, 'linked-file.txt'))).isSymbolicLink(), false);
+    assert.equal((await fs.lstat(path.join(target, 'linked-references'))).isSymbolicLink(), false);
+    assert.equal(await fs.readFile(path.join(target, 'linked-file.txt'), 'utf8'), 'independent content');
+    assert.deepEqual(await fs.readFile(path.join(target, 'linked-references', 'data.bin')), Buffer.from([0, 1, 2, 255]));
+
+    await fs.writeFile(path.join(realSource, 'shared.txt'), 'source changed', 'utf8');
+    assert.equal(await fs.readFile(path.join(target, 'linked-file.txt'), 'utf8'), 'independent content');
+  });
+});
+
+test('a source removed after scanning cannot be imported and leaves no target or temporary item', async (t) => {
+  await withServer(t, async ({ home, post }) => {
+    const source = path.join(home, '.claude', 'skills', 'vanished-source');
+    const targetRoot = path.join(home, '.codex', 'skills');
+    await createComplexSkill(source, 'vanished-source');
+    const scanned = await post('/api/skills/refresh', {});
+    assert.equal(scanned.body.items.some((item) => item.dir === source), true);
+    await fs.rm(source, { recursive: true });
+
+    const response = await post('/api/skills/import', { sourceDir: source, targetAgent: 'codex' });
+    assert.equal(response.body.status, 'invalid_source');
+    await assert.rejects(fs.stat(path.join(targetRoot, 'vanished-source')), { code: 'ENOENT' });
+    const entries = await fs.readdir(targetRoot).catch(() => []);
+    assert.deepEqual(entries.filter((entry) => entry.startsWith('.fanbox-import-')), []);
+  });
+});

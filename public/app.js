@@ -4958,6 +4958,14 @@ const skillsView = {
   },
   async importSkill(it) {
     if (this.busy || it.residue) return;
+    if (!Array.isArray(it.importTargets)) {
+      toast('目标列表尚未就绪；请刷新或重启 FanBox 后重试', true);
+      return;
+    }
+    if (!it.importTargets.length) {
+      toast('没有可导入的目标 Agent', true);
+      return;
+    }
     const targetAgent = await skillImportTargetDialog(it, this.data.roots || {});
     if (!targetAgent) return;
     this.busy = true; this.render();

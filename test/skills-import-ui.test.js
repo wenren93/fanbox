@@ -34,6 +34,8 @@ test('import target dialog shows controlled roots and excludes the source instal
 
 test('import uses a controlled target id, refreshes in place, and maps success feedback', () => {
   const { view } = skillsViewSource();
+  assert.match(view, /!Array\.isArray\(it\.importTargets\)[\s\S]*目标列表尚未就绪；请刷新或重启 FanBox 后重试/);
+  assert.match(view, /!it\.importTargets\.length[\s\S]*没有可导入的目标 Agent/);
   assert.match(view, /apiPost\('\/api\/skills\/import',\s*\{\s*sourceDir:\s*it\.dir,\s*targetAgent,\s*cwd:\s*state\.cwd\s*\}\)/);
   assert.match(view, /r\s*&&\s*r\.status\s*===\s*'created'/);
   assert.match(view, /已导入到 \$\{r\.targetLabel\}；新会话可发现/);
