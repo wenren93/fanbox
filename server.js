@@ -16,6 +16,7 @@ const crypto = require('crypto');
 const { exec, spawn, execFile } = require('child_process');
 const { URL } = require('url');
 const { createSkillDiscovery } = require('./lib/skill-discovery');
+const { buildCronCommand } = require('./lib/cron-command');
 
 const HOME = os.homedir();
 const PORT = Number(process.env.FANBOX_PORT) || 4567;
@@ -3306,22 +3307,16 @@ function cronScheduleValid(s) {
   if (s.type === 'cron') { return cronNext(s.expr, Date.now()) === undefined ? 'cron 表达式无法解析（需要 5 段：分 时 日 月 周）' : null; }
   return '不认识的时间规则类型';
 }
-function cronShq(s) { return `'${String(s).replace(/'/g, `'\\''`)}'`; }
 // 到点敲进新终端的命令。agent 任务默认 acceptEdits（编辑自动同意，跑命令仍确认）；
 // full = 用户明确要全自动（无人值守跳过一切确认）
-function cronCommand(t) {
-  if (t.agent === 'shell') return String(t.prompt || '');
-  const p = cronShq(t.prompt || '');
-  if (t.agent === 'codex') return t.full ? `codex --full-auto ${p}` : `codex ${p}`;
-  return t.full ? `claude --dangerously-skip-permissions ${p}` : `claude --permission-mode acceptEdits ${p}`;
-}
 async function cronFire(t, manual) {
   t.nextRun = (t.schedule || {}).type === 'at' ? null : cronNextRun(t); // 先排下一次，防调度重入
   const rec = { t: Date.now(), manual: !!manual };
   const A = global.__fanboxAgent;
   if (!A) { rec.ok = false; rec.error = '需要桌面版（浏览器版没有内嵌终端）'; }
   else {
-    const r = await A.create({ cwd: t.cwd || HOME, autorun: cronCommand(t) }).catch((e) => ({ ok: false, error: String((e && e.message) || e) }));
+    const autorun = await buildCronCommand(t);
+    const r = await A.create({ cwd: t.cwd || HOME, autorun }).catch((e) => ({ ok: false, error: String((e && e.message) || e) }));
     rec.ok = !!(r && r.ok); if (r && r.error) rec.error = r.error; if (r && r.id) rec.term = r.id;
   }
   t.lastFire = rec.t;
