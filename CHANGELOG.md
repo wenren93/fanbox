@@ -12,6 +12,8 @@
 ## [Unreleased]
 
 ### Added
+- **Skills 透视新增“已安装 / 发现”双页签与安全安装流程**：显式搜索 skills.sh，最多展示 20 条并保留上游顺序；同查询 10 分钟复用，最近一次成功结果可缓存 24 小时，离线缓存只读且不能发起安装。公开 GitHub 来源会先由 Git 固定到完整 commit，再从 codeload 受限下载到随机临时目录，经归档路径、链接、特殊文件、容量/数量、名称、权限、脚本、二进制资源、工具、依赖和许可证检查后确认安装。支持 Claude、Codex、Agents、WorkBuddy 四个受控目标、应用级默认目标、来源身份记录、同源更新、本地修改保护、异源/未知冲突、串行原子换位、废纸篓恢复和失败回滚；外部内容不会被执行，也不会自动安装依赖或交给 Agent 分析
+- **Skills Discovery 隐私与平台边界写入 README**：列明 skills.sh、GitHub Git 与 GitHub codeload 分别收到的数据；不新增产品遥测或搜索历史。首版仅 macOS 可安装，Windows/Linux 仍可发现和打开来源；不支持私有仓库、非 GitHub/任意 URL、项目级目标、自动或后台更新、自动依赖安装及第三方审计/安全认证
 - **一键启动新增 Codex 桌面应用**：在 Codex CLI 之外增加独立的「Codex 桌面应用」可选入口，放在 agent 列表最后并复用官方图标；自动检测 Mac 是否已安装，点击通过 `open -a Codex` 拉起 App
 - **接入 Sandcastle 本机 Codex 交互 runner**：新增 `npm run sandcastle:codex [-- "任务"]`，通过 `interactive()` 与 `noSandbox()` 在当前终端启动 Codex TUI；每次会话默认进入独立分支和 worktree，并在 README 明示 Sandcastle 隔离与 Codex 自身审批边界
 

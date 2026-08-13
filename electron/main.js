@@ -9,6 +9,7 @@ const { app, BrowserWindow, ipcMain, shell, nativeImage, Menu, clipboard, dialog
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+const { activeTerminalCount } = require('./terminal-activity');
 
 // 复用现有后端：require 即 listen 127.0.0.1:PORT，不自动开浏览器
 process.env.FANBOX_NO_OPEN = '1';
@@ -86,6 +87,27 @@ function createWindow() {
 
   win.on('closed', () => { win = null; });
 }
+
+// 从 Dock、启动脚本或其他外部入口唤醒应用时，恢复同一个窗口。
+// 点红叉后的窗口仍存在但处于 hidden 状态，只激活进程并不会让它重新显示。
+function showMainWindow() {
+  if (!app.isReady()) {
+    app.whenReady().then(showMainWindow);
+    return;
+  }
+  if (!win || win.isDestroyed()) {
+    createWindow();
+    return;
+  }
+  if (win.isMinimized()) win.restore();
+  win.show();
+  if (process.platform === 'darwin') app.focus({ steal: true });
+  win.focus();
+}
+
+// start.sh 在发现当前项目已运行时发送 SIGCONT，请主进程自行恢复隐藏窗口。
+// 旧版本尚未监听该信号时也只会忽略，不会意外退出应用。
+process.on('SIGCONT', showMainWindow);
 
 app.whenReady().then(() => {
   // 开发模式下 macOS 默认显示 Electron 图标——换成翻箱自己的（打包后由 electron-builder 的 icon 接管）
@@ -488,21 +510,21 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  else if (win && !win.isDestroyed()) { win.show(); win.focus(); } // 从 Dock 点回来：显示隐藏的窗口，状态原样还在
+  showMainWindow(); // 从 Dock 点回来：显示隐藏的窗口，状态原样还在
 });
 // ⌘Q 兜底：还有终端在跑时（agent 任务），退出前确认，避免手滑全灭
 let quitConfirmed = false;
 let isQuitting = false; // 真正退出（⌘Q / 菜单退出）才置真；点红叉只隐藏不退出，见 win.on('close')
 app.on('before-quit', (e) => {
-  if (quitConfirmed || terminals.size === 0) { isQuitting = true; return; }
+  const activeCount = activeTerminalCount(terminals);
+  if (quitConfirmed || activeCount === 0) { isQuitting = true; return; }
   e.preventDefault();
   const choice = dialog.showMessageBoxSync(win && !win.isDestroyed() ? win : undefined, {
     type: 'warning',
     buttons: [M('取消', 'Cancel'), M('退出', 'Quit')],
     defaultId: 0,
     cancelId: 0,
-    message: M(`还有 ${terminals.size} 个终端会话在运行`, `${terminals.size} terminal session(s) still running`),
+    message: M(`还有 ${activeCount} 个终端任务在运行`, `${activeCount} terminal task(s) still running`),
     detail: M('退出会终止正在运行的 agent 任务，确定退出？', 'Quitting will terminate running agent tasks. Quit anyway?'),
   });
   if (choice === 1) { quitConfirmed = true; isQuitting = true; app.quit(); }

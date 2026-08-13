@@ -15,6 +15,7 @@ const os = require('os');
 const crypto = require('crypto');
 const { exec, spawn, execFile } = require('child_process');
 const { URL } = require('url');
+const { createSkillDiscovery } = require('./lib/skill-discovery');
 
 const HOME = os.homedir();
 const PORT = Number(process.env.FANBOX_PORT) || 4567;
@@ -2082,6 +2083,7 @@ const SKILL_DESC_CUT = 1536; // Claude Code 单条 description 的截断线（�
 const SKILL_BUDGET_CHARS = 15000; // 描述总预算的社区实测估算值（窗口的 1%），仅作预警参考
 let skillsCache = { at: 0, data: null };
 let skillsMutationGeneration = 0;
+let skillDiscovery = null;
 
 async function atomicWriteText(file, text) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
@@ -2634,7 +2636,33 @@ async function skillToggle(dir, enable, cwd = null) {
 }
 
 async function skillTrashItem(it) {
-  return trashPath(it.dir);
+  // 先把目录换到同级回滚位，再切来源记录；任一步失败都恢复旧目录和旧记录。
+  // 元数据成功后把原名放回，系统废纸篓中仍保留用户熟悉的 Skill 名称。
+  const parent = path.dirname(it.dir);
+  const rollback = await fsp.mkdtemp(path.join(parent, '.fanbox-uninstall-'));
+  await fsp.rmdir(rollback);
+  let record = null;
+  let moved = false;
+  try {
+    await fsp.rename(it.dir, rollback); moved = true;
+    if (skillDiscovery) record = await skillDiscovery.removeSourceRecord(it.dir);
+    await fsp.rename(rollback, it.dir); moved = false;
+    const result = await trashImportedSkill(it.dir);
+    if (result.ok) return result;
+    if (record && skillDiscovery) await skillDiscovery.restoreSourceRecord(it.dir, record);
+    return result;
+  } catch (error) {
+    let rollbackError = null;
+    if (moved) {
+      try { await fsp.rename(rollback, it.dir); moved = false; } catch (restoreError) { rollbackError = restoreError; }
+    }
+    if (record && skillDiscovery) {
+      try { await skillDiscovery.restoreSourceRecord(it.dir, record); } catch (restoreError) { rollbackError ||= restoreError; }
+    }
+    return { ok: false, error: rollbackError ? `卸载失败，回滚也失败：${rollbackError.message}` : error.message };
+  } finally {
+    if (moved) { try { await fsp.rename(rollback, it.dir); } catch { /* 保留可恢复回滚目录 */ } }
+  }
 }
 
 async function skillTrash(dir, cwd = null) {
@@ -3113,6 +3141,22 @@ async function skillBatch(parsed) {
   return { ok: true, action: parsed.action, results, summary, restartRequired: [...restartRequired] };
 }
 
+// Discovery's network/extraction work stays outside this queue.  Its install
+// callback enters the same serialized boundary as import/toggle/uninstall only
+// for final preflight and filesystem mutation.
+skillDiscovery = createSkillDiscovery({
+  home: HOME,
+  configDir: CONFIG_DIR,
+  platform: PLATFORM,
+  targets: SKILL_IMPORT_TARGETS,
+  queueWrite: queueSkillsWrite,
+  trash: trashImportedSkill,
+  fingerprint: skillTreeFingerprint,
+  refreshSkills: () => skillsData({ force: true }),
+  readConfig,
+  updateConfig,
+});
+
 // ---------- 内置 skill 一键安装（设置面板）----------
 // 随 app 分发的 skill（skills/<id>/）拷进 ~/.claude/skills/<id>/，终端里的 claude 就学会翻箱的配套玩法。
 // asar 包里 fs 照常可读（Electron 补丁过的 fs），开发目录直接跑也一样。
@@ -3577,6 +3621,23 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/skills') {
       return sendJSON(res, 200, await skillsData());
+    }
+    if (p === '/api/skills/discovery/search' && req.method === 'POST') {
+      return sendJSON(res, 200, await skillDiscovery.search(await readBody(req)));
+    }
+    if (p === '/api/skills/discovery/inspect' && req.method === 'POST') {
+      return sendJSON(res, 200, await skillDiscovery.inspect(await readBody(req)));
+    }
+    if (p === '/api/skills/discovery/install' && req.method === 'POST') {
+      const body = await readBody(req);
+      if (!body || typeof body.inspectionId !== 'string' || !/^[a-f0-9]{48}$/.test(body.inspectionId)
+        || typeof body.targetAgent !== 'string' || !Object.prototype.hasOwnProperty.call(SKILL_IMPORT_TARGETS, body.targetAgent)) {
+        return sendJSON(res, 400, { ok: false, status: 'invalid_request', error: '检查凭据或目标 Agent 无效' });
+      }
+      return sendJSON(res, 200, await skillDiscovery.install(body));
+    }
+    if (p === '/api/skills/discovery/settings') {
+      return sendJSON(res, 200, await skillDiscovery.settings(req.method === 'POST' ? await readBody(req) : undefined));
     }
     if (p === '/api/skills/builtin') {
       return sendJSON(res, 200, await builtinSkillStatus());
