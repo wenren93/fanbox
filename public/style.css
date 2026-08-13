@@ -252,7 +252,8 @@ kbd {
 .sidebar-foot { padding: 10px 8px 0; font-size: 11px; color: var(--text-faint); }
 
 /* ---------- 主区 ---------- */
-#main { display: flex; flex-direction: column; overflow: hidden; }
+/* #main 是 grid 子项；明确允许其缩到轨道以内，窄窗口才不会被顶栏/预览操作撑出视口。 */
+#main { display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
 #topbar {
   display: flex; align-items: center; gap: 12px; padding: 10px 16px;
   border-bottom: 1px solid var(--border); background: var(--bg-2);
@@ -410,16 +411,16 @@ kbd {
 .dock-bottom #preview { border-left: 1px solid var(--border); }
 .dock-right #preview { border-top: 1px solid var(--border); }
 /* 标题 + 操作按钮 + 关闭 全部并到一行，省掉一整行高度 */
-.preview-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.preview-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); min-width: 0; }
 .preview-title { flex: 0 1 auto; min-width: 36px; font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #preview-close { background: none; border: none; color: var(--text-dim); font-size: 16px; cursor: pointer; flex: 0 0 auto; margin-left: 2px; }
 #preview-close:hover { color: var(--text); }
-.preview-actions { display: flex; flex-wrap: nowrap; gap: 5px; padding: 0; margin-left: auto; overflow: visible; scrollbar-width: none; }
+.preview-actions { display: flex; flex: 0 1 auto; min-width: 0; flex-wrap: nowrap; gap: 5px; padding: 0; margin-left: auto; overflow: visible; scrollbar-width: none; }
 .preview-actions button { flex: none; }
 /* 预览被压窄时操作条自身横向滚动（触控板横扫），标题和关闭钮永远在位。
    代价：滚动容器会裁掉按钮的 hover 气泡，所以只在窄时开启，宽时保持 overflow:visible */
 @container (max-width: 420px) {
-  .preview-actions { overflow-x: auto; min-width: 0; }
+  .preview-actions { overflow-x: auto; }
 }
 
 /* 无文字图标按钮的即时气泡标签（替代慢吞吞、样式丑的原生 title）。统一向下弹出，避免贴顶被裁 */
