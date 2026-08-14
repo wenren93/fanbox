@@ -198,6 +198,9 @@ const state = {
   roots: [],
   previewW: Number(localStorage.getItem('fb_preview_w')) || 0, // 0 = 用户还没拖过，走 1:2 比例默认
   previewH: Number(localStorage.getItem('fb_preview_h')) || 0,
+  // 预览的用户尺寸必须是内容区的占比而不是孤立像素：窗口、侧栏或终端变动后仍保持同一布局关系。
+  previewWRatio: Number(localStorage.getItem('fb_preview_w_ratio')) || 0,
+  previewHRatio: Number(localStorage.getItem('fb_preview_h_ratio')) || 0,
   sidebarCollapsed: localStorage.getItem('fb_sidebar_collapsed') === '1',
   sidebarW: Math.min(420, Math.max(190, Number(localStorage.getItem('fb_sidebar_w')) || 248)),
   muted: localStorage.getItem('fb_muted') === '1', // WOW4 提示音静音开关
@@ -955,13 +958,15 @@ function applyPreviewSize() {
   const pv = $('#preview');
   if (!pv || pv.classList.contains('hidden')) return;
   const isRight = term.dock === 'right';
-  let basis = isRight ? state.previewH : state.previewW; // 0 = 还没手动拖过
-  if (!basis) { // 首次：文件列表:预览 = 1:2，预览占 2/3
-    const fm = $('#filemgmt');
-    const r = fm && fm.getBoundingClientRect();
-    const span = r ? (isRight ? r.height : r.width) : 0;
-    basis = span ? Math.round(span * 2 / 3) : (isRight ? 340 : 480);
-  }
+  const fm = $('#filemgmt');
+  const r = fm && fm.getBoundingClientRect();
+  const span = r ? (isRight ? r.height : r.width) : 0;
+  const savedRatio = isRight ? state.previewHRatio : state.previewWRatio;
+  const savedPx = isRight ? state.previewH : state.previewW;
+  // 旧版本只保存 px：首次使用时迁移成当前内容区占比。以后预览随内容区缩放，
+  // 不再因某次窄窗口/旧拖拽尺寸把文件区或操作栏挤出屏幕。
+  const ratio = Math.min(2 / 3, Math.max(0, savedRatio || (span && savedPx ? savedPx / span : 2 / 3)));
+  const basis = span ? Math.round(span * ratio) : (isRight ? 340 : 480);
   pv.style.flexBasis = basis + 'px';
 }
 // 离散布局切换时短暂开启过渡（拖拽时不开，保证跟手）
@@ -998,6 +1003,17 @@ function showPreviewPanel() {
   $('#preview-resizer').classList.remove('hidden');
   if (wasHidden) animateLayout();
   applyPreviewSize();
+}
+// 文件管理区被窗口、侧栏或终端重新分配尺寸时，预览也按保存的占比重算。
+// 观察外层 #filemgmt（而非内部 #content/#preview），不会被自身 flex-basis 改动反复触发。
+function bindPreviewResponsiveSize() {
+  const fm = $('#filemgmt');
+  if (!fm || !window.ResizeObserver) return;
+  let raf = null;
+  new ResizeObserver(() => {
+    if ($('#preview').classList.contains('hidden') || raf) return;
+    raf = requestAnimationFrame(() => { raf = null; applyPreviewSize(); });
+  }).observe(fm);
 }
 // 预览全屏：让 #preview 铺满整个窗口（盖住文件区/终端/侧边栏）。md 全屏下仍是所见即所得，可继续编辑。
 let previewMax = false;
@@ -2436,8 +2452,10 @@ function bindResizer() {
     const fm = $('#filemgmt').getBoundingClientRect();
     if (term.dock === 'right') { // 预览在文件区下方 → 纵向拖
       state.previewH = Math.round(Math.min(fm.height - 120, Math.max(140, fm.bottom - e.clientY)));
+      state.previewHRatio = fm.height ? state.previewH / fm.height : 0;
     } else { // 预览在文件区右侧 → 横向拖
       state.previewW = Math.round(Math.min(fm.width - 220, Math.max(260, fm.right - e.clientX)));
+      state.previewWRatio = fm.width ? state.previewW / fm.width : 0;
     }
     applyPreviewSize();
   });
@@ -2446,6 +2464,8 @@ function bindResizer() {
     dragging = false; handle.classList.remove('dragging'); document.body.style.userSelect = '';
     localStorage.setItem('fb_preview_w', state.previewW);
     localStorage.setItem('fb_preview_h', state.previewH || 340);
+    localStorage.setItem('fb_preview_w_ratio', state.previewWRatio);
+    localStorage.setItem('fb_preview_h_ratio', state.previewHRatio);
   });
 }
 
@@ -6716,6 +6736,7 @@ async function init() {
   term.applyDock(); // 初始就给 #main-body 设好 dock 类，决定预览/文件管理方向
   bindEvents();
   bindResizer();
+  bindPreviewResponsiveSize();
   bindSidebarResizer();
   bindSelectionToTerminal();
   enableTooltips();
