@@ -2786,7 +2786,7 @@ const wechatView = {
 //           没有 sessions 字段 = 该 agent 暂不支持会话回溯（服务端也没有对应适配器）
 const AGENT_REGISTRY = [
   { id: 'claude', label: 'Claude Code', cmd: 'claude --dangerously-skip-permissions', bin: 'claude', install: 'npm install -g @anthropic-ai/claude-code', sessions: { badge: 'C', resumeCmd: 'claude --dangerously-skip-permissions --resume {id}' } },
-  { id: 'codex', label: 'Codex', cmd: 'codex', bin: 'codex', install: 'npm install -g @openai/codex', sessions: { badge: '>_', resumeCmd: 'codex resume {id}' } },
+  { id: 'codex', label: 'Codex', cmd: 'codex --dangerously-bypass-approvals-and-sandbox', bin: 'codex', install: 'npm install -g @openai/codex', sessions: { badge: '>_', resumeCmd: 'codex resume --dangerously-bypass-approvals-and-sandbox {id}' } },
   { id: 'hermes', label: 'Hermes Agent', cmd: 'hermes', bin: 'hermes', install: 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash' },
   { id: 'openclaw', label: 'OpenClaw', cmd: 'openclaw', bin: 'openclaw', install: 'npm install -g openclaw' },
   { id: 'kimi', label: 'Kimi Code', cmd: 'kimi', bin: 'kimi', install: 'curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash', sessions: { badge: 'K', resumeCmd: 'kimi -S {id}' } },

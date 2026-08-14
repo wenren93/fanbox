@@ -8,7 +8,7 @@ test('quick launch offers Codex desktop app separately from Codex CLI', () => {
   const js = fs.readFileSync('public/app.js', 'utf8');
   const i18n = fs.readFileSync('public/i18n-dict.js', 'utf8');
 
-  assert.match(js, /id: 'codex'.*cmd: 'codex'.*bin: 'codex'/);
+  assert.match(js, /id: 'codex'.*cmd: 'codex --dangerously-bypass-approvals-and-sandbox'.*bin: 'codex'.*resumeCmd: 'codex resume --dangerously-bypass-approvals-and-sandbox \{id\}'/);
   assert.match(js, /id: 'codex-app'.*label: 'Codex 桌面应用'.*cmd: 'open -a Codex'.*app: 'Codex'.*icon: 'codex'/);
   assert.match(js, /agentIconHtml\(a\.icon \|\| a\.id\)/);
   assert.deepEqual([...js.matchAll(/id: 'codex-app'/g)].length, 1);
