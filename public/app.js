@@ -2975,14 +2975,22 @@ function bindEvents() {
   // 启动时点一下连接状态，连着就给终端里的微信按钮点绿点（不挡初始化）
   if (window.fanboxWechat) window.fanboxWechat.env().then((e) => wechatView.syncDot(!!(e && e.connected))).catch(() => {});
   $('#btn-terminal').onclick = () => term.toggle();
-  // Command+T：和顶栏终端按钮一致，在打开/收起之间切换；Command+N 新建终端标签。
+  // Command+T：切换终端面板；Command+Shift+N 新建终端标签；Command+Shift+W 关闭当前终端标签。
   window.addEventListener('keydown', (ev) => {
     if (!ev.metaKey || ev.ctrlKey || ev.altKey) return;
     const key = ev.key.toLowerCase();
-    if (key !== 't' && key !== 'n') return;
+    if (key !== 't' && key !== 'n' && key !== 'w') return;
+    if (key === 't' && ev.shiftKey) return;
+    if (key === 'n' && !ev.shiftKey) return;
+    if (key === 'w' && !ev.shiftKey) return;
     ev.preventDefault();
     ev.stopPropagation();
     if (key === 't') { term.toggle(); return; }
+    if (key === 'w' && ev.shiftKey) {
+      if (term.available() && term.active) term.closeTab(term.active);
+      return;
+    }
+    if (key === 'w') return;
     if (!term.available()) { if (state.cwd) openWith(state.cwd, 'terminal'); return; }
     const hadSessions = term.sessions.length > 0;
     wechatView.close();
