@@ -9,6 +9,7 @@
   "scripts": {
     "start": "node server.js",
     "app": "electron .",
+    "wechat:send": "node scripts/send-wechat-message.js",
     "test": "node --test test/*.test.js",
     "rebuild": "electron-rebuild -f -w node-pty",
     "rebuild:pty": "cd node_modules/node-pty && node-gyp rebuild --target=$(node -p \"require('electron/package.json').version\") --dist-url=https://www.electronjs.org/headers --arch=$PTY_ARCH",
