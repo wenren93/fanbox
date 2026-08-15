@@ -2719,7 +2719,7 @@ const wechatView = {
   bubble(m) {
     if (m.role === 'system') return `<div class="wx-sys">${escapeHtml(m.text)}</div>`; // 分隔线/系统提示居中
     const me = m.role === 'user';
-    const av = me ? '花' : (this.target === 'claude' ? 'C' : 'CX');
+    const av = me ? '闻人' : (this.target === 'claude' ? 'C' : 'CX');
     // bot 回复渲染 markdown（手机大脑常回 **加粗**/列表/`代码`）；user 保持纯文本转义
     const text = me ? escapeHtml(m.text) : this.mdBody(m.text);
     // 用户发来的图片：用 /api/raw 直接读本机收件箱里的原图，点击走全局 lightbox 放大
