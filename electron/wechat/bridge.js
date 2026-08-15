@@ -8,6 +8,7 @@ const fs = require('fs');
 const ilink = require('./ilink');
 const driver = require('./driver');
 const memory = require('./memory');
+const { extractCronOps, validCronAction } = require('../../lib/cron-agent');
 
 let DATA_DIR = null;
 function dataDir() {
@@ -63,6 +64,14 @@ const WX_TERM_PROTOCOL = [
   '要往某个终端输入内容（命令或回答它的提问），在回复末尾追加标记（每个一行，可多个）：',
   '<term n="编号">要输入的文本</term>',
   '注意：要执行命令必须让文本以换行结尾（相当于按回车），例如 <term n="2">npm test\\n</term>；只回车确认就写一个 \\n。只有用户明确要你操控某终端时才用，别擅自发指令。',
+].join('\n');
+
+// ClawBot 的定时任务协议：由 bridge 代为调用 FanBox 内部实现，不要求无头 Agent 持有终端控制 token。
+const WX_CRON_PROTOCOL = [
+  '用户明确要求设置、查看或预览定时任务时，使用下面的结构化标记，不要把标记展示给用户：',
+  '<cron action="preview">{"schedule":{"type":"cron","expr":"0 9 * * *"}}</cron>',
+  '<cron action="save">{"name":"任务名","cwd":"/绝对路径","agent":"claude","prompt":"要执行的事情","schedule":{"type":"cron","expr":"0 9 * * *"}}</cron>',
+  'agent 只能是 claude、codex 或 shell；schedule 支持 cron、at、every。创建前先根据用户意图预览时间；full:true 只有用户明确要求时才使用。ClawBot 不能删除、停用或立即执行任务。',
 ].join('\n');
 
 // 终端输入规范化：① 把 agent 按协议写的字面转义（\n \r \t）还原成控制符；
@@ -222,14 +231,14 @@ const bridge = {
     if (c.pendingRecap) { recap = `【上下文已压缩归档，下面是进度摘要 + 最近几轮原话，接着干、别从头开始】\n${c.pendingRecap}`; c.pendingRecap = ''; }
     // 系统提示 = 人格 + 注入记忆 + 记忆协议 + 发文件协议 + 控制终端协议 + 别的终端实时状态 + 续场摘要
     const termCtx = await this.buildTermContext();
-    const sys = [this.persona, memory.inject(), memory.PROTOCOL, WX_FILE_PROTOCOL, WX_TERM_PROTOCOL, termCtx, recap].filter(Boolean).join('\n\n');
+    const sys = [this.persona, memory.inject(), memory.PROTOCOL, WX_FILE_PROTOCOL, WX_TERM_PROTOCOL, WX_CRON_PROTOCOL, termCtx, recap].filter(Boolean).join('\n\n');
     let raw, r;
     if (this.target === 'claude') {
       r = await driver.runClaude(text, this.cwd, c.claudeSession, sys, onProgress);
       if (r.sessionId) { c.claudeSession = r.sessionId; }
       raw = r.text;
     } else {
-      r = await driver.runCodex(text, this.cwd, sys, c.codexSession, onProgress);
+      r = await driver.runCodex(text, this.cwd, sys, c.codexSession, onProgress, WX_CRON_PROTOCOL);
       if (r.sessionId) { c.codexSession = r.sessionId; }
       raw = r.text;
     }
@@ -245,7 +254,34 @@ const bridge = {
     const { clean, ops } = memory.extractOps(raw);
     if (ops.length) { try { memory.applyOps(ops); } catch (e) { console.error('[wechat] memory apply', e); } }
     // 抽出 <term> ops 写进别的终端（fire-and-forget），把标记从展示里剥掉、附一句回执
-    return this.runTermOps(clean || raw);
+    return this.runCronOps(this.runTermOps(clean || raw));
+  },
+
+  // 执行 ClawBot 产生的定时任务操作，返回简洁的人类可读回执，不把 JSON/命令泄露到微信。
+  async runCronOps(reply) {
+    const { clean, ops } = extractCronOps(reply);
+    if (!ops.length) return clean || reply;
+    const cron = global.__fanboxCron;
+    if (!cron) return `${clean || ''}\n\n⚠️ 当前 FanBox 进程没有定时任务能力，请重启桌面版后重试。`.trim();
+    const notices = [];
+    for (const op of ops) {
+      if (!validCronAction(op.action) || op.data._invalid) { notices.push('定时任务请求格式不正确'); continue; }
+      const data = { ...op.data };
+      delete data.action; delete data._invalid;
+      if (op.action === 'save') data.createdBy = 'agent';
+      const result = await cron.action(op.action, data).catch((e) => ({ ok: false, error: String(e && e.message || e) }));
+      if (!result || !result.ok) { notices.push(`定时任务操作失败：${result && result.error ? result.error : '未知错误'}`); continue; }
+      const task = result.task || {};
+      if (op.action === 'list') {
+        notices.push(`当前共有 ${(result.tasks || []).length} 个定时任务`);
+      } else if (op.action === 'preview') {
+        const times = (result.times || []).map((t) => new Date(t).toLocaleString('zh-CN', { hour12: false }));
+        notices.push(times.length ? `预计执行时间：${times.join('、')}` : '没有可预览的执行时间');
+      } else if (op.action === 'save') {
+        notices.push(`已创建定时任务「${task.name || '未命名任务'}」`);
+      }
+    }
+    return `${clean || ''}${notices.length ? `\n\n⏰ ${notices.join('\n')}` : ''}`.trim();
   },
 
   // 压缩归档前的静默一轮：在「当前满 session」上让 agent flush 记忆 + 吐一段进度摘要。

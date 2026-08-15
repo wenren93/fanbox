@@ -123,11 +123,13 @@ async function runClaude(text, cwd, sessionId, persona, onProgress) {
 }
 
 // codex 无头：首轮 `codex exec` 建会话并从 thread.started 抓 thread_id；之后 `codex exec resume <id> -` 续上下文（codex 0.139+）。
-async function runCodex(text, cwd, persona, sessionId, onProgress) {
+async function runCodex(text, cwd, persona, sessionId, onProgress, resumePrompt = '') {
   const flags = '--json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox';
   // 续话：prompt 走 stdin（结尾 `-`）；会话已含人格/记忆，不再前置。首轮：把人格+记忆前置到消息里（codex 无独立 system-prompt 入口）。
   const cmd = sessionId ? `codex exec resume ${sessionId} ${flags} -` : `codex exec ${flags}`;
-  const stdin = sessionId ? text : (persona ? `${persona}\n\n---\n${text}` : text);
+  const stdin = sessionId
+    ? (resumePrompt ? `${resumePrompt}\n\n---\n${text}` : text)
+    : (persona ? `${persona}\n\n---\n${text}` : text);
   // 流式：codex 本就吐 JSONL，逐行挑出命令/改文件这类节点播报（最终文本仍走收尾解析）
   const onLine = onProgress ? (line) => {
     const t = line.trim(); if (!t || t[0] !== '{') return;

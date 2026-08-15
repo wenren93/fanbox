@@ -3389,6 +3389,13 @@ async function cronAction(action, b = {}) {
   return { ok: false, error: 'unknown cron action' };
 }
 
+// ClawBot 与终端 Agent 共用定时任务实现，但不把 FANBOX_CTL token 注入 ClawBot。
+// bridge.js 只拿到这一组受控方法，避免把跨终端控制能力扩大给无头 Agent。
+global.__fanboxCron = {
+  list: cronList,
+  action: (action, body) => action === 'list' ? cronList() : cronAction(action, body),
+};
+
 // ---------- 版本历史：解析随包分发的 CHANGELOG.md（Keep a Changelog 格式），侧栏版本号入口用 ----------
 let clogCache = null; // { mtime, data }
 function changelogData() {
