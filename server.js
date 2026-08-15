@@ -3316,7 +3316,7 @@ async function cronFire(t, manual) {
   if (!A) { rec.ok = false; rec.error = '需要桌面版（浏览器版没有内嵌终端）'; }
   else {
     const autorun = await buildCronCommand(t);
-    const r = await A.create({ cwd: t.cwd || HOME, autorun }).catch((e) => ({ ok: false, error: String((e && e.message) || e) }));
+    const r = await A.create({ cwd: t.cwd || HOME, autorun, closeWhenDone: true }).catch((e) => ({ ok: false, error: String((e && e.message) || e) }));
     rec.ok = !!(r && r.ok); if (r && r.error) rec.error = r.error; if (r && r.id) rec.term = r.id;
   }
   t.lastFire = rec.t;

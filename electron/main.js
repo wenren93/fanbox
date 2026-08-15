@@ -789,7 +789,18 @@ function agentCreate(opts = {}) {
       }, 100);
     });
     const s = agentSend(r.id, String(opts.autorun));
-    return { ...r, autorun: s.ok };
+    if (opts.closeWhenDone) {
+      // 定时任务是一次性执行窗口：等命令回到裸 shell 或超时后自动收窗。
+      // 不阻塞 create 请求，避免调度器要等整个任务结束才记账。
+      if (s.ok) {
+        agentWait(r.id, { internal: true, waitForActivity: true, idleMs: 2000, timeoutMs: opts.closeTimeoutMs || 1800000 })
+          .then(() => { if (terminals.has(r.id)) agentKill(r.id); })
+          .catch(() => { if (terminals.has(r.id)) agentKill(r.id); });
+      } else if (terminals.has(r.id)) {
+        agentKill(r.id);
+      }
+    }
+    return { ...r, autorun: s.ok, autoClose: !!opts.closeWhenDone };
   });
 }
 ipcMain.on('agent:term-created', (e, { reqId, ok, id, error } = {}) => {
@@ -807,9 +818,12 @@ function agentWait(id, opts = {}) {
       catch { return resolve({ ok: false, error: 'bad regex' }); }
     }
     const idleMs = Math.max(500, Math.min(30000, Number(opts.idleMs) || 2000));
-    const timeoutMs = Math.max(1000, Math.min(240000, Number(opts.timeoutMs) || 60000)); // 240s < node requestTimeout(300s)
+    const maxTimeoutMs = opts.internal ? 1800000 : 240000; // 外部 HTTP 长轮询 < node requestTimeout；内部收窗允许长任务运行
+    const timeoutMs = Math.max(1000, Math.min(maxTimeoutMs, Number(opts.timeoutMs) || 60000));
     const quietMode = opts.idle === 'quiet'; // quiet：只看输出静默（TUI 回答完）；默认还要求前台回到裸 shell
     const started = Date.now();
+    const startLastOut = termLastOut.get(id) || 0;
+    let sawActivity = !opts.waitForActivity;
     let acc = ''; // 只累计 wait 开始后的新输出，正则也只匹配这段
     let set = termWaiters.get(id);
     if (!set) termWaiters.set(id, set = new Set());
@@ -817,12 +831,14 @@ function agentWait(id, opts = {}) {
       clearInterval(iv); set.delete(onData);
       resolve({ elapsed: Date.now() - started, output: acc.slice(-8000), ...extra });
     };
-    const onData = (s) => { acc = (acc + s).slice(-64000); if (re && re.test(acc)) finish({ ok: true, matched: true }); };
+    const onData = (s) => { sawActivity = true; acc = (acc + s).slice(-64000); if (re && re.test(acc)) finish({ ok: true, matched: true }); };
     set.add(onData);
     const iv = setInterval(() => {
       const p = terminals.get(id);
       if (!p) return finish({ ok: true, exited: true });
       if (Date.now() - started >= timeoutMs) return finish({ ok: false, timeout: true });
+      if (!sawActivity && (termLastOut.get(id) || 0) > startLastOut) sawActivity = true;
+      if (!sawActivity) return;
       if (re) return; // until 模式只认正则
       if (Date.now() - (termLastOut.get(id) || started) < idleMs) return;
       const proc = p.process || '';
