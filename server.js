@@ -1804,7 +1804,7 @@ function readBody(req) {
 // ---------- Agent 用量（Claude Code / Codex）----------
 // 不依赖两个 CLI 在跑：直接读它们落在本机的会话日志。
 // Claude Code：~/.claude/projects/**/*.jsonl 里每条 assistant 消息带 usage（token 明细）→ 增量解析聚合
-// Codex：~/.codex/sessions/**/rollout-*.jsonl 的 token_count 事件带 rate_limits（5h 窗口/周配额百分比，官方数）→ tail 取最新快照
+// Codex：~/.codex/sessions/**/rollout-*.jsonl 的 token_count 事件带 rate_limits（1week 窗口/周配额百分比，官方数）→ tail 取最新快照
 const CLAUDE_PROJ = path.join(HOME, '.claude', 'projects');
 const CODEX_SESS = path.join(HOME, '.codex', 'sessions');
 const claudeFileCache = new Map(); // file -> { offset, lastMsgId, events: [{t, in, out, cc, cr}] }
@@ -1907,8 +1907,8 @@ async function codexUsage() {
         const rl = pl && pl.rate_limits;
         if (!rl || (!rl.primary && !rl.secondary)) continue;
         const capturedAt = Date.parse(d.timestamp || '') || f.mtimeMs;
-        // 快照是「当时」的数：窗口在快照之后重置过的话，旧百分比就完全失真（比如 21 小时前
-        // 的 5h 窗口 57%），归零并标 stale——没有新会话日志就说明重置后根本没用过
+        // 快照是「当时」的数：窗口在快照之后重置过的话，旧百分比就完全失真（比如几天前
+        // 的 1week 窗口 57%），归零并标 stale——没有新会话日志就说明重置后根本没用过
         const win = (w) => {
           if (!w) return null;
           let resetsAt = w.resets_at || 0;

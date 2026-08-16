@@ -396,6 +396,7 @@ window.FANBOX_DICT = {
 
   // ---------- 用量面板 ----------
   '5h 窗口': '5h window',
+  '1week 窗口': '1week window',
   '周配额': 'Weekly quota',
   '窗口已重置，跑一次 Codex 才有新数': 'Window reset — run Codex once for fresh numbers',
   '近5h': 'last 5h',

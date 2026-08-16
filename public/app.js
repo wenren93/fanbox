@@ -4859,6 +4859,13 @@ const usagePanel = {
     const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
     return (sameDay ? '' : '周' + '日一二三四五六'[d.getDay()] + ' ') + hm + ' 重置';
   },
+  fmtWindow(minutes) {
+    if (!minutes) return '窗口';
+    if (minutes >= 10080) return '1week 窗口';
+    if (minutes >= 1440) return Math.round(minutes / 1440) + 'day 窗口';
+    if (minutes >= 60) return Math.round(minutes / 60) + 'h 窗口';
+    return minutes + 'min 窗口';
+  },
   ago(ms) {
     const m = Math.round((Date.now() - ms) / 60000);
     if (m < 2) return '刚刚';
@@ -4881,7 +4888,7 @@ const usagePanel = {
     if (d.codex) {
       const c = d.codex;
       h += `<div class="usage-agent">Codex${c.planType ? ` <i class="usage-plan">${escapeHtml(c.planType)}</i>` : ''}</div>`;
-      if (c.primary) h += this.bar('5h 窗口', c.primary.usedPercent, c.primary.stale ? '窗口已重置，跑一次 Codex 才有新数' : '');
+      if (c.primary) h += this.bar(this.fmtWindow(c.primary.windowMinutes), c.primary.usedPercent, c.primary.stale ? '窗口已重置，跑一次 Codex 才有新数' : this.fmtReset(c.primary.resetsAt));
       if (c.secondary) h += this.bar('周配额', c.secondary.usedPercent, c.secondary.stale ? '窗口已重置，跑一次 Codex 才有新数' : this.fmtReset(c.secondary.resetsAt));
       h += `<div class="usage-sub">快照：${this.ago(c.capturedAt)}的 Codex 会话</div>`;
     }
