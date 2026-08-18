@@ -17,6 +17,16 @@
 - **一键启动新增 Codex 桌面应用**：在 Codex CLI 之外增加独立的「Codex 桌面应用」可选入口，放在 agent 列表最后并复用官方图标；自动检测 Mac 是否已安装，点击通过 `open -a Codex` 拉起 App
 - **接入 Sandcastle 本机 Codex 交互 runner**：新增 `npm run sandcastle:codex [-- "任务"]`，通过 `interactive()` 与 `noSandbox()` 在当前终端启动 Codex TUI；每次会话默认进入独立分支和 worktree，并在 README 明示 Sandcastle 隔离与 Codex 自身审批边界
 
+## [2.13.0] - 2026-08-18
+
+### Added
+- **富文本/源码编辑器新增「插入图片」按钮**：桌面端走 Electron 原生选图对话框，默认目录开在 md 文件所在目录；已在同一目录树下的图片直接引用真实路径不复制，树外的图片复制进来，和粘贴/拖入落点保持一致。网页/开发环境兜底走普通 `<input type=file>`
+- **富文本编辑器新增图片上移/下移控件**：常驻嵌在图片框内，不用再赌 Crepe 那个够不着的悬浮拖拽 handle 重排图片顺序
+- 截图粘贴、Finder 拖文件、粘贴 HTML 里带 blob:/data: 的 `<img>`，统一落盘成 md 同目录下的真实文件
+
+### Changed
+- **排版从编辑器里常驻的第四个页签改成弹窗**：点「排版…」按钮才弹出查看/导出面板，关掉面板原地还在改，不再打断正在编辑的富文本/源码
+
 ## [2.12.1] - 2026-07-26
 
 ### Fixed
