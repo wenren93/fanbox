@@ -11,6 +11,7 @@
     "app": "electron .",
     "wechat:send": "node scripts/send-wechat-message.js",
     "test": "node --test test/*.test.js",
+    "typecheck": "tsc -p tsconfig.sandcastle.json",
     "rebuild": "electron-rebuild -f -w node-pty",
     "rebuild:pty": "cd node_modules/node-pty && node-gyp rebuild --target=$(node -p \"require('electron/package.json').version\") --dist-url=https://www.electronjs.org/headers --arch=$PTY_ARCH",
     "build:milkdown": "esbuild src-vendor/milkdown-entry.js --bundle --format=iife --minify --outfile=public/vendor/milkdown/milkdown.js --loader:.svg=dataurl --loader:.woff=file --loader:.woff2=file --loader:.ttf=file --loader:.eot=file --asset-names=[name]",
@@ -79,7 +80,9 @@
     "marked": "^12.0.2",
     "monaco-editor": "^0.52.2",
     "node-gyp": "^12.4.0",
-    "tsx": "4.21.0"
+    "tsx": "4.21.0",
+    "typescript": "^5.9.3",
+    "zod": "^4.4.3"
   },
   "license": "MIT"
 }

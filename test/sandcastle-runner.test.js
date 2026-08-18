@@ -9,7 +9,9 @@ test('Sandcastle runner uses parallel planner with podman sandbox and three phas
   const runner = fs.readFileSync('.sandcastle/main.mts', 'utf8');
 
   assert.equal(packageJson.scripts['sandcastle:codex'], 'tsx .sandcastle/main.mts');
+  assert.equal(packageJson.scripts.typecheck, 'tsc -p tsconfig.sandcastle.json');
   assert.equal(packageJson.devDependencies['@ai-hero/sandcastle'], '0.12.0');
+  assert.equal(packageJson.devDependencies.zod, '^4.4.3');
   // podman sandbox instead of noSandbox
   assert.match(runner, /sandbox:\s*podman\(\)/);
   // branch strategy for each issue
@@ -37,6 +39,9 @@ test('Sandcastle implement prompt focuses on a single task with RGR cycle', () =
 
   assert.match(implement, /ONLY WORK ON A SINGLE TASK/);
   assert.match(implement, /<promise>COMPLETE<\/promise>/);
+  assert.match(implement, /Fix issue \{\{TASK_ID\}\}: \{\{ISSUE_TITLE\}\}/);
+  assert.match(implement, /gh issue view \{\{TASK_ID\}\}/);
+  assert.doesNotMatch(implement, /TASK\\_ID/);
   assert.match(implement, /npm run test/);
   assert.match(implement, /RALPH:/);
   assert.doesNotMatch(implement, /pnpm run (?:test|typecheck)/);
