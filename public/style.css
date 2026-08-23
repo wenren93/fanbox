@@ -1660,6 +1660,22 @@ body { transition: background-color 0.28s ease, color 0.28s ease; }
 .sk-link-matrix dt .sk-ic { width: 20px; height: 20px; font-size: 9.5px; cursor: default; }
 .sk-link-matrix dd { margin: 0; min-width: 0; color: var(--text-dim); overflow-wrap: anywhere; }
 .fd-cut.bad { color: #b5483a; }
+/* 扫描异常处置卡（收编 / 查看入口，docs/14） */
+.sk-anoms { margin: 14px 0 4px; border: 1px solid color-mix(in srgb, var(--yellow) 38%, var(--rule)); border-radius: 9px; background: color-mix(in srgb, var(--yellow) 7%, transparent); padding: 4px 10px; }
+.sk-anoms-title { padding: 6px 2px 2px; font-size: 11px; font-weight: 600; color: var(--yellow); }
+.sk-anom { display: flex; gap: 10px; align-items: center; padding: 6px 2px; border-top: 1px dashed var(--rule); font-size: 11.5px; }
+.sk-anom:first-of-type { border-top: 0; }
+.sk-anom-kind { flex: none; min-width: 128px; color: var(--text-dim); }
+.sk-anom-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); font-size: 10.5px; }
+.sk-anom-act { flex: none; display: flex; gap: 6px; }
+.sk-anom-act button { border: 1px solid var(--border); border-radius: 5px; background: transparent; color: var(--text); font-size: 10.5px; padding: 2px 8px; cursor: pointer; }
+.sk-anom-act button:hover { border-color: var(--accent); color: var(--accent); }
+.sk-anom-act button:disabled { opacity: 0.5; cursor: default; }
+/* 收编确认页：脚本明示与增强确认 */
+.sk-annex-scripts { margin: 8px 0 0; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--yellow) 45%, var(--border)); border-radius: 7px; background: color-mix(in srgb, var(--yellow) 9%, transparent); color: var(--text); font-size: 11.5px; line-height: 1.55; overflow-wrap: anywhere; }
+.sk-annex-diff { margin: 8px 0 0; padding: 7px 10px; border: 1px dashed var(--rule); border-radius: 7px; color: var(--text-dim); font-size: 11px; overflow-wrap: anywhere; }
+.sk-annex-ack { display: flex; gap: 7px; align-items: center; margin: 10px 0 0; font-size: 11.5px; color: var(--text); cursor: pointer; }
+.sk-annex-ack input { accent-color: var(--accent); }
 /* 项目级与插件进底部折叠区：保持原列表形态、无图标列 */
 .sk-others { margin-top: 26px; }
 .sk-others summary { padding: 9px 4px; color: var(--text-faint); font-size: 12px; cursor: pointer; }

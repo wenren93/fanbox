@@ -306,7 +306,9 @@ test('Discovery settings expose missing installation prerequisites without disab
   const settings = await request('/api/skills/discovery/settings');
   assert.equal(settings.body.ok, true);
   assert.equal(settings.body.installationPrerequisite.ok, false);
-  assert.equal(settings.body.installationPrerequisite.status, 'missing_git');
+  // 预检按平台短路：非 macOS 先报不支持平台，缺 Git 只在 macOS 上才轮得到
+  assert.equal(settings.body.installationPrerequisite.status,
+    process.platform === 'darwin' ? 'missing_git' : 'unsupported_platform');
   const searched = await request('/api/skills/discovery/search', { query: 'fixture' });
   assert.equal(searched.body.ok, true);
   assert.equal(searched.body.results.length, 1);
