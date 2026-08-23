@@ -2,6 +2,8 @@
 
 **Type:** grilling · **Blocked by:** 01 · **Status:** open · **Claimed by:** —
 
+**GitHub issue:** [#13](https://github.com/wenren93/fanbox/issues/13)（母票 [#11](https://github.com/wenren93/fanbox/issues/11)）
+
 ## Question
 
 「正本 + 软链」模型的领域语言怎么定，CONTEXT.md 与 ADR 0001 怎么改写？与用户对谈收敛（grilling + domain-modeling），产出术语决策与 ADR 改写要点。

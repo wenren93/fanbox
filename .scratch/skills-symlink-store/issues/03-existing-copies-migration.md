@@ -2,6 +2,8 @@
 
 **Type:** grilling · **Blocked by:** 01 · **Status:** open · **Claimed by:** —
 
+**GitHub issue:** [#14](https://github.com/wenren93/fanbox/issues/14)（母票 [#11](https://github.com/wenren93/fanbox/issues/11)）
+
 ## Question
 
 怎么把这台机器的现状（见 map Notes 的勘察清单）迁到「正本 + 四 agent 软链」终态，且每一步可回滚？与用户对谈收敛迁移方案。

@@ -2,6 +2,8 @@
 
 **Type:** grilling · **Blocked by:** 02 · **Status:** open · **Claimed by:** —
 
+**GitHub issue:** [#16](https://github.com/wenren93/fanbox/issues/16)（母票 [#11](https://github.com/wenren93/fanbox/issues/11)）
+
 ## Question
 
 「导入」和「发现页安装（skills.sh）」在链模型下各自变成什么动作？与用户对谈收敛。

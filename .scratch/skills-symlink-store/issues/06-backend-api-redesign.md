@@ -2,6 +2,8 @@
 
 **Type:** grilling · **Blocked by:** 02 · **Status:** open · **Claimed by:** —
 
+**GitHub issue:** [#17](https://github.com/wenren93/fanbox/issues/17)（母票 [#11](https://github.com/wenren93/fanbox/issues/11)）
+
 ## Question
 
 `server.js` 的 Skills 透视后端（扫描、启停、批量、导入、预算统计）在链模型下怎么重构？与用户对谈收敛接口设计。

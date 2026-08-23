@@ -2,6 +2,8 @@
 
 **Type:** task · **Blocked by:** 03, 04, 05, 06 · **Status:** open · **Claimed by:** —
 
+**GitHub issue:** [#18](https://github.com/wenren93/fanbox/issues/18)（母票 [#11](https://github.com/wenren93/fanbox/issues/11)）
+
 ## Question
 
 前置决策（02–06 号票）全部收敛后，把结果落成实施可依的文档。这是地图的终点交付物，实施会话按它动手。

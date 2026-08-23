@@ -2,6 +2,8 @@
 
 **Type:** grilling（可产出 prototype）· **Blocked by:** 02 · **Status:** open · **Claimed by:** —
 
+**GitHub issue:** [#15](https://github.com/wenren93/fanbox/issues/15)（母票 [#11](https://github.com/wenren93/fanbox/issues/11)）
+
 ## Question
 
 Skills 透视「已安装」页从「安装项列表」改为「Skill 行 + agent 图标矩阵」后的界面长什么样、怎么交互？以低保真原型（design-demos 或 HTML 草稿）辅助与用户对谈收敛。
