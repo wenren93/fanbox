@@ -119,7 +119,7 @@
     <span class="atab"><span style="color:var(--c-wb)">⌂</span> WorkBuddy <span class="n">60</span></span>
     <span class="atab"><span style="color:var(--c-zcode)">▲</span> ZCode <span class="n">24</span></span>
     <span class="spacer"></span>
-    <span class="chip" title="四列全灰的正本，切换显示/隐藏">只看未接入 40</span>
+    <span class="chip" title="四列全灰的原件，切换显示/隐藏">只看未接入 40</span>
   </div>
 
   <div class="toolbar">
@@ -145,14 +145,14 @@
   <details class="others">
     <summary>其他来源：项目级（3）· 插件（2）— 不参与全局矩阵，保持原列表形态</summary>
     <div class="orow"><span class="src">项目·claude</span> fanbox/.claude/skills/xxx — <span class="num">随项目走，无图标列</span></div>
-    <div class="orow"><span class="src">项目·agents</span> fanbox/.agents/skills/*（即仓库正本，全局矩阵已覆盖，此处仅列余量）</div>
+    <div class="orow"><span class="src">项目·agents</span> fanbox/.agents/skills/*（即仓库原件，全局矩阵已覆盖，此处仅列余量）</div>
     <div class="orow"><span class="src">插件</span> browser-use / document-skills … — 插件体系自管</div>
   </details>
 
   <p class="hint">
-    <b>低保真原型要点</b>：一行 = 一个正本；四列图标 = 各 agent 接入状态（亮=接入）。机制差异只在 tooltip 与详情抽屉里呈现：
+    <b>低保真原型要点</b>：一行 = 一个原件；四列图标 = 各 agent 接入状态（亮=接入）。机制差异只在 tooltip 与详情抽屉里呈现：
     Claude=逐 skill 相对软链 · Codex=config.toml（改后需重启）· WorkBuddy=拷贝（取消接入移入 skills_disabled）· ZCode=config.json。
-    灰行=未接入的「库存」正本。外部正本（ego）带 <b>外部</b> 徽标，卸载只取消接入不碰外部内容。
+    灰行=未接入的「库存」原件。外部原件（ego）带 <b>外部</b> 徽标，卸载只取消接入不碰外部内容。
   </p>
 </div>
 <div id="toast"></div>
@@ -160,19 +160,19 @@
 <script>
 const ROWS = [
   { name:'wayfinder', desc:'Plan a huge chunk of work as a shared map of decision tickets…', badge:'repo', hits:128, health:['ok','—'], mtime:'08-23 13:04',
-    icons:{c:1,x:1,w:1,z:1}, note:'仓库正本 · 链 ../.agents/skills/wayfinder → fanbox/.agents/skills/wayfinder' },
+    icons:{c:1,x:1,w:1,z:1}, note:'仓库原件 · 链 ../.agents/skills/wayfinder → fanbox/.agents/skills/wayfinder' },
   { name:'eli5', desc:'Explain a topic like I\x27m a 5 year old…', badge:'', hits:96, health:['ok','—'], mtime:'07-23',
-    icons:{c:1,x:1,w:0,z:1}, note:'正本仓真实目录 ~/.agents/skills/eli5' },
+    icons:{c:1,x:1,w:0,z:1}, note:'原件仓真实目录 ~/.agents/skills/eli5' },
   { name:'ego-browser', desc:'ego-lite Chromium-based browser friendly to agents…', badge:'ext', hits:54, health:['ok','—'], mtime:'08-12',
-    icons:{c:1,x:1,w:1,z:1}, note:'外部正本 ~/.local/share/ego/ego-skills（ego 工具自管，只取消接入不删内容）' },
+    icons:{c:1,x:1,w:1,z:1}, note:'外部原件 ~/.local/share/ego/ego-skills（ego 工具自管，只取消接入不删内容）' },
   { name:'implement', desc:'Implement a piece of work based on a spec or set of tickets…', badge:'repo', hits:41, health:['warn','WB拷贝落后'], mtime:'08-23 13:04',
-    icons:{c:1,x:1,w:1,z:1}, note:'WorkBuddy 拷贝 08-12 落后于仓库正本 — 详情抽屉提供「刷新拷贝」' },
+    icons:{c:1,x:1,w:1,z:1}, note:'WorkBuddy 拷贝 08-12 落后于仓库原件 — 详情抽屉提供「刷新拷贝」' },
   { name:'a-stock-data', desc:'A股行情数据查询…（迁移收编件）', badge:'', hits:0, health:['ok','—'], mtime:'08-15',
-    icons:{c:0,x:1,w:0,z:0}, note:'新收编进正本仓；迁移保持 Codex 可见，其余列待你逐个点亮' },
+    icons:{c:0,x:1,w:0,z:0}, note:'新收编进原件仓；迁移保持 Codex 可见，其余列待你逐个点亮' },
   { name:'grill-me', desc:'Relentless interview to sharpen a plan…（死环恢复件）', badge:'repo', hits:0, health:['ok','—'], mtime:'08-23',
     icons:{c:0,x:1,w:0,z:0}, note:'恢复进仓库家族；Codex 原生默认见（config 缺省=启用），ZCode 首迁写 enable:false' },
   { name:'writing-beats', desc:'Writing beats…（WorkBuddy 独有件收编）', badge:'', hits:0, health:['ok','—'], mtime:'08-12',
-    icons:{c:0,x:1,w:1,z:0}, note:'收编进正本仓后 Codex 原生可见；WB 图标=其本地拷贝在' },
+    icons:{c:0,x:1,w:1,z:0}, note:'收编进原件仓后 Codex 原生可见；WB 图标=其本地拷贝在' },
   { name:'baoyu-translate', desc:'This skill should be used when the user asks to translate…', badge:'', hits:12, health:['ok','—'], mtime:'07-23',
     icons:{c:1,x:1,w:0,z:1}, note:'' },
   { name:'stock-watcher', desc:'股票盯盘提醒…（WB 独有件收编，未接入示例）', badge:'stock', hits:0, health:['ok','—'], mtime:'08-12',
@@ -203,7 +203,7 @@ $('#rows').innerHTML = ROWS.map((r,i)=>`
     <div style="color:var(--faint);cursor:pointer" onclick="this.closest('.sk-row').nextElementSibling.classList.toggle('open');this.textContent=this.textContent==='▸'?'▾':'▸'">▸</div>
   </div>
   <div class="drawer" style="display:none"></div>
-`).join('') + '<div style="text-align:center;color:var(--faint);font-size:12px;padding:14px">… 其余 67 行（共 77 个正本）</div>';
+`).join('') + '<div style="text-align:center;color:var(--faint);font-size:12px;padding:14px">… 其余 67 行（共 77 个原件）</div>';
 
 // 图标点选：busy → 切换 → toast（真实实现里：Claude 建/删链，Codex/ZCode 写 config，WB 拷贝/移出）
 document.querySelectorAll('.ic').forEach(ic=>ic.addEventListener('click',e=>{
@@ -224,13 +224,13 @@ document.querySelectorAll('.sk-row .name')[0].closest('.sk-row').addEventListene
   d.style.display = d.style.display==='none'?'block':'none';
   d.innerHTML = `<h4>${r.name} — 接入详情</h4>
     <div class="kv">
-      <span>正本</span><b>${r.note}</b>
+      <span>原件</span><b>${r.note}</b>
       <span>Claude</span><b>软链 ~/.claude/skills/${r.name} → ../.agents/skills/${r.name} ✓</b>
-      <span>Codex</span><b>config.toml 未条目 = 默认启用（原生读正本仓）✓</b>
+      <span>Codex</span><b>config.toml 未条目 = 默认启用（原生读原件仓）✓</b>
       <span>ZCode</span><b>config.json enable:true ✓</b>
-      <span>WorkBuddy</span><b>拷贝 ~/.workbuddy/skills/${r.name}（08-12，<span style="color:var(--warn)">落后于正本</span>）</b>
+      <span>WorkBuddy</span><b>拷贝 ~/.workbuddy/skills/${r.name}（08-12，<span style="color:var(--warn)">落后于原件</span>）</b>
     </div>
-    <div class="acts"><button class="btn primary">刷新 WB 拷贝</button><button class="btn">在 Finder 中显示</button><button class="btn">卸载正本（trash）</button></div>`;
+    <div class="acts"><button class="btn primary">刷新 WB 拷贝</button><button class="btn">在 Finder 中显示</button><button class="btn">卸载原件（trash）</button></div>`;
 });
 $('#batchBtn').addEventListener('click',()=>toast('批量模式：勾选行 → 按列执行接入/取消接入；表头图标 = 整列批量（有确认）'));
 </script>

@@ -1,8 +1,8 @@
 # 07 — 规格成文：docs 14/15 改写 + ADR 0001 改写 + CONTEXT.md 定稿
 
-**Type:** task · **Blocked by:** 03, 04, 05, 06, 08 · **Status:** open · **Claimed by:** —
+**Type:** task · **Blocked by:** 03, 04, 05, 06, 08 · **Status:** resolved（closed）· **Claimed by:** zcode-session（2026-08-23）
 
-**GitHub issue:** [#18](https://github.com/wenren93/fanbox/issues/18)（母票 [#11](https://github.com/wenren93/fanbox/issues/11)）
+**GitHub issue:** [#18](https://github.com/wenren93/fanbox/issues/18)（母票 [#11](https://github.com/wenren93/fanbox/issues/11)）· **Resolution:** [issuecomment-5384629515](https://github.com/wenren93/fanbox/issues/18#issuecomment-5384629515)
 
 ## Question
 
@@ -19,3 +19,17 @@
 7. **实施拆票**：用 to-tickets 技能把规格拆成带阻塞边的实施票，回到本 tracker。
 
 完成标准：实施会话不看地图、只看这套文档即可动工；旧文档无与新模型矛盾的残留表述。
+
+## Resolution（2026-08-23）
+
+七项清单全交付 + 一项会话内追加决策（术语「正本」→「原件」）。要点：
+
+1. ADR 0001 改写为「Skill 分发使用原件仓与 Agent 接入」，保留独立副本→转向的决策轨迹；文件名随决策更新。
+2. 新增 ADR 0005「各 Agent 接入与启停机制」（四列表 + 存量归一 + 「链在即启用」修正）。
+3. docs/14 原文件改为「Skill 收编为原件规格」，拷贝导入退役。
+4. docs/15 增补：安装=原件入仓+多选接入（默认全选、纯库存写 Codex/ZCode 禁用）、同源更新=原子换位+影响面提示+trash 回滚、接管路径。
+5. 新总纲 docs/16：模型/refresh v2/接口族/矩阵 UI/外来原件/现状→终态映射/迁移 Phase 0–5/验收八条。
+6. CONTEXT.md 定稿（增 仓库家族/健康检查/接管 词条）；CLAUDE.md、README、ADR 0003 同步清扫，旧模型表述归零。
+7. 实施拆票：#20–#29（ready-for-agent）挂地图 #11 下，阻塞边在票头。
+
+详见 GitHub 决议评论。地图已随本票关闭（wayfinder 终点）。

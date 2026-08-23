@@ -111,8 +111,8 @@ The UI was designed with [huashu-design](https://github.com/alchaincyf/huashu-de
   AI proposes a cleanup plan from metadata only (it never reads content or touches the filesystem); you approve each move; FanBox executes with a rollback log and one-click undo. Engine selectable (Claude Code / Codex), strategy prompt fully editable.
 - **发版向导 / Release wizard** — node 项目一键串起版本号、CHANGELOG、打包、推送、GitHub Release，整条命令序列在内嵌终端可见地跑。  
   For node projects: version bump, CHANGELOG promotion, build, push and GitHub Release composed into one command sequence that runs visibly in the embedded terminal.
-- **Skills 透视 / Skills X-ray** — “已安装”保留本机全部 agent skills 的触发统计、健康检查、context 预算和启停管理；“发现”在用户明确提交关键词后搜索 skills.sh，并可把公开 GitHub Skill 固定到具体 commit，经本机结构与风险检查后安装到 Claude、Codex、Agents 或 WorkBuddy。\
-  “Installed” keeps local trigger statistics, health checks, context budget, and enable/disable management. “Discover” searches skills.sh only after explicit submission and can pin a public GitHub Skill to a commit, inspect it locally, and install it to Claude, Codex, Agents, or WorkBuddy.
+- **Skills 透视 / Skills X-ray** — “已安装”以「原件 + 接入」模型管理本机 Skills：每个 Skill 一份原件（`~/.agents/skills`），行内 Claude / Codex / ZCode / WorkBuddy 图标点选即接入或取消接入，附触发统计、健康检查与批量管理；“发现”在用户明确提交关键词后搜索 skills.sh，并把公开 GitHub Skill 固定到具体 commit，经本机结构与风险检查后装入原件仓、按所选 Agent 接入。\
+  “Installed” manages every Skill as one original copy in `~/.agents/skills`: per-Agent icons (Claude / Codex / ZCode / WorkBuddy) connect or disconnect each Skill in place, alongside trigger statistics, health checks and batch management. “Discover” searches skills.sh only after explicit submission, pins a public GitHub Skill to a commit, inspects it locally, installs it into the originals store and connects the selected Agents.
 - **Agent 用量 / Agent usage** — Claude Code 官方 5h 窗口/周配额（和 `/usage` 同源）+ 本地 token 统计；Codex 限额快照 + 窗口重置识别。  
   Claude Code official 5h window / weekly quota (same source as `/usage`) plus local token statistics; Codex window snapshots with reset detection.
 - **磁盘占用透视 / Disk usage lens** — `du` 口径的真实占用条形榜，可下钻，专治「电脑空间又满了」。  
