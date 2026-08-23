@@ -5243,6 +5243,37 @@ const skillsView = {
       await this.reload();
     }
   },
+  async recheckSource(it) {
+    if (this.busy || this.refreshing) return;
+    const ok = await this.reload();
+    if (!ok) { toast('重新检查失败，请稍后重试', true); return; }
+    const row = this.rowByName(it.name);
+    const stillModified = row && (row.health || []).some((x) => x.code === 'externally-modified');
+    toast(stillModified ? `${it.name} 仍与来源记录不一致` : `${it.name} 已通过来源指纹检查`, stillModified);
+  },
+  async reinstallFromSource(it) {
+    const source = it.provenance;
+    if (!source || !source.updateable || !source.repository) {
+      toast('该原件没有 FanBox 来源身份，不能同源重装', true);
+      return;
+    }
+    const entry = {
+      id: source.discoveryEntryId || `${source.repository}/${source.skillPath || it.name}`,
+      name: it.skillName || it.name,
+      skillId: it.skillName || it.name,
+      repository: source.repository,
+      sourceUrl: source.sourceUrl,
+      installs: 0,
+      actionLabel: '重新安装 / 更新',
+    };
+    const d = this.discovery;
+    d.input = it.name; d.query = it.name; d.results = [entry]; d.status = 'success';
+    d.error = ''; d.cached = false; d.installable = true; d.selectedEntryId = null;
+    d.inspection = null; d.installError = ''; d.riskAcknowledged = false;
+    this.activeTab = 'discovery';
+    this.render();
+    await this.inspectDiscovery(entry);
+  },
   async unlinkAll(it) {
     if (this.busy || this.refreshing) return;
     const lit = SKILL_MATRIX_COLUMNS.filter((c) => ((it.agents || {})[c.id] || {}).on);
@@ -5556,7 +5587,9 @@ const skillsView = {
         d.inspection = r && r.inspection ? r.inspection : null;
       } else {
         d.inspection = r.inspection;
-        d.selectedTargetAgents = [...d.defaultTargetAgents];
+        d.selectedTargetAgents = r.inspection.sameSource && Array.isArray(r.inspection.connectedAgents)
+          ? [...r.inspection.connectedAgents]
+          : [...d.defaultTargetAgents];
         d.riskAcknowledged = false;
         d.installError = '';
       }
@@ -5619,6 +5652,7 @@ const skillsView = {
             title: r.status === 'unknown_conflict' ? '目标已有来源未知的安装项' : '检测到安装后发生的本地修改',
             message: r.error || r.message || '需要明确确认后才能替换；原内容会移入系统废纸篓。',
             dir: r.targetDir || (i.conflict && i.conflict.dir),
+            diff: r.diff,
           };
           i.expected = { ...(i.expected || {}), targetHash };
         }
@@ -5718,13 +5752,13 @@ const skillsView = {
         <div class="sk-disc-decision-title"><h2 id="sk-disc-confirm-title">${escapeHtml(i.name || 'Skill 安装确认')}</h2><span>${escapeHtml(repoLabel)}</span></div>
       </div>
       <p class="sk-disc-decision-desc">${escapeHtml(i.description || '（无 description）')}</p>
-      <div class="sk-disc-decision-summary"><span>${fileCount.toLocaleString()} 个文件</span><i></i><span>${escapeHtml(fmtSize(Number(i.totalSize || 0)) || '0 B')}</span><i></i><span>${declaredCount ? `${declaredCount} 项脚本、工具或依赖声明` : '无脚本与外部依赖'}</span>${riskCount ? `<i></i><b>${riskCount} 项风险</b>` : ''}${i.update ? `<i></i><b>影响 ${Number(i.affectedConnections || 0)} 个现有接入</b>` : ''}</div>
+      <div class="sk-disc-decision-summary"><span>${fileCount.toLocaleString()} 个文件</span><i></i><span>${escapeHtml(fmtSize(Number(i.totalSize || 0)) || '0 B')}</span><i></i><span>${declaredCount ? `${declaredCount} 项脚本、工具或依赖声明` : '无脚本与外部依赖'}</span>${riskCount ? `<i></i><b>${riskCount} 项风险</b>` : ''}${i.sameSource ? `<i></i><b>影响 ${Number(i.affectedConnections || 0)} 个现有接入</b>` : ''}</div>
       <div class="sk-disc-decision-risk ${riskCount || blocked ? 'warn' : 'safe'}">${ic(riskCount || blocked ? 'alert' : 'eye', 'currentColor', 16)}<span>${riskCount || blocked ? `需要留意：<b>${escapeHtml(riskText)}</b>` : '<b>本机检查未发现额外风险</b>'}</span></div>
       ${this.discovery.installError ? `<div class="sk-disc-install-error" role="alert"><b>安装失败，确认内容已保留</b><span>${escapeHtml(this.discovery.installError)}</span></div>` : ''}
-      ${conflict ? `<div class="sk-disc-conflict"><b>${escapeHtml(conflict.title || (blocked ? '同名异源冲突' : '目标安装项需要明确处置'))}</b><span>${escapeHtml(conflict.message || conflict.reason || '现有安装项不会被静默覆盖。')}</span>${conflict.dir ? `<code>${escapeHtml(tilde(conflict.dir))}</code>` : ''}</div>` : ''}
+      ${conflict ? `<div class="sk-disc-conflict"><b>${escapeHtml(conflict.title || (blocked ? '同名异源冲突' : '目标安装项需要明确处置'))}</b><span>${escapeHtml(conflict.message || conflict.reason || '现有安装项不会被静默覆盖。')}</span>${conflict.diff ? `<span>差异概要：新增 ${Number((conflict.diff.added || []).length)} · 删除 ${Number((conflict.diff.removed || []).length)} · 修改 ${Number((conflict.diff.changed || []).length)}</span>` : ''}${conflict.dir ? `<code>${escapeHtml(tilde(conflict.dir))}</code>` : ''}</div>` : ''}
       ${overwrite ? `<label class="sk-disc-confirm-check danger"><input type="checkbox" id="sk-disc-overwrite"><span>我确认替换现有安装项；旧内容将移入系统废纸篓，可恢复。</span></label>` : ''}
       <div class="sk-disc-decision-bar">
-        <fieldset class="sk-disc-targets sk-disc-segments"><legend>接入到 · 不选则仅存入原件仓</legend><div>${DISCOVERY_TARGETS.map(({ id, label }) => `<label><input type="checkbox" name="discovery-target" value="${id}" ${selectedTargets.includes(id) ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div></fieldset>
+        <fieldset class="sk-disc-targets sk-disc-segments" ${i.sameSource ? 'disabled' : ''}><legend>${i.sameSource ? '现有接入 · 更新期间保持不动' : '接入到 · 不选则仅存入原件仓'}</legend><div>${DISCOVERY_TARGETS.map(({ id, label }) => `<label><input type="checkbox" name="discovery-target" value="${id}" ${selectedTargets.includes(id) ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div></fieldset>
         <div class="sk-disc-confirm-actions"><button class="ghost-btn sk-disc-tech-btn" data-disc-act="open-details" aria-expanded="${enhanced ? 'true' : 'false'}">技术详情</button><button class="ghost-btn sk-disc-icon-btn" data-disc-act="source-inspection" data-source="${escapeHtml(source || '')}" aria-label="打开来源" title="打开来源">${ic('link', 'currentColor', 16)}</button><button class="primary sk-disc-icon-btn" data-disc-act="install" aria-label="${escapeHtml(installLabel)}" title="${escapeHtml(installLabel)}" ${blocked || this.discovery.inspecting || (enhanced && !this.discovery.riskAcknowledged) ? 'disabled' : ''}>${this.discovery.inspecting ? `<span class="sk-disc-spinner">${ic('clock', 'currentColor', 16)}</span>` : ic('box', 'currentColor', 16)}</button></div>
       </div>
       <aside class="sk-disc-tech-drawer ${enhanced ? 'open' : ''}" aria-hidden="${String(!enhanced)}" aria-labelledby="sk-disc-tech-title">
@@ -5900,6 +5934,17 @@ const skillsView = {
     const b = SKILL_ORIGIN_BADGES[it.origin];
     return b ? ` <i class="sk-origin ${it.origin}" title="${escapeHtml(b.title)}">${b.text}</i>` : '';
   },
+  sourceBadge(it) {
+    if (it.provenance && it.provenance.label) {
+      const title = it.provenance.updateable
+        ? `${it.provenance.repository || 'FanBox 固定来源'} · 可重新检查和同源更新`
+        : it.provenance.kind === 'foreign'
+          ? '原件仓中没有 FanBox 来源身份记录，不提供同源更新'
+          : it.provenance.label;
+      return ` <i class="sk-origin ${escapeHtml(it.provenance.kind || '')}" title="${escapeHtml(title)}">${escapeHtml(it.provenance.label)}</i>`;
+    }
+    return this.originBadge(it);
+  },
   linkIconHtml(it, c) {
     const st = ((it.agents || {})[c.id]) || {};
     const on = Boolean(st.on);
@@ -5923,7 +5968,7 @@ const skillsView = {
         ? `<label class="sk-cb"><input type="checkbox" ${sel ? 'checked' : ''} aria-label="选择 ${escapeHtml(it.name)}"></label>`
         : `<span class="sk-dot ${bad ? 'bad' : health.length ? 'warn' : 'ok'}"></span>`}
       <div class="sk-name">
-        <div class="nm">${escapeHtml(it.name)}${this.originBadge(it)}${stock ? ' <i class="sk-offtag">未接入</i>' : ''}${dup ? ' <i class="sk-dup" title="多个原件声明同名 Skill，触发统计混在一起">重名</i>' : ''}</div>
+        <div class="nm">${escapeHtml(it.name)}${this.sourceBadge(it)}${stock ? ' <i class="sk-offtag">未接入</i>' : ''}${dup ? ' <i class="sk-dup" title="多个原件声明同名 Skill，触发统计混在一起">重名</i>' : ''}</div>
         <div class="ds">${escapeHtml((shown && shown.msg) || it.desc || '')}</div>
         ${bad ? `<div class="sk-row-alert">⚠ ${escapeHtml(bad.msg)}${anomaly ? `<button data-act="reveal-anomaly" data-path="${escapeHtml(anomaly.path)}">查看</button>` : ''}</div>` : ''}
       </div>
@@ -5953,6 +5998,7 @@ const skillsView = {
       return `<dt><span class="sk-ic ${c.id} ${st.on ? 'lit' : ''}">${c.sym}</span>${c.label}</dt><dd>${escapeHtml(detail)}</dd>`;
     }).join('');
     const wbOn = ((it.agents || {}).workbuddy || {}).on;
+    const externallyModified = health.some((x) => x.code === 'externally-modified');
     return `<div class="sk-detail">
       <div>
         <div class="fd">${escapeHtml(it.desc || '（无 description）')}</div>
@@ -5963,6 +6009,8 @@ const skillsView = {
           <button data-act="invoke" class="primary" ${this.busy ? 'disabled' : ''}>▶ 终端调用</button>
           <button data-act="edit" ${this.busy ? 'disabled' : ''}>编辑 SKILL.md</button>
           ${wbOn ? `<button data-act="refresh-wb" ${this.busy || this.linkBusy.has(`${it.dir}:workbuddy`) ? 'disabled' : ''} title="取消接入（旧拷贝进 skills_disabled 可恢复）后从原件重新拷入">刷新 WB 拷贝</button>` : ''}
+          ${externallyModified ? `<button data-act="recheck-source" ${this.busy ? 'disabled' : ''}>重新检查</button>` : ''}
+          ${externallyModified && it.provenance && it.provenance.updateable ? `<button data-act="reinstall-source" ${this.busy ? 'disabled' : ''}>重装接管</button>` : ''}
           <button data-act="reveal" ${this.busy ? 'disabled' : ''}>在文件区显示</button>
           ${it.origin === 'store'
             ? `<button data-act="uninstall" class="danger" ${this.busy ? 'disabled' : ''}>卸载原件（trash）</button>`
@@ -5971,7 +6019,7 @@ const skillsView = {
       </div>
       <dl class="fd-meta">
         <dt>原件路径</dt><dd class="mono">${escapeHtml(tilde(it.dir))}</dd>
-        <dt>来源</dt><dd>${escapeHtml(originText)}</dd>
+        <dt>来源</dt><dd>${escapeHtml((it.provenance && it.provenance.label) || originText)}</dd>
         <dt>触发</dt><dd>45 天 ${it.hits || 0} 次 · 最后 ${this.ago(it.last)}</dd>
         <dt>内容更新</dt><dd>${this.ago(it.mtime)}</dd>
       </dl>
@@ -6096,6 +6144,8 @@ const skillsView = {
         const a = act.dataset.act;
         if (a === 'invoke') invokeSkillInTerm(it.skillName || it.name);
         else if (a === 'refresh-wb') await this.refreshWorkBuddyCopy(it);
+        else if (a === 'recheck-source') await this.recheckSource(it);
+        else if (a === 'reinstall-source') await this.reinstallFromSource(it);
         else if (a === 'reveal') navigate(dirOf(it.dir));
         else if (a === 'uninstall') await this.uninstallRow(it);
         else if (a === 'unlink-all') await this.unlinkAll(it);

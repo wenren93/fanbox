@@ -1650,6 +1650,8 @@ body { transition: background-color 0.28s ease, color 0.28s ease; }
 .sk-origin { font-style: normal; font-size: 9.5px; border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; color: var(--text-dim); white-space: nowrap; }
 .sk-origin.repo { color: #9d7bea; border-color: color-mix(in srgb, #9d7bea 45%, transparent); }
 .sk-origin.external { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 45%, transparent); }
+.sk-origin.fanbox-install { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.sk-origin.foreign,.sk-origin.external-link { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 45%, transparent); }
 .sk-health { font-size: 10.5px; color: var(--text-faint); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sk-health.warn { color: var(--yellow); }
 .sk-health.error { color: #b5483a; }
