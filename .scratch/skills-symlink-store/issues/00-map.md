@@ -24,7 +24,7 @@ Skills 透视改造为「正本 + 软链」模型：`~/.agents/skills` 为唯一
 
 ## Decisions so far
 
-（尚无已关票）
+- [01 — 四个 agent 对 skills 目录的真实发现行为](https://github.com/wenren93/fanbox/issues/12)（本地: issues/01-agent-discovery-behavior.md）: Claude/Codex/ZCode 官方支持逐 skill 目录软链（Codex、ZCode 原生读 `~/.agents/skills`，ZCode 不按 realpath 去重致双列）；WorkBuddy 软链未证实且 `skills_disabled` 系 FanBox 自创；skills.sh 约定 = `.agents` 真实正本 + 逐 skill 相对链，FanBox 应取同构风格。
 
 ## Not yet specified
 
