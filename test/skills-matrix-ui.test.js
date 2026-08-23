@@ -65,13 +65,17 @@ test('Icon clicks call the single link endpoint with busy state and cost toasts'
 });
 
 test('Occupied conflicts guide to the annex and overwrite entries without touching content', () => {
+  // issue 24 起收编入口接通：占用者是可收编残留时给「收编并接入」活入口（canAnnex），
+  // 覆盖接管仍随后续票；对话框返回三态 cancel/reveal/annex。
   const { js, view } = skillsViewSource();
-  assert.match(js, /\/\/ 接入目标位被同名实体占用（POST \/api\/skills\/link 的结构化冲突）：FanBox 不静默覆盖，/);
-  assert.match(js, /function skillOccupiedDialog\(item, agent, conflictPath\) \{/);
+  assert.match(js, /\/\/ 接入目标位被同名实体占用（POST \/api\/skills\/link 的结构化冲突）：FanBox 不静默覆盖。/);
+  assert.match(js, /function skillOccupiedDialog\(item, agent, conflictPath, canAnnex\) \{/);
   assert.match(view, /r\.conflict && r\.conflict\.kind === 'occupied'/);
+  assert.match(view, /const canAnnex = \(this\.data\.anomalies \|\| \[\]\)\.some\(\(a\) => a\.kind === 'real-dir' && a\.path === r\.conflict\.path\);/);
   assert.match(js, /目标位已被同名实体占用/);
   assert.match(js, /<b>收编<\/b>——把现有内容提升为原件后再接入/);
   assert.match(js, /<b>覆盖接管<\/b>——确认后完整替换，旧内容移入系统废纸篓可恢复/);
+  assert.match(js, /data-act="annex">收编并接入<\/button>/);
   assert.match(js, /data-act="reveal">在文件区显示<\/button>/);
   assert.match(js, /ov\.querySelector\('\[data-act=cancel\]'\)\.focus\(\)/);
 });
@@ -105,8 +109,9 @@ test('Project and plugin skills live in a bottom collapse keeping their legacy f
   assert.match(view, /\$\{this\.srcTag\(it\)\}/);
   assert.match(view, /data-act="toggle" title="/);
   assert.match(view, /apiPost\('\/api\/skills\/toggle',\s*\{\s*dir: it\.dir, enable: it\.disabled, cwd: state\.cwd \}\)/);
-  assert.match(view, /data-act="annex" \$\{this\.busy \? 'disabled' : ''\} title="把这份内容提升为原件仓中的原件（收编）">收编为原件<\/button>/);
-  assert.match(view, /apiPost\('\/api\/skills\/annex',\s*\{\s*dir: it\.dir, cwd: state\.cwd \}\)/);
+  // issue 24：项目级行详情的收编走新契约（project + name 两阶段预检流），插件不给按钮
+  assert.match(view, /\$\{it\.origin !== 'plugin' && !it\.residue \? `<button data-act="annex"/);
+  assert.match(view, /await this\.runAnnex\(\{ project: it\.projectRoot \|\| state\.cwd, name: it\.name \}\);/);
 });
 
 test('Row drawer exposes origin, per-column mechanism details, WB refresh, reveal and uninstall', () => {

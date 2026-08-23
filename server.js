@@ -15,7 +15,7 @@ const os = require('os');
 const crypto = require('crypto');
 const { exec, spawn, execFile } = require('child_process');
 const { URL } = require('url');
-const { createSkillDiscovery } = require('./lib/skill-discovery');
+const { createSkillDiscovery, auditLocalSkillDir, normalizeTree } = require('./lib/skill-discovery');
 const { buildCronCommand } = require('./lib/cron-command');
 
 const HOME = os.homedir();
@@ -2481,7 +2481,8 @@ async function scanProjectSkillItems(items, { force = false, extraCwds = [] } = 
     ];
     for (const [hiddenDir, agentLabel, projectAgent] of roots) {
       const root = path.join(cwd, hiddenDir, 'skills');
-      const meta = { projectAgent, projectName };
+      // projectRoot 供收编端点校验「项目级来源必须在扫描清单内」（docs/14）
+      const meta = { projectAgent, projectName, projectRoot: cwd };
       if (projectAgent === 'workbuddy') await scanWorkBuddySkills(root, 'project', `${agentLabel} · ${projectName}`, items, meta);
       else await scanSkillRoot(root, 'project', `${agentLabel} · ${projectName}`, items, false, meta);
     }
@@ -3611,6 +3612,404 @@ async function skillImport(parsed) {
   }
 }
 
+// ---------- 收编：POST /api/skills/annex（issue 24 · 规格 docs/14 全量）----------
+// 四 Agent 目录真实目录残留与项目级有效 Skill 收编为原件。与安装共用同一套风险检查
+// （lib/skill-discovery 的结构 + 内容检查）→ 原件仓同级临时副本 → 校验 → 原子换位
+// （覆盖时旧原件先进废纸篓）→ 来源实体按列改为正规接入。任一步失败按日志逆序回滚，
+// 不留半成品；并发经写队列串行（路由层 queueSkillsWrite）。
+
+function parseSkillAnnexRequest(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: '请求体格式错误' };
+  const hasAgent = body.agent !== undefined;
+  const hasProject = body.project !== undefined;
+  if (hasAgent === hasProject) return { ok: false, error: '必须且只能提供 agent（四列残留）或 project（项目级）之一' };
+  if (typeof body.name !== 'string' || !body.name || body.name.includes('\0')
+    || /[/\\]/.test(body.name) || body.name.startsWith('.') || body.name.length > 128) {
+    return { ok: false, error: 'name 必须是不含路径分隔符的 Skill 名称' };
+  }
+  let agent = null;
+  if (hasAgent) {
+    if (!SKILL_LINK_AGENTS.includes(body.agent)) return { ok: false, error: 'agent 必须是 claude/codex/zcode/workbuddy 之一' };
+    agent = body.agent;
+  }
+  let project = null;
+  if (hasProject) {
+    if (typeof body.project !== 'string' || !body.project.trim() || body.project.includes('\0')) {
+      return { ok: false, error: 'project 必须是非空路径字符串' };
+    }
+    project = path.resolve(body.project);
+  }
+  if (body.preview !== undefined && typeof body.preview !== 'boolean') return { ok: false, error: 'preview 必须是布尔值' };
+  if (body.overwrite !== undefined && typeof body.overwrite !== 'boolean') return { ok: false, error: 'overwrite 必须是布尔值' };
+  if (body.conflictFingerprint !== undefined && (typeof body.conflictFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(body.conflictFingerprint))) {
+    return { ok: false, error: 'conflictFingerprint 格式错误' };
+  }
+  if (body.sourceFingerprint !== undefined && (typeof body.sourceFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(body.sourceFingerprint))) {
+    return { ok: false, error: 'sourceFingerprint 格式错误' };
+  }
+  if (body.overwrite && (!body.conflictFingerprint || !body.sourceFingerprint)) return { ok: false, error: '覆盖必须提供来源与冲突指纹' };
+  return {
+    ok: true,
+    agent,
+    project,
+    name: body.name,
+    preview: body.preview === true,
+    overwrite: body.overwrite === true,
+    conflictFingerprint: body.conflictFingerprint || null,
+    sourceFingerprint: body.sourceFingerprint || null,
+  };
+}
+
+// 来源解析：只收编「最新一次扫描清单」内的实体（docs/14）。四列残留取 kind=real-dir 且
+// action=annex 的异常；项目级取带 projectRoot 的 extra 行——插件来源没有 projectRoot，
+// 天然被拒之门外（收编插件属规格范围外）。
+async function resolveAnnexSource(parsed) {
+  // 项目级来源把 project 根并进本次扫描（与 toggle/trash 的 cwd 语义一致），
+  // 保证「只动扫描清单内的实体」的同时，当前浏览的项目也能被收编。
+  const scan = await skillsDataV2({ force: true, extraCwds: parsed.project ? [parsed.project] : [] });
+  const notInList = () => ({ ok: false, status: 'invalid_source', error: '不在最新扫描的收编来源清单里（可能已被处理或不存在）' });
+  if (parsed.agent) {
+    const anomaly = (scan.anomalies || []).find((a) => a.agent === parsed.agent && a.name === parsed.name && a.kind === 'real-dir');
+    if (!anomaly) return notInList();
+    if (anomaly.action !== 'annex') return { ok: false, status: 'invalid_source', error: '该残留不是可收编的真实目录' };
+    let lst;
+    try { lst = await fsp.lstat(anomaly.path); } catch (e) {
+      return { ok: false, status: 'invalid_source', error: `来源已不存在：${anomaly.path}` };
+    }
+    if (!lst.isDirectory()) return { ok: false, status: 'invalid_source', error: '来源不是真实目录' };
+    if (!(await fsp.stat(path.join(anomaly.path, 'SKILL.md')).then(() => true).catch(() => false))) {
+      return { ok: false, status: 'not_a_skill', error: '残留目录缺少可读的 SKILL.md——无有效内容的残留不可收编，只能清理' };
+    }
+    return { ok: true, sourceDir: anomaly.path, agent: parsed.agent };
+  }
+  const item = (scan.items || []).find((it) => it.origin === 'project' && it.name === parsed.name
+    && it.projectRoot && path.resolve(it.projectRoot) === parsed.project);
+  if (!item) return notInList();
+  if (item.residue) return { ok: false, status: 'not_a_skill', error: '项目级目录缺少可读的 SKILL.md——残留项不可收编' };
+  let lst;
+  try { lst = await fsp.lstat(item.dir); } catch (e) {
+    return { ok: false, status: 'invalid_source', error: `来源已不存在：${item.dir}` };
+  }
+  if (!lst.isDirectory()) return { ok: false, status: 'invalid_source', error: '来源不是目录' };
+  return { ok: true, sourceDir: item.dir, project: parsed.project };
+}
+
+// 风险检查抛出的普通 Error 带「……：<相对路径>」尾巴（与安装共用实现的消息）；
+// UnsafeSkillContentError 自带 problemPath。这里统一取出给前端定位。
+function annexProblemPath(e) {
+  if (e instanceof UnsafeSkillContentError) return e.problemPath;
+  const m = String(e.message || '').match(/：([^：]+)$/);
+  return m ? m[1].trim() : '.';
+}
+
+// 差异概要：收编内容 vs 在位原件（两棵树都已过安全检查，直接走普通递归即可）
+async function skillDiffSummary(sourceRoot, targetRoot) {
+  const hashFile = (file) => new Promise((resolve) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(file);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.once('end', () => resolve(hash.digest('hex')));
+    stream.once('error', () => resolve(null));
+  });
+  const walk = async (root, base = '', acc = new Map()) => {
+    for (const ent of await fsp.readdir(root, { withFileTypes: true }).catch(() => [])) {
+      const rel = base ? `${base}/${ent.name}` : ent.name;
+      const fp = path.join(root, ent.name);
+      if (ent.isDirectory()) await walk(fp, rel, acc);
+      else if (ent.isFile()) acc.set(rel, await hashFile(fp));
+    }
+    return acc;
+  };
+  const [sourceFiles, targetFiles] = await Promise.all([walk(sourceRoot), walk(targetRoot)]);
+  const added = [];
+  const removed = [];
+  const changed = [];
+  for (const [rel, hash] of sourceFiles) {
+    if (!targetFiles.has(rel)) added.push(rel);
+    else if (targetFiles.get(rel) !== hash) changed.push(rel);
+  }
+  for (const rel of targetFiles.keys()) if (!sourceFiles.has(rel)) removed.push(rel);
+  const bySlash = (a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b);
+  return { added: added.sort(bySlash), removed: removed.sort(bySlash), changed: changed.sort(bySlash) };
+}
+
+// 来源实体按列改为正规接入（可见性不变、不留双份）。返回 undo 日志（逆序执行即回滚）
+// 与 trash 队列（成功后统一进废纸篓——放在最后，之前任何失败都仍可逆）。
+async function annexConvertSource(resolved, storeEntry) {
+  const undo = [];
+  const trash = [];
+  // 转换中途任何一步失败（含测试注入）：自己按日志逆序还原，再向上抛——
+  // 调用方拿到返回值时日志必然已清空，不能依赖外层回滚未返回的日志。
+  const unwind = async () => {
+    for (const t of undo.reverse()) { try { await t(); } catch { /* 尽力还原 */ } }
+  };
+  try {
+    // 项目级：收编不动项目目录（纯库存合法）；WorkBuddy：拷贝保留即是接入形态
+    if (resolved.project || resolved.agent === 'workbuddy') return { undo, trash };
+
+    const srcDir = resolved.sourceDir;
+    const parent = path.dirname(srcDir);
+    const makeHold = async () => {
+      const hold = await fsp.mkdtemp(path.join(parent, '.fanbox-annex-src-'));
+      await fsp.rmdir(hold);
+      return hold;
+    };
+
+    if (resolved.agent === 'claude') {
+      // 真实目录 → 相对软链（与 skills.sh / link 端点同构）；_disabled 下的残留在原地换链，
+      // 保持「该列可见性不变」（原本就隐藏）。
+      const hold = await makeHold();
+      await fsp.rename(srcDir, hold);
+      undo.push(async () => {
+        await fsp.lstat(srcDir).then((st) => { if (st.isSymbolicLink()) return fsp.unlink(srcDir); }).catch(() => {});
+        await fsp.rename(hold, srcDir);
+      });
+      const target = path.relative(parent, storeEntry);
+      await fsp.symlink(target, srcDir);
+      skillAnnexTestFailure('convert'); // 注入点：链已建、hold 未清——回滚必须还原真实目录
+      trash.push(hold);
+      return { undo, trash };
+    }
+
+    // Codex / ZCode：删实体让原生扫描只看见原件仓条目；来源原先是禁用态的，
+    // 把同样的禁用记录写到原件仓条目上，可见性保持不变。
+    const hold = await makeHold();
+    await fsp.rename(srcDir, hold);
+    undo.push(async () => { await fsp.rename(hold, srcDir).catch(() => {}); });
+    if (resolved.agent === 'codex') {
+      const disabledSet = await codexDisabledSkillFiles();
+      if (disabledSet.has(path.resolve(srcDir, 'SKILL.md'))) {
+        const configFile = CODEX_CONFIG;
+        const configBefore = await fsp.readFile(configFile, 'utf8').catch(() => null);
+        await setCodexSkillEnabled(path.join(storeEntry, 'SKILL.md'), false);
+        undo.push(async () => {
+          if (configBefore === null) await fsp.rm(configFile, { force: true }).catch(() => {});
+          else await atomicWriteText(configFile, configBefore).catch(() => {});
+        });
+      }
+    } else {
+      const disabledSet = await zcodeDisabledSkillDirs();
+      if (disabledSet.has(path.resolve(srcDir))) {
+        const configFile = ZCODE_CLI_CONFIG;
+        const configBefore = await fsp.readFile(configFile, 'utf8').catch(() => null);
+        await setZcodeSkillEnabled(storeEntry, false);
+        undo.push(async () => {
+          if (configBefore === null) await fsp.rm(configFile, { force: true }).catch(() => {});
+          else await atomicWriteText(configFile, configBefore).catch(() => {});
+        });
+      }
+    }
+    skillAnnexTestFailure('convert'); // 注入点：实体已删/配置已写——回滚必须全部还原
+    trash.push(hold);
+    return { undo, trash };
+  } catch (e) {
+    await unwind();
+    throw e;
+  }
+}
+
+function skillAnnexTestFailure(stage) {
+  if (process.env.NODE_ENV === 'test' && process.env.FANBOX_TEST_SKILL_ANNEX_FAIL === stage) {
+    throw new Error(`测试注入：${stage}`);
+  }
+}
+
+async function skillAnnex(parsed) {
+  const storeEntry = path.join(AGENTS_SKILLS, parsed.name);
+  let tempDir = null;
+  let rollbackDir = null;       // 被替换旧原件的暂存位（成功后进废纸篓）
+  let swappedNew = false;       // 新原件是否已在原件仓位置
+  let recordRemoved = false;
+  let priorRecord = null;
+  let conversion = null;
+  try {
+    const resolved = await resolveAnnexSource(parsed);
+    if (!resolved.ok) return resolved;
+
+    // 1) 风险检查——与安装共用同一实现（链接 / 特殊文件 / 特殊权限位 /
+    //    未知可执行二进制拒绝；脚本清单 + 增强确认标记）
+    let audit;
+    try { audit = await auditLocalSkillDir(resolved.sourceDir); } catch (e) {
+      return { ok: false, status: 'unsafe_content', problemPath: annexProblemPath(e), error: e.message };
+    }
+
+    const skillName = await skillNameFromDir(resolved.sourceDir) || parsed.name;
+    const [srcStat, skillStat] = await Promise.all([
+      fsp.stat(resolved.sourceDir),
+      fsp.stat(path.join(resolved.sourceDir, 'SKILL.md')).catch(() => null),
+    ]);
+    const sourceMeta = {
+      path: resolved.sourceDir,
+      agent: resolved.agent || undefined,
+      project: resolved.project || undefined,
+      skillName,
+      desc: (await fsp.readFile(path.join(resolved.sourceDir, 'SKILL.md'), 'utf8').catch(() => '')),
+      mtime: skillStat ? skillStat.mtimeMs : (srcStat ? srcStat.mtimeMs : 0),
+      fileCount: audit.fileCount,
+      totalSize: audit.totalSize,
+    };
+    // desc 取 frontmatter 的 description，而不是整份文件
+    const fm = skillFrontmatter(sourceMeta.desc);
+    sourceMeta.desc = (fm && fm.desc) || '';
+
+    // 2) 原件仓同级临时副本（同盘保证后面能原子换位），规范化权限后再校验一次内容
+    await fsp.mkdir(AGENTS_SKILLS, { recursive: true });
+    tempDir = await fsp.mkdtemp(path.join(AGENTS_SKILLS, '.fanbox-annex-'));
+    await copySkillTree(resolved.sourceDir, tempDir);
+    await normalizeTree(tempDir);
+    // 注入点：临时副本阶段失败 → 无任何写入（preview 只读，不注入）
+    if (!parsed.preview) skillAnnexTestFailure('stage');
+    const sourceFingerprint = await skillTreeFingerprint(tempDir);
+
+    // 复制期间来源变化检测（镜像 import）：再复制一份比对，不一致就用最新内容重来
+    const verifyDir = await fsp.mkdtemp(path.join(AGENTS_SKILLS, '.fanbox-annex-'));
+    try {
+      await copySkillTree(resolved.sourceDir, verifyDir);
+      if (await skillTreeFingerprint(verifyDir) !== sourceFingerprint) {
+        await removeImportScratch(tempDir);
+        tempDir = verifyDir;
+      } else {
+        await removeImportScratch(verifyDir);
+      }
+    } catch (e) {
+      await removeImportScratch(verifyDir);
+      throw e;
+    }
+
+    // 3) 与在位原件比对 → identical / 两阶段覆盖协议
+    let targetFingerprint = null;
+    let targetStat = null;
+    try {
+      targetStat = await fsp.lstat(storeEntry);
+      targetFingerprint = await skillTreeFingerprint(storeEntry);
+    } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    const targetExists = targetFingerprint !== null;
+
+    const confirmInfo = {
+      name: parsed.name,
+      source: sourceMeta,
+      scripts: audit.scripts,
+      enhancedConfirmation: audit.enhancedConfirmation,
+      sourceFingerprint,
+      targetExists,
+    };
+    if (targetExists) {
+      confirmInfo.conflictFingerprint = targetFingerprint;
+      confirmInfo.diff = await skillDiffSummary(tempDir, storeEntry);
+      confirmInfo.target = { path: storeEntry, mtime: targetStat.mtimeMs };
+    }
+    if (parsed.preview) return { ok: true, status: 'ready', ...confirmInfo };
+
+    if (!targetExists) {
+      if (parsed.overwrite) return { ok: false, status: 'concurrent_changed', ...confirmInfo, targetExists: false };
+    } else if (targetFingerprint === sourceFingerprint) {
+      // 内容一致：不换位、不产生新垃圾；只把来源列改成正规接入
+      conversion = await annexConvertSource(resolved, storeEntry);
+      resetSkillsCaches();
+      const refreshed = await skillsDataV2({ force: true });
+      const row = (refreshed.items || []).find((it) => it.agents && it.name === parsed.name);
+      for (const dir of conversion.trash) await trashImportedSkill(dir);
+      return { ok: true, status: 'identical', name: parsed.name, agents: row ? row.agents : undefined, ...confirmInfo };
+    } else if (!parsed.overwrite) {
+      // 第一阶段：结构化冲突 + 双指纹，端点零副作用
+      return { ok: false, status: 'content_conflict', ...confirmInfo };
+    } else if (sourceFingerprint !== parsed.sourceFingerprint) {
+      return { ok: false, status: 'source_changed', ...confirmInfo };
+    } else if (targetFingerprint !== parsed.conflictFingerprint) {
+      return { ok: false, status: 'concurrent_changed', ...confirmInfo };
+    } else if (await skillTreeFingerprint(storeEntry) !== targetFingerprint) {
+      // 覆盖确认之后再读一次：外部 Agent 刚写入的内容不能被旧确认抹掉
+      return { ok: false, status: 'concurrent_changed', ...confirmInfo };
+    }
+
+    // 4) 原子换位（覆盖时旧原件先进暂存位）；5) 来源记录随文件失效（外来原件）
+    priorRecord = skillDiscovery ? await skillDiscovery.sourceRecord(storeEntry).catch(() => null) : null;
+    if (targetExists) {
+      rollbackDir = await fsp.mkdtemp(path.join(AGENTS_SKILLS, '.fanbox-annex-old-'));
+      await fsp.rmdir(rollbackDir);
+      skillAnnexTestFailure('swap'); // 注入点：换位阶段失败 → 旧原件未动
+      await fsp.rename(storeEntry, rollbackDir);
+      try {
+        if (await skillTreeFingerprint(rollbackDir) !== targetFingerprint) {
+          await fsp.rename(rollbackDir, storeEntry);
+          rollbackDir = null;
+          return { ok: false, status: 'concurrent_changed', ...confirmInfo };
+        }
+        await fsp.rename(tempDir, storeEntry);
+        tempDir = null;
+        swappedNew = true;
+      } catch (e) {
+        await rollbackSkillOverwrite(storeEntry, rollbackDir, tempDir);
+        rollbackDir = null; tempDir = null; swappedNew = false;
+        throw e;
+      }
+    } else {
+      skillAnnexTestFailure('swap'); // 注入点：首次入仓同样在换位前
+      await fsp.rename(tempDir, storeEntry);
+      tempDir = null;
+      swappedNew = true;
+    }
+    if (priorRecord) {
+      await skillDiscovery.removeSourceRecord(storeEntry);
+      recordRemoved = true;
+    }
+
+    // 6) 来源实体按列改为正规接入
+    conversion = await annexConvertSource(resolved, storeEntry);
+
+    resetSkillsCaches();
+    const refreshed = await skillsDataV2({ force: true });
+    const row = (refreshed.items || []).find((it) => it.agents && it.name === parsed.name);
+
+    // 7) 成功后才清场：被替换的真实目录 / 旧原件统一进废纸篓（可恢复）
+    for (const dir of conversion.trash) await trashImportedSkill(dir);
+    if (rollbackDir) {
+      const trashed = await trashImportedSkill(rollbackDir);
+      if (!trashed.ok) throw new Error(trashed.error || '旧原件移入废纸篓失败');
+      rollbackDir = null;
+    }
+    const restartRequired = resolved.agent === 'codex' ? 'codex' : undefined;
+    return {
+      ok: true,
+      status: targetExists ? 'overwritten' : 'annexed',
+      name: parsed.name,
+      agents: row ? row.agents : undefined,
+      restartRequired,
+      note: restartRequired ? CODEX_RESTART_NOTE : undefined,
+      ...confirmInfo,
+    };
+  } catch (e) {
+    // 回滚按日志逆序：来源列接入 → 记录失效 → 原件换位；全部成功后才清理临时副本
+    let rollbackError = null;
+    if (conversion) {
+      for (const t of conversion.undo.reverse()) { try { await t(); } catch (err) { rollbackError = err; } }
+      conversion = null;
+    }
+    if (recordRemoved && skillDiscovery) {
+      try { await skillDiscovery.restoreSourceRecord(storeEntry, priorRecord); recordRemoved = false; } catch (err) { rollbackError = err; }
+    }
+    if (swappedNew && rollbackDir) {
+      try {
+        await fsp.rm(storeEntry, { recursive: true, force: true });
+        await fsp.rename(rollbackDir, storeEntry);
+        rollbackDir = null; swappedNew = false;
+      } catch (err) { rollbackError = err; }
+    }
+    await removeImportScratch(tempDir);
+    if (rollbackError) return { ok: false, status: 'rollback_failed', error: `回滚失败：${rollbackError.message}（原始错误：${e.message}）` };
+    if (e instanceof UnsafeSkillContentError) {
+      return { ok: false, status: 'unsafe_content', problemPath: e.problemPath, error: e.message };
+    }
+    return { ok: false, status: 'failed', error: e.message || '收编失败' };
+  } finally {
+    await removeImportScratch(tempDir);
+    // 暂存位只会在旧原件已恢复或已成功进入废纸篓后为空；否则保留避免数据丢失
+    if (rollbackDir && !swappedNew) {
+      try { await fsp.rename(rollbackDir, storeEntry); } catch { /* 保留暂存内容 */ }
+    }
+  }
+}
+
 function parseSkillBatchRequest(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: '请求体格式错误' };
   if (!['enable', 'disable', 'uninstall'].includes(body.action)) return { ok: false, error: '未知的批量操作' };
@@ -4233,6 +4632,12 @@ const server = http.createServer(async (req, res) => {
       const parsed = parseSkillImportRequest(await readBody(req));
       if (!parsed.ok) return sendJSON(res, 400, { ok: false, status: 'invalid_request', error: parsed.error });
       return sendJSON(res, 200, await queueSkillsWrite(() => skillImport(parsed)));
+    }
+    if (p === '/api/skills/annex' && req.method === 'POST') {
+      // 收编端点（issue 24 · docs/14）：与安装共用风险检查；写入走串行队列，无半成品
+      const parsed = parseSkillAnnexRequest(await readBody(req));
+      if (!parsed.ok) return sendJSON(res, 400, { ok: false, status: 'invalid_request', error: parsed.error });
+      return sendJSON(res, 200, await queueSkillsWrite(() => skillAnnex(parsed)));
     }
     if (p === '/api/agent-usage') {
       return sendJSON(res, 200, await agentUsage());

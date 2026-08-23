@@ -1862,9 +1862,10 @@ function confirmDialog(msg) {
   });
 }
 
-// 接入目标位被同名实体占用（POST /api/skills/link 的结构化冲突）：FanBox 不静默覆盖，
-// 引导到「收编 / 覆盖接管」两条出路；完整流程随后续票接通，先给「在文件区显示」出口。
-function skillOccupiedDialog(item, agent, conflictPath) {
+// 接入目标位被同名实体占用（POST /api/skills/link 的结构化冲突）：FanBox 不静默覆盖。
+// 占用者是可收编残留（real-dir 异常）时给「收编并接入」活入口（issue 24）；覆盖接管
+// 流程随后续票接通，先给「在文件区显示」出口。resolve：'cancel' | 'reveal' | 'annex'。
+function skillOccupiedDialog(item, agent, conflictPath, canAnnex) {
   const col = SKILL_MATRIX_COLUMNS.find((c) => c.id === agent) || { label: agent };
   const where = tilde(conflictPath || '');
   return new Promise((resolve) => {
@@ -1873,15 +1874,63 @@ function skillOccupiedDialog(item, agent, conflictPath) {
     ov.innerHTML = `<div class="input-dialog sk-import-dialog" role="alertdialog" aria-modal="true" aria-labelledby="sk-occupied-title">
       <div class="input-title" id="sk-occupied-title">目标位已被同名实体占用</div>
       <div class="sk-import-note">给 ${escapeHtml(col.label)} 接入「${escapeHtml(item.name)}」需要写入 <code>${escapeHtml(where)}</code>，那里已有一个同名实体（真实目录、外部链或断链）。FanBox 不会静默替换它。</div>
-      <div class="sk-import-note">两条出路：<b>收编</b>——把现有内容提升为原件后再接入；<b>覆盖接管</b>——确认后完整替换，旧内容移入系统废纸篓可恢复。两个流程的完整入口随后续版本提供。</div>
+      <div class="sk-import-note">${canAnnex
+        ? '占用者是一份可收编的真实目录：<b>收编并接入</b>——把它提升为原件仓中的原件，本列改为正规接入（可见性不变、不留双份）。'
+        : '两条出路：<b>收编</b>——把现有内容提升为原件后再接入；<b>覆盖接管</b>——确认后完整替换，旧内容移入系统废纸篓可恢复。覆盖接管流程随后续版本提供。'}</div>
       <div class="sk-import-conflict-path">${escapeHtml(where)}</div>
-      <div class="input-actions"><button class="ghost-btn" data-act="cancel">关闭</button><button class="primary" data-act="reveal">在文件区显示</button></div>
+      <div class="input-actions"><button class="ghost-btn" data-act="cancel">取消</button><button data-act="reveal">在文件区显示</button>${canAnnex ? '<button class="primary" data-act="annex">收编并接入</button>' : ''}</div>
     </div>`;
     document.body.appendChild(ov);
-    const done = (reveal) => { ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(reveal); };
+    const done = (value) => { ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(value); };
+    function onKey(ev) { if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); done('cancel'); } }
+    ov.querySelector('[data-act=cancel]').onclick = () => done('cancel');
+    ov.querySelector('[data-act=reveal]').onclick = () => done('reveal');
+    const annexBtn = ov.querySelector('[data-act=annex]');
+    if (annexBtn) annexBtn.onclick = () => done('annex');
+    ov.onclick = (ev) => { if (ev.target === ov) done('cancel'); };
+    document.addEventListener('keydown', onKey, true);
+    ov.querySelector('[data-act=cancel]').focus();
+  });
+}
+
+function skAnnexSize(n) {
+  if (!Number.isFinite(n) || n <= 0) return '';
+  if (n >= 1024 * 1024) return `（约 ${(n / 1024 / 1024).toFixed(1)} MiB）`;
+  if (n >= 1024) return `（约 ${(n / 1024).toFixed(1)} KiB）`;
+  return `（${n} B）`;
+}
+
+// 收编确认页（docs/14）：来源概要 + 脚本明示 + 差异概要（目标在位时）；
+// 含脚本等增强确认项时必须勾选确认才能开始；默认聚焦「取消」防误触。
+function skillAnnexConfirmDialog(preview) {
+  const src = preview.source || {};
+  const scripts = Array.isArray(preview.scripts) ? preview.scripts : [];
+  const needAck = Boolean(preview.enhancedConfirmation);
+  const where = tilde(src.path || '');
+  const targetLine = preview.targetExists
+    ? `<div class="sk-import-note">原件仓里已有同名原件 <code>${escapeHtml(tilde(preview.target && preview.target.path || ''))}</code>，收编将<b>完整替换</b>它（旧原件移入系统废纸篓可恢复）。</div>
+       <div class="sk-annex-diff">差异概要：新增 ${preview.diff.added.length} · 删除 ${preview.diff.removed.length} · 修改 ${preview.diff.changed.length}${preview.diff.added.concat(preview.diff.removed, preview.diff.changed).length ? ` — ${escapeHtml(preview.diff.added.concat(preview.diff.removed, preview.diff.changed).slice(0, 6).join('、'))}${preview.diff.added.length + preview.diff.removed.length + preview.diff.changed.length > 6 ? ' …' : ''}` : '（仅元数据差异）'}</div>`
+    : '<div class="sk-import-note">原件仓里没有同名原件——将作为新原件收入，暂不改变任何 Agent 列的接入。</div>';
+  return new Promise((resolve) => {
+    const ov = document.createElement('div');
+    ov.className = 'input-overlay sk-import-overlay';
+    ov.innerHTML = `<div class="input-dialog sk-import-dialog" role="dialog" aria-modal="true" aria-labelledby="sk-annex-title">
+      <div class="input-title" id="sk-annex-title">${preview.targetExists ? '收编并覆盖同名原件？' : '收编为原件？'}</div>
+      <div class="sk-import-note">把 <code>${escapeHtml(where)}</code>${src.project ? '（项目级 Skill）' : ''} 提升为原件仓中的原件 <code>~/.agents/skills/${escapeHtml(preview.name)}</code>。</div>
+      <div class="sk-import-note">${escapeHtml(src.desc || '（无 description）')} · ${preview.source.fileCount ?? '?'} 个文件${escapeHtml(skAnnexSize(src.totalSize))}</div>
+      ${targetLine}
+      ${scripts.length ? `<div class="sk-annex-scripts">⚠ 内容包含 ${scripts.length} 个脚本：${scripts.map((s) => `<code>${escapeHtml(s)}</code>`).join('、')}。脚本会在 Agent 调用该 Skill 时执行——请确认内容可信。</div>` : ''}
+      ${needAck ? `<label class="sk-annex-ack"><input type="checkbox" id="sk-annex-ack"> 我已了解脚本内容，确认收编</label>` : ''}
+      <div class="input-actions"><button class="ghost-btn" data-act="cancel">取消</button><button class="primary" data-act="go"${needAck ? ' disabled' : ''}>开始收编</button></div>
+    </div>`;
+    document.body.appendChild(ov);
+    const done = (value) => { ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(value); };
     function onKey(ev) { if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); done(false); } }
     ov.querySelector('[data-act=cancel]').onclick = () => done(false);
-    ov.querySelector('[data-act=reveal]').onclick = () => done(true);
+    const submit = ov.querySelector('[data-act=go]');
+    submit.onclick = () => { if (!submit.disabled) done(true); };
+    const ack = ov.querySelector('#sk-annex-ack');
+    if (ack) ack.onchange = () => { submit.disabled = !ack.checked; };
     ov.onclick = (ev) => { if (ev.target === ov) done(false); };
     document.addEventListener('keydown', onKey, true);
     ov.querySelector('[data-act=cancel]').focus();
@@ -5113,7 +5162,11 @@ const skillsView = {
       const r = await apiPost('/api/skills/link', { name: it.name, agent, on });
       if (!r || r.ok === false) {
         if (r && r.conflict && r.conflict.kind === 'occupied') {
-          if (await skillOccupiedDialog(it, agent, r.conflict.path)) navigate(dirOf(r.conflict.path));
+          // 占用者 = 可收编残留时给「收编并接入」活入口（issue 24）；其余只引导查看
+          const canAnnex = (this.data.anomalies || []).some((a) => a.kind === 'real-dir' && a.path === r.conflict.path);
+          const choice = await skillOccupiedDialog(it, agent, r.conflict.path, canAnnex);
+          if (choice === 'reveal') navigate(dirOf(r.conflict.path));
+          else if (choice === 'annex') await this.annexAnomalyFromPath(r.conflict.path);
         } else toast((r && (r.error || r.status)) || '操作失败', true);
       } else {
         const col = SKILL_MATRIX_COLUMNS.find((c) => c.id === agent) || { label: agent };
@@ -5140,7 +5193,10 @@ const skillsView = {
         const r = await apiPost('/api/skills/link', { name: it.name, agent: 'workbuddy', on });
         if (!r || r.ok === false) {
           if (r && r.conflict && r.conflict.kind === 'occupied') {
-            if (await skillOccupiedDialog(it, 'workbuddy', r.conflict.path)) navigate(dirOf(r.conflict.path));
+            const canAnnex = (this.data.anomalies || []).some((a) => a.kind === 'real-dir' && a.path === r.conflict.path);
+            const choice = await skillOccupiedDialog(it, 'workbuddy', r.conflict.path, canAnnex);
+            if (choice === 'reveal') navigate(dirOf(r.conflict.path));
+            else if (choice === 'annex') await this.annexAnomalyFromPath(r.conflict.path);
           } else toast((r && (r.error || r.status)) || '刷新拷贝失败', true);
           return;
         }
@@ -5194,24 +5250,68 @@ const skillsView = {
       await this.reload();
     }
   },
-  // 项目级/插件行的收编入口（POST /api/skills/annex 随后续票落地；未就绪时给出说明）
-  async annexItem(it) {
+  // ── 收编（issue 24 · docs/14）：预检 → 确认页 → 带指纹执行；失败按状态提示 ──
+  async runAnnex(body) {
     if (this.busy || this.refreshing) return;
     this.busy = true; this.render();
-    let done = false;
+    let refreshed = false;
     try {
-      const r = await apiPost('/api/skills/annex', { dir: it.dir, cwd: state.cwd });
-      if (r && r.ok) {
-        done = true;
-        toast(`已收编为原件：${it.name}`);
-      } else toast('收编失败：' + ((r && r.error) || '流程随后续版本提供'), true);
-    } catch {
-      toast('收编流程随后续版本提供——当前可先在文件区手动迁移', true);
+      // 第一阶段：只读预检，拿脚本清单 / 差异概要 / 双指纹
+      const preview = await apiPost('/api/skills/annex', { ...body, preview: true });
+      if (!preview || !preview.ok) { this.reportAnnexFailure(preview); return; }
+      const okToGo = await skillAnnexConfirmDialog(preview);
+      if (!okToGo) return;
+      // 第二阶段：目标在位 = 显式覆盖重试，带上预检指纹让服务端再校验一次
+      const payload = { ...body };
+      if (preview.targetExists) {
+        payload.overwrite = true;
+        payload.sourceFingerprint = preview.sourceFingerprint;
+        payload.conflictFingerprint = preview.conflictFingerprint;
+      }
+      const r = await apiPost('/api/skills/annex', payload);
+      if (!r || !r.ok) { this.reportAnnexFailure(r); return; }
+      let msg = {
+        annexed: `已收编为原件：${r.name}`,
+        overwritten: `已覆盖收编：${r.name}（旧原件在系统废纸篓可恢复）`,
+        identical: `${r.name} 内容与在位原件一致——来源列已改为正规接入`,
+      }[r.status] || `已收编：${r.name}`;
+      if (r.restartRequired === 'codex' || (Array.isArray(r.restartRequired) && r.restartRequired.includes('codex'))) msg += '；重启 Codex 后生效';
+      toast(msg);
+      refreshed = true;
+      await this.reload();
+    } catch (err) {
+      toast('收编失败：' + (err.message || '请求失败'), true);
     } finally {
       this.busy = false;
-      if (done) await this.reload();
-      else if (state.skillsMode && this.data) this.render();
+      if (!refreshed) this.render();
     }
+  },
+  reportAnnexFailure(r) {
+    const status = r && r.status;
+    if (status === 'content_conflict') toast('同名原件内容刚刚变化——已重新预检，请再次确认', true);
+    else if (status === 'concurrent_changed') toast('来源或目标刚被其它操作改动——已刷新，请重试', true);
+    else if (status === 'source_changed') toast('来源内容在确认后发生了变化——请重新确认差异', true);
+    else if (status === 'unsafe_content') toast(`来源不安全（${r.problemPath || '?'}）：${r.error || '与安装同一套风险检查未通过'}`, true);
+    else if (status === 'not_a_skill') toast('该目录缺少有效 SKILL.md——残留项不可收编，可在文件区清理', true);
+    else if (status === 'invalid_source') toast(r.error || '来源不在最新扫描清单里——已刷新，请重试', true);
+    else toast('收编失败：' + ((r && (r.error || r.status)) || ''), true);
+  },
+  // 扫描异常卡片的处置入口：四列真实目录残留 → 收编为原件
+  async annexAnomaly(src) {
+    await this.runAnnex({ agent: src.agent, name: src.name });
+  },
+  // 行内列冲突引导（占用者 = 可收编残留）：按路径找到对应残留再走同一收编流
+  async annexAnomalyFromPath(conflictPath) {
+    const a = (this.data.anomalies || []).find((x) => x.kind === 'real-dir' && x.path === conflictPath);
+    if (!a) { toast('该占用实体不是可收编的残留——覆盖接管流程随后续版本提供', true); return; }
+    await this.annexAnomaly({ agent: a.agent, name: a.name });
+  },
+  // 项目级行详情「收编为原件」；插件由插件自管、残留缺有效 SKILL.md，都不提供
+  async annexItem(it) {
+    if (this.busy || this.refreshing) return;
+    if (it.origin === 'plugin') { toast('插件 Skill 由插件管理，不提供收编', true); return; }
+    if (it.residue) { toast('残留项缺少有效 SKILL.md，不可收编——可在文件区清理', true); return; }
+    await this.runAnnex({ project: it.projectRoot || state.cwd, name: it.name });
   },
   // 项目级/插件保持原形态：启停仍走 /api/skills/toggle（硬切换归后续票）
   async toggleExtra(it) {
@@ -5567,6 +5667,26 @@ const skillsView = {
     const install = area.querySelector('[data-disc-act=install]');
     if (install) install.onclick = () => this.installDiscovery();
   },
+  // 扫描异常处置卡（docs/14 入口一）：real-dir 残留给「收编为原件」，
+  // 断链 / 死环 / 外部链给「查看」；store 侧异常只提示（迁移归后续票）。
+  anomaliesHtml() {
+    const anomalies = this.data.anomalies || [];
+    if (!anomalies.length) return '';
+    const kindText = { 'real-dir': '真实目录残留', 'external-link': '外部链接', 'broken-link': '断链', 'dead-loop': '死环' };
+    const agentLabel = (a) => a.agent === 'store' ? '原件仓' : ((SKILL_MATRIX_COLUMNS.find((c) => c.id === a.agent) || {}).label || a.agent);
+    const cards = anomalies.map((a) => {
+      const annexable = a.kind === 'real-dir' && a.action === 'annex';
+      return `<div class="sk-anom">
+        <span class="sk-anom-kind">${escapeHtml(agentLabel(a))} · ${kindText[a.kind] || a.kind}</span>
+        <code class="sk-anom-path" title="${escapeHtml(a.path)}">${escapeHtml(tilde(a.path))}</code>
+        <span class="sk-anom-act">
+          ${annexable ? `<button class="ghost-btn" data-act="annex-anomaly" data-agent="${escapeHtml(a.agent)}" data-name="${escapeHtml(a.name)}" ${this.busy || this.refreshing ? 'disabled' : ''} title="把这份内容提升为原件仓中的原件，本列改为正规接入">收编为原件</button>` : ''}
+          <button class="ghost-btn" data-act="reveal-anomaly" data-path="${escapeHtml(a.path)}" ${this.busy || this.refreshing ? 'disabled' : ''}>在文件区显示</button>
+        </span>
+      </div>`;
+    }).join('');
+    return `<div class="sk-anoms"><div class="sk-anoms-title">扫描异常与处置</div>${cards}</div>`;
+  },
   renderInstalled() {
     const o = this.data.overview || {};
     const counts = this.data.counts || {};
@@ -5616,6 +5736,7 @@ const skillsView = {
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/></svg><span>${this.refreshing ? '刷新中…' : '刷新'}</span>
         </button>
       </div>
+      ${this.anomaliesHtml()}
       <div class="sk-thead"><span></span><span>Skill / 描述</span><div class="sk-mtx-head">${SKILL_MATRIX_COLUMNS.map((c) => `<span class="sym ${c.id}" title="${escapeHtml(c.label)} · ${escapeHtml(c.mech)}">${c.sym}</span>`).join('')}</div><span class="r">触发</span><span>健康</span><span class="r">更新</span><span></span></div>`;
     if (!rows.length) h += `<div class="sk-empty">${this.query ? `没有找到“${escapeHtml(this.query)}”` : '当前筛选下没有原件'}</div>`;
     rows.forEach((it) => {
@@ -5742,7 +5863,7 @@ const skillsView = {
         ${(it.issues || []).map((s) => `<div class="fd-cut">⚠ ${escapeHtml(s)}</div>`).join('')}
         <div class="fd-acts">
           ${it.residue ? '' : `<button data-act="invoke" class="primary" ${this.busy ? 'disabled' : ''}>▶ 终端调用</button>`}
-          <button data-act="annex" ${this.busy ? 'disabled' : ''} title="把这份内容提升为原件仓中的原件（收编）">收编为原件</button>
+          ${it.origin !== 'plugin' && !it.residue ? `<button data-act="annex" ${this.busy ? 'disabled' : ''} title="把这份内容提升为原件仓中的原件（收编）">收编为原件</button>` : ''}
           <button data-act="reveal" ${this.busy ? 'disabled' : ''}>在文件区显示</button>
           ${it.residue ? '' : `<button data-act="edit" ${this.busy ? 'disabled' : ''}>编辑 SKILL.md</button>`}
           <button data-act="trash" class="danger" ${this.busy ? 'disabled' : ''}>卸载</button>
@@ -5794,6 +5915,8 @@ const skillsView = {
       let dir = null;
       if (container) dir = container.dataset.dir;
       else if (detail && detail.previousElementSibling) dir = detail.previousElementSibling.dataset.dir;
+      // 异常处置卡不在任何行容器里（无 dir），先于 dir 解析处理
+      if (act && act.dataset.act === 'annex-anomaly') { e.stopPropagation(); await this.annexAnomaly({ agent: act.dataset.agent, name: act.dataset.name }); return; }
       if (!dir) return;
       const it = this.rowByDir(dir);
       if (!it) return;
