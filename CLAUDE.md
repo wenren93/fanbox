@@ -103,3 +103,17 @@ FanBox 以「原件 + 接入」模型管理本机 Skills：每个 Skill 只有�
 * **Language**: 中文注释和提交信息
 
 <br />
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs are tracked in GitHub Issues for `wenren93/fanbox`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Triage uses the five default canonical labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repository with `CONTEXT.md` and root-level ADRs. See `docs/agents/domain.md`.
