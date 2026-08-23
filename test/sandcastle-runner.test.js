@@ -28,6 +28,11 @@ test('Sandcastle runner uses parallel planner with podman sandbox and three phas
   assert.match(runner, /["']\.\/\.sandcastle\/plan-prompt\.md["']/);
   assert.match(runner, /["']\.\/\.sandcastle\/implement-prompt\.md["']/);
   assert.match(runner, /["']\.\/\.sandcastle\/merge-prompt\.md["']/);
+  // merger 成功返回后，由宿主机发送只包含 issue 标题的微信通知
+  assert.match(runner, /scripts\/send-wechat-message\.js/);
+  assert.match(runner, /await notifyMergeCompleted\(completedIssues\)/);
+  assert.match(runner, /issues\.map\(\(issue\) => `• \$\{issue\.title\}`\)/);
+  assert.match(runner, /微信合并通知发送失败/);
   // retry logic for transient errors
   assert.match(runner, /withRetry\(/);
   assert.doesNotMatch(runner, /completionSignal/);

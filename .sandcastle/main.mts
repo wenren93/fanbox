@@ -14,6 +14,9 @@
 
 import * as sandcastle from "@ai-hero/sandcastle";
 import { podman } from "@ai-hero/sandcastle/sandboxes/podman";
+import { execFile } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { z } from "zod";
 
 // plan 输出的 JSON schema。分支名由模型输出，必须在进入 git 操作前严格校验。
@@ -102,12 +105,34 @@ const copyToWorktree = [
 const plannerBranchStrategy = { type: "merge-to-head" as const };
 const mergerBranchStrategy = { type: "merge-to-head" as const };
 
+const execFileAsync = promisify(execFile);
+const SEND_WECHAT_SCRIPT = fileURLToPath(
+  new URL("../scripts/send-wechat-message.js", import.meta.url),
+);
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function notifyMergeCompleted(issues: PlannedIssue[]): Promise<void> {
+  const message = [
+    "✅ Sandcastle 代码合并完成",
+    ...issues.map((issue) => `• ${issue.title}`),
+  ].join("\n");
+
+  try {
+    await execFileAsync(process.execPath, [SEND_WECHAT_SCRIPT, message], {
+      timeout: 30_000,
+    });
+    console.log("微信合并通知已发送。");
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error(`微信合并通知发送失败：${detail}`);
+  }
 }
 
 // planner 没有仓库副作用，遇到瞬态错误自动重试。
@@ -323,6 +348,7 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     },
   });
 
+  await notifyMergeCompleted(completedIssues);
   console.log("\nBranches merged.");
 }
 
