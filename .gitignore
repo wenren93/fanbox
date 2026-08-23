@@ -25,8 +25,8 @@ build/*
 # MCP 配置（含 API key，不入库）
 .mcp.json
 
-# Sandcastle 本地目录不入库
-/.sandcastle/
+# Sandcastle：编排源码入库；密钥/日志/worktree 由 .sandcastle/.gitignore 排除
+# （新 worktree 必须能检出 .sandcastle/setup-mcp.js，否则 copyToWorktree 复制失败）
 /plan.json
 
 # 验证脚本的截图产物（可复跑重生成，不入库）

@@ -1,0 +1,72 @@
+FROM node:22-bookworm
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+  git \
+  curl \
+  jq \
+  && rm -rf /var/lib/apt/lists/*
+
+# Install GitHub CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+  | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+  | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+  && apt-get update && apt-get install -y gh \
+  && rm -rf /var/lib/apt/lists/*
+
+# Build-args for UID/GID alignment: sandcastle docker build-image
+# defaults these to the host user's UID/GID so image-built files
+# and bind-mounted files share an owner without runtime chown.
+ARG AGENT_UID=1000
+ARG AGENT_GID=1000
+
+# Rename the base image's "node" user to "agent" and align UID/GID.
+RUN groupmod -o -g $AGENT_GID node && usermod -o -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node
+USER ${AGENT_UID}:${AGENT_GID}
+
+# Install Claude Code CLI
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
+# Add Claude to PATH
+ENV PATH="/home/agent/.local/bin:$PATH"
+
+WORKDIR /home/agent
+
+# Clone vision MCP server from GitHub
+RUN git clone --depth 1 https://github.com/wenren93/mimo-vision-mcp.git /home/agent/mimo-vision-mcp
+
+# Pre-populate npm cache so sandbox `npm install` hits local cache instead of downloading
+USER root
+COPY package.json package-lock.json /tmp/preinstall/
+RUN chown -R ${AGENT_UID}:${AGENT_GID} /tmp/preinstall
+USER ${AGENT_UID}:${AGENT_GID}
+RUN cd /tmp/preinstall && npm install && rm -rf /tmp/preinstall
+
+# Install linux-arm64 sharp binaries as root (host copies are darwin-arm64)
+USER root
+RUN mkdir -p /home/agent/sharp-hack && \
+    cd /home/agent/sharp-hack && \
+    npm init -y >/dev/null 2>&1 && \
+    npm install @img/sharp-linux-arm64@0.34.5 @img/sharp-libvips-linux-arm64@1.2.4 2>/dev/null || echo "sharp install skipped"
+RUN chown -R ${AGENT_UID}:${AGENT_GID} /home/agent/sharp-hack /home/agent/mimo-vision-mcp
+
+# Create sharp preload script to fix platform binary resolution
+RUN echo 'const Module=require("module"),orig=Module._resolveFilename;Module._resolveFilename=function(r,p,i,o){if(r==="@img/sharp-linux-arm64/sharp.node")return"/home/agent/sharp-hack/node_modules/@img/sharp-linux-arm64/lib/sharp-linux-arm64.node";if(r.startsWith("@img/sharp-libvips-linux-arm64"))return"/home/agent/sharp-hack/node_modules/@img/sharp-libvips-linux-arm64/lib/index.js";return orig.call(this,r,p,i,o)};' > /home/agent/sharp-preload.js && \
+    chown ${AGENT_UID}:${AGENT_GID} /home/agent/sharp-preload.js
+
+USER ${AGENT_UID}:${AGENT_GID}
+
+# Install dependencies and build the MCP server
+RUN cd /home/agent/mimo-vision-mcp && npm install && npm run build
+
+ENV VISION_MCP_PATH="/home/agent/mimo-vision-mcp/dist/server.js"
+ENV VISION_ASSET_ROOT="/home/agent/mimo-vision-mcp/assets"
+ENV NODE_OPTIONS="-r /home/agent/sharp-preload.js"
+
+WORKDIR /home/agent
+
+# In worktree sandbox mode, Sandcastle bind-mounts the git worktree at /home/agent/workspace
+# and overrides the working directory to /home/agent/workspace at container start.
+# Structure your Dockerfile so that /home/agent/workspace can serve as the project root.
+ENTRYPOINT ["sleep", "infinity"]
