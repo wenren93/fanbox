@@ -65,7 +65,10 @@ const MAX_ITERATIONS = 5;
 // 无 issue 时的睡眠时间（毫秒）
 const SLEEP_MS = 60_000;
 
-// implementer 错峰启动间隔（毫秒）——避免同秒并发建容器触发 podman API 抖动
+// implementer 并发上限——podman machine 内存有限，过多并行 npm install 会 OOM
+const IMPLEMENTER_CONCURRENCY = 2;
+
+// 首波 implementer 错峰启动间隔（毫秒）——避免同秒并发建容器触发 podman API 抖动
 const IMPLEMENTER_STAGGER_MS = 10_000;
 
 // 所有 agent 都需要依赖；只有 planner 和 implementer 需要 vision MCP。
@@ -207,28 +210,50 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
   // -------------------------------------------------------------------------
   // Phase 2: Execute
   // -------------------------------------------------------------------------
-  const settled = await Promise.allSettled(
-    issues.map((issue, index) =>
-      (async () => {
-        if (index > 0) {
-          await sleep(index * IMPLEMENTER_STAGGER_MS);
-        }
-        return sandcastle.run({
-          hooks: agentHooks,
-          copyToWorktree,
-          sandbox: podman(),
-          branchStrategy: { type: "branch", branch: issue.branch },
-          name: "implementer",
-          maxIterations: 100,
-          agent: sandcastle.claudeCode("stealth/ox-alpha"),
-          promptFile: "./.sandcastle/implement-prompt.md",
-          promptArgs: {
-            TASK_ID: issue.id,
-            ISSUE_TITLE: issue.title,
-            BRANCH: issue.branch,
-          },
-        });
-      })(),
+  // 工人池：最多 IMPLEMENTER_CONCURRENCY 个 implementer 同时跑，完成一个补位一个
+  const runImplementer = (issue: PlannedIssue) =>
+    sandcastle.run({
+      hooks: agentHooks,
+      copyToWorktree,
+      sandbox: podman(),
+      branchStrategy: { type: "branch", branch: issue.branch },
+      name: "implementer",
+      maxIterations: 100,
+      agent: sandcastle.claudeCode("stealth/ox-alpha"),
+      promptFile: "./.sandcastle/implement-prompt.md",
+      promptArgs: {
+        TASK_ID: issue.id,
+        ISSUE_TITLE: issue.title,
+        BRANCH: issue.branch,
+      },
+    });
+
+  type ImplementerResult = Awaited<ReturnType<typeof sandcastle.run>>;
+  const settled: PromiseSettledResult<ImplementerResult>[] = new Array(
+    issues.length,
+  );
+
+  let cursor = 0;
+  await Promise.all(
+    Array.from(
+      { length: Math.min(IMPLEMENTER_CONCURRENCY, issues.length) },
+      (_, worker) =>
+        (async () => {
+          if (worker > 0) {
+            await sleep(worker * IMPLEMENTER_STAGGER_MS);
+          }
+          while (cursor < issues.length) {
+            const index = cursor++;
+            try {
+              settled[index] = {
+                status: "fulfilled",
+                value: await runImplementer(issues[index]!),
+              };
+            } catch (err) {
+              settled[index] = { status: "rejected", reason: err };
+            }
+          }
+        })(),
     ),
   );
 
