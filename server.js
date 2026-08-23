@@ -2073,6 +2073,10 @@ const CLAUDE_SKILLS = path.join(HOME, '.claude', 'skills');
 const CODEX_SKILLS = path.join(HOME, '.codex', 'skills');
 const AGENTS_SKILLS = path.join(HOME, '.agents', 'skills');
 const WORKBUDDY_SKILLS = path.join(HOME, '.workbuddy', 'skills');
+const ZCODE_SKILLS = path.join(HOME, '.zcode', 'skills');
+const ZCODE_CLI_CONFIG = path.join(HOME, '.zcode', 'cli', 'config.json');
+// 仓库家族：原件留在本仓库（git 是唯一真源），原件仓只放逐条相对链（docs/16 §1）。
+const REPO_SKILLS = path.join(__dirname, '.agents', 'skills');
 const SKILL_IMPORT_TARGETS = Object.freeze({
   claude: { id: 'claude', label: 'Claude', root: CLAUDE_SKILLS },
   codex: { id: 'codex', label: 'Codex', root: CODEX_SKILLS },
@@ -2084,8 +2088,14 @@ const CLAUDE_SETTINGS = path.join(HOME, '.claude', 'settings.json');
 const SKILL_DESC_CUT = 1536; // Claude Code 单条 description 的截断线（官方文档）
 const SKILL_BUDGET_CHARS = 15000; // 描述总预算的社区实测估算值（窗口的 1%），仅作预警参考
 let skillsCache = { at: 0, data: null };
+let skillsV2Cache = { at: 0, data: null };
 let skillsMutationGeneration = 0;
 let skillDiscovery = null;
+// 任何 skills 写操作后同时失效 v1/v2 两份缓存（代数失效缓存沿用，见 docs/16 §3「沿用不动」）。
+function resetSkillsCaches() {
+  skillsCache = { at: 0, data: null };
+  skillsV2Cache = { at: 0, data: null };
+}
 
 async function atomicWriteText(file, text) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
@@ -2188,7 +2198,7 @@ function queueSkillsWrite(operation) {
     try { return await operation(); }
     finally {
       skillsMutationGeneration++;
-      skillsCache = { at: 0, data: null };
+      resetSkillsCaches();
     }
   });
   _skillsWriteChain = run.catch(() => {});
@@ -2276,10 +2286,10 @@ async function scanSkillRoot(root, source, label, out, disabled = false, meta = 
     if (!isDir) {
       if (/\.md$/i.test(n.name)) continue; // 根目录的说明文档不算残留
       out.push({ name: n.name, dir: fp, source, label, ...(meta || {}), disabled, residue: true, desc: '', descLen: 0, mtime: 0,
-        issues: ['残留文件——不是有效 skill，只占目录'] });
+        issues: ['残留文件——不是有效 skill，只占目录'], codes: ['residue-file'] });
       continue;
     }
-    const item = { name: n.name, dir: fp, source, label, ...(meta || {}), disabled, residue: false, desc: '', descLen: 0, mtime: 0, issues: [] };
+    const item = { name: n.name, dir: fp, source, label, ...(meta || {}), disabled, residue: false, desc: '', descLen: 0, mtime: 0, issues: [], codes: [] };
     try {
       const sm = path.join(fp, 'SKILL.md');
       const st = await fsp.stat(sm);
@@ -2303,17 +2313,20 @@ async function scanSkillRoot(root, source, label, out, disabled = false, meta = 
       }
       if (!fm || !fm.desc) {
         item.issues.push('SKILL.md 缺 frontmatter description——模型的技能清单里看不到它，只能手动调用');
+        item.codes.push('desc-missing');
       } else {
         item.desc = fm.desc.slice(0, 240);
         item.descLen = fm.desc.length;
         if (fm.desc.length > SKILL_DESC_CUT) {
           item.issues.push(`description ${fm.desc.length.toLocaleString()} 字符，超过 ${SKILL_DESC_CUT} 截断线——第 ${SKILL_DESC_CUT} 字符之后的触发词模型看不见`);
+          item.codes.push('desc-over-cut');
         }
       }
     } catch {
       item.skillName = item.name;
       item.residue = true;
       item.issues.push('缺 SKILL.md——不是有效 skill');
+      item.codes.push('missing-skill-md');
     }
     out.push(item);
   }
@@ -2426,17 +2439,8 @@ async function codexSkillEvents(cutoff) {
   return all;
 }
 
-async function skillsData(opts = {}) {
-  const { force = false, extraCwds = [] } = opts;
-  if (!force && skillsCache.data && Date.now() - skillsCache.at < 30000) return skillsCache.data;
-  const scanGeneration = skillsMutationGeneration;
-  const cutoff = Date.now() - 45 * 86400000;
-  const items = [];
-  await scanSkillRoot(CLAUDE_SKILLS, 'claude', '~/.claude', items);
-  await scanSkillRoot(CODEX_SKILLS, 'codex', '~/.codex', items);
-  await scanSkillRoot(AGENTS_SKILLS, 'agents', '~/.agents', items);
-  await scanWorkBuddySkills(WORKBUDDY_SKILLS, 'workbuddy', '~/.workbuddy', items);
-  // Claude 插件自带的 skills
+// Claude 插件自带的 skills
+async function scanPluginSkillItems(items) {
   try {
     const inst = JSON.parse(await fsp.readFile(path.join(HOME, '.claude', 'plugins', 'installed_plugins.json'), 'utf8'));
     for (const [key, arr] of Object.entries(inst.plugins || {})) {
@@ -2445,7 +2449,10 @@ async function skillsData(opts = {}) {
       }
     }
   } catch { /* 没装插件 */ }
-  // 项目级 skills 仍统一归入 project 筛选，同时带 projectAgent 供 UI 明确区分归属。
+}
+
+// 项目级 skills 仍统一归入 project 筛选，同时带 projectAgent 供 UI 明确区分归属。
+async function scanProjectSkillItems(items, { force = false, extraCwds = [] } = {}) {
   const scanProjectSkills = async (cwd, projectName) => {
     const roots = [
       ['.claude', 'Claude', 'claude'],
@@ -2477,6 +2484,20 @@ async function skillsData(opts = {}) {
       }
     } catch { /* */ }
   }
+}
+
+async function skillsData(opts = {}) {
+  const { force = false, extraCwds = [] } = opts;
+  if (!force && skillsCache.data && Date.now() - skillsCache.at < 30000) return skillsCache.data;
+  const scanGeneration = skillsMutationGeneration;
+  const cutoff = Date.now() - 45 * 86400000;
+  const items = [];
+  await scanSkillRoot(CLAUDE_SKILLS, 'claude', '~/.claude', items);
+  await scanSkillRoot(CODEX_SKILLS, 'codex', '~/.codex', items);
+  await scanSkillRoot(AGENTS_SKILLS, 'agents', '~/.agents', items);
+  await scanWorkBuddySkills(WORKBUDDY_SKILLS, 'workbuddy', '~/.workbuddy', items);
+  await scanPluginSkillItems(items);
+  await scanProjectSkillItems(items, { force, extraCwds });
 
   // 同一目录可能同时被识别为全局根和当前项目根（例如当前浏览目录恰好是 HOME）。
   // 绝对路径才是安装项身份：保留首次扫描到的来源，避免一项在 UI 出现多行、选择计数失真。
@@ -2573,6 +2594,343 @@ async function skillsData(opts = {}) {
   return data;
 }
 
+// ---------- Skills refresh v2：行 = 原件（docs/16 §1–§2）----------
+// 一行一 Skill：原件 = 链条最终指向的真实目录，行从原件仓 ~/.agents/skills 扫出；
+// 四列接入状态只读现值（Claude lstat 软链 realpath、Codex config.toml、ZCode
+// config.json enable、WorkBuddy 目录在否），不做「官方配置残留 AND 链」的状态合成。
+// agent 目录里的非链实体（真实目录 / 绕开原件仓的链 / 断链 / 死环）进 anomalies，
+// action ∈ annex|clean|migrate 供前端映射收编 / 清理 / 迁移引导。
+
+// ZCode 按原件绝对目录路径记 enable 开关（config.json skills 段，键路径以 / 分隔；缺省 = 启用）。
+async function zcodeDisabledSkillDirs() {
+  try {
+    const cfg = JSON.parse(await fsp.readFile(ZCODE_CLI_CONFIG, 'utf8'));
+    const skills = cfg && typeof cfg.skills === 'object' && !Array.isArray(cfg.skills) ? cfg.skills : {};
+    const out = new Set();
+    for (const [key, value] of Object.entries(skills)) {
+      if (value && typeof value === 'object' && !Array.isArray(value) && value.enable === false) out.add(path.resolve(key));
+    }
+    return out;
+  } catch { return new Set(); }
+}
+
+// 原件仓扫描：每条目解析成行（store/repo/external）或异常（断链/死环）。
+async function scanSkillStoreRows(anomalies) {
+  const rows = [];
+  let names;
+  try { names = await fsp.readdir(AGENTS_SKILLS, { withFileTypes: true }); } catch { return rows; }
+  const storeRoot = path.resolve(AGENTS_SKILLS);
+  const repoRoot = path.resolve(REPO_SKILLS);
+  const seenDirs = new Set();
+  for (const n of names) {
+    if (n.name.startsWith('.') || n.name === '_archive' || n.name === '_backups') continue;
+    const fp = path.join(AGENTS_SKILLS, n.name);
+    let lst;
+    try { lst = await fsp.lstat(fp); } catch { continue; }
+    let row = null;
+    if (lst.isDirectory()) {
+      row = { name: n.name, dir: await fsp.realpath(fp).catch(() => fp), origin: 'store' };
+    } else if (lst.isSymbolicLink()) {
+      let real;
+      try { real = await fsp.realpath(fp); }
+      catch (e) {
+        anomalies.push(e.code === 'ELOOP'
+          ? { agent: 'store', name: n.name, kind: 'dead-loop', path: fp, action: 'migrate' }
+          : { agent: 'store', name: n.name, kind: 'broken-link', path: fp, action: 'migrate' });
+        continue;
+      }
+      if (path.resolve(real) === storeRoot) { // 指回原件仓根：吞掉整个仓的变体死环
+        anomalies.push({ agent: 'store', name: n.name, kind: 'dead-loop', path: fp, action: 'migrate' });
+        continue;
+      }
+      let st;
+      try { st = await fsp.stat(real); } catch { continue; }
+      if (!st.isDirectory()) {
+        anomalies.push({ agent: 'store', name: n.name, kind: 'broken-link', path: fp, action: 'migrate' });
+        continue;
+      }
+      // 链条最终落点决定 origin：仓库家族 = repo，仓内 = store，其余 = external（ego 等，徽标数据非错误）
+      const origin = isPathInside(repoRoot, real) ? 'repo' : isPathInside(storeRoot, real) ? 'store' : 'external';
+      row = { name: n.name, dir: real, origin };
+    }
+    if (!row) continue; // 普通文件（说明文档等）不建模
+    const key = path.resolve(row.dir);
+    if (seenDirs.has(key)) continue; // 两条仓内链指向同一原件时按原件去重
+    seenDirs.add(key);
+    rows.push(row);
+  }
+  return rows;
+}
+
+// 行的 SKILL.md 元数据与描述预算/截断健康检查。
+async function readSkillRowMeta(row) {
+  row.skillName = row.name;
+  row.desc = '';
+  row.descLen = 0;
+  row.mtime = 0;
+  row.health = [];
+  try {
+    const sm = path.join(row.dir, 'SKILL.md');
+    const st = await fsp.stat(sm);
+    row.mtime = st.mtimeMs;
+    const fh = await fsp.open(sm, 'r');
+    let head;
+    try {
+      const buf = Buffer.alloc(Math.min(st.size, 32768));
+      const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+      head = buf.toString('utf8', 0, bytesRead);
+    } finally { await fh.close(); }
+    const fm = skillFrontmatter(head);
+    if (fm && fm.name) row.skillName = fm.name;
+    if (!fm || !fm.desc) {
+      row.health.push({ level: 'warn', code: 'desc-missing', msg: 'SKILL.md 缺 frontmatter description——模型的技能清单里看不到它，只能手动调用' });
+    } else {
+      row.desc = fm.desc.slice(0, 240);
+      row.descLen = fm.desc.length;
+      if (fm.desc.length > SKILL_DESC_CUT) {
+        row.health.push({ level: 'warn', code: 'desc-over-cut', msg: `description ${fm.desc.length.toLocaleString()} 字符，超过 ${SKILL_DESC_CUT} 截断线——第 ${SKILL_DESC_CUT} 字符之后的触发词模型看不见` });
+      }
+    }
+  } catch {
+    row.health.push({ level: 'warn', code: 'missing-skill-md', msg: '缺 SKILL.md——不是有效 skill' });
+  }
+}
+
+// 建链列（Claude）的 agent 目录扫描：有效接入点亮对应行，其余实体进 anomalies。
+// 返回 { linked: Set<仓内条目名>, rootLinkIntoStore }；codex/zcode 也复用本扫描——
+// 它们的终态零链，任何链（含指向原件仓的）都按迁移/清理引导报告。
+async function scanAgentSkillLinks(root, agent, anomalies) {
+  const result = { linked: new Set(), rootLinkIntoStore: false };
+  let lst;
+  try { lst = await fsp.lstat(root); } catch { return result; }
+  const storeRoot = path.resolve(AGENTS_SKILLS);
+  const firstHopInside = async (fp, allowStoreRoot = false) => {
+    try {
+      const target = await fsp.readlink(fp);
+      const hop = path.resolve(path.dirname(fp), target);
+      if (hop === storeRoot) return allowStoreRoot; // 条目级链指向仓根是病态；整目录链本就是这种形态
+      return isPathInside(storeRoot, hop);
+    } catch { return false; }
+  };
+  if (lst.isSymbolicLink()) {
+    // 整目录链（迁移前旧形态）：交给一次性迁移拆链；Claude 指向原件仓时全部行按接入现值点亮。
+    result.rootLinkIntoStore = agent === 'claude' && await firstHopInside(root, true);
+    anomalies.push({ agent, name: path.basename(root), kind: 'external-link', path: root, action: 'migrate' });
+    return result;
+  }
+  let names;
+  try { names = await fsp.readdir(root, { withFileTypes: true }); } catch { return result; }
+  for (const n of names) {
+    if (n.name.startsWith('.') || n.name === '_archive' || n.name === '_backups' || n.name === '.system') continue;
+    const fp = path.join(root, n.name);
+    let st;
+    try { st = await fsp.lstat(fp); } catch { continue; }
+    if (st.isDirectory()) {
+      if (n.name === '_disabled') { // 历史物理禁用目录：只读识别，内容按真实目录引导收编
+        let disabledNames;
+        try { disabledNames = await fsp.readdir(fp, { withFileTypes: true }); } catch { continue; }
+        for (const d of disabledNames) {
+          if (d.name.startsWith('.')) continue;
+          anomalies.push({ agent, name: d.name, kind: 'real-dir', path: path.join(fp, d.name), action: 'annex' });
+        }
+        continue;
+      }
+      anomalies.push({ agent, name: n.name, kind: 'real-dir', path: fp, action: 'annex' });
+      continue;
+    }
+    if (!st.isSymbolicLink()) continue; // 根目录说明文档等普通文件不建模
+    let real;
+    try { real = await fsp.realpath(fp); }
+    catch (e) {
+      anomalies.push(e.code === 'ELOOP'
+        ? { agent, name: n.name, kind: 'dead-loop', path: fp, action: 'clean' }
+        : { agent, name: n.name, kind: 'broken-link', path: fp, action: 'clean' });
+      continue;
+    }
+    let realSt;
+    try { realSt = await fsp.stat(real); } catch { continue; }
+    if (!realSt.isDirectory()) {
+      anomalies.push({ agent, name: n.name, kind: 'broken-link', path: fp, action: 'clean' });
+      continue;
+    }
+    if (await firstHopInside(fp)) {
+      // 指向原件仓的有效链：Claude 列点亮对应行；codex/zcode 机制是 config，其目录里
+      // 的这类链留给一次性迁移清「零链」终态（migrate/scan 自会清点），此处不算异常。
+      if (agent === 'claude') {
+        let storeName = null;
+        try { storeName = path.basename(path.resolve(path.dirname(fp), await fsp.readlink(fp))); } catch { /* */ }
+        if (storeName) result.linked.add(storeName);
+      }
+      continue;
+    }
+    anomalies.push({ agent, name: n.name, kind: 'external-link', path: fp, action: agent === 'claude' ? 'annex' : 'clean' });
+  }
+  return result;
+}
+
+async function skillsDataV2(opts = {}) {
+  const { force = false, extraCwds = [] } = opts;
+  if (!force && skillsV2Cache.data && Date.now() - skillsV2Cache.at < 30000) return skillsV2Cache.data;
+  const scanGeneration = skillsMutationGeneration;
+  const anomalies = [];
+  const rows = await scanSkillStoreRows(anomalies);
+  await Promise.all(rows.map((row) => readSkillRowMeta(row)));
+
+  // 四列现值并行读取
+  const [claudeLinks, , , codexDisabled, zcodeDisabled] = await Promise.all([
+    scanAgentSkillLinks(CLAUDE_SKILLS, 'claude', anomalies),
+    scanAgentSkillLinks(CODEX_SKILLS, 'codex', anomalies), // codex/zcode 目录只产 anomalies（终态零链）
+    scanAgentSkillLinks(ZCODE_SKILLS, 'zcode', anomalies),
+    codexDisabledSkillFiles(),
+    zcodeDisabledSkillDirs(),
+  ]);
+
+  // WorkBuddy 列：拷贝目录在否 + 与原件的指纹漂移；无对应行的拷贝按收编引导
+  let wbNames;
+  try { wbNames = await fsp.readdir(WORKBUDDY_SKILLS, { withFileTypes: true }); } catch { wbNames = []; }
+  const rowsByName = new Map(rows.map((row) => [row.name, row]));
+  for (const n of wbNames) {
+    if (n.name.startsWith('.') || n.name === '_archive' || n.name === '_backups') continue;
+    const fp = path.join(WORKBUDDY_SKILLS, n.name);
+    let lst;
+    try { lst = await fsp.lstat(fp); } catch { continue; }
+    if (lst.isSymbolicLink()) {
+      try { if (!(await fsp.stat(fp)).isDirectory()) throw new Error('not dir'); }
+      catch (e) {
+        anomalies.push({ agent: 'workbuddy', name: n.name, kind: e.code === 'ELOOP' ? 'dead-loop' : 'broken-link', path: fp, action: 'clean' });
+        continue;
+      }
+    } else if (!lst.isDirectory()) {
+      continue; // 普通文件不建模
+    }
+    const row = rowsByName.get(n.name);
+    if (!row) {
+      anomalies.push({ agent: 'workbuddy', name: n.name, kind: 'real-dir', path: fp, action: 'annex' });
+      continue;
+    }
+    row.agents = row.agents || {};
+    row.agents.workbuddy = { on: true };
+    // 拷贝漂移 = 内容指纹不一致且拷贝 mtime 落后原件；拷贝反而更新（WB 抢先编辑）不算落后，
+    // 归迁移向导的漂移矩阵裁决，这里不误报。
+    const [copyHash, origHash, copyMtime, origMtime] = await Promise.all([
+      skillTreeFingerprint(fp).catch(() => null),
+      skillTreeFingerprint(row.dir).catch(() => null),
+      fsp.stat(path.join(fp, 'SKILL.md')).then((st) => st.mtimeMs, () => 0),
+      fsp.stat(path.join(row.dir, 'SKILL.md')).then((st) => st.mtimeMs, () => 0),
+    ]);
+    if (copyHash === null || (copyHash !== origHash && copyMtime <= origMtime)) {
+      row.agents.workbuddy.drift = true;
+      row.health.push({ level: 'warn', code: 'wb-drift', msg: 'WorkBuddy 拷贝落后于原件——可在详情中刷新拷贝' });
+    }
+  }
+
+  // 已被外部修改：skill-sources.json 记录指纹 vs 实际内容（docs/16 §6）
+  if (skillDiscovery) {
+    await Promise.all(rows.map(async (row) => {
+      const storeEntry = path.join(AGENTS_SKILLS, row.name);
+      const record = (await skillDiscovery.sourceRecord(storeEntry).catch(() => null))
+        || (await skillDiscovery.sourceRecord(row.dir).catch(() => null));
+      if (!record || !record.contentHash) return;
+      const actual = await skillTreeFingerprint(row.dir).catch(() => null);
+      if (actual && actual !== record.contentHash) {
+        row.health.push({ level: 'warn', code: 'externally-modified', msg: '内容与来源记录的指纹不符——疑似被外部工具修改' });
+      }
+    }));
+  }
+
+  for (const row of rows) {
+    const storeEntry = path.join(AGENTS_SKILLS, row.name);
+    row.agents = row.agents || {};
+    row.agents.claude = { on: claudeLinks.rootLinkIntoStore || claudeLinks.linked.has(row.name) };
+    const codexOff = codexDisabled.has(path.resolve(storeEntry, 'SKILL.md'))
+      || codexDisabled.has(path.resolve(row.dir, 'SKILL.md'));
+    row.agents.codex = { on: !codexOff, via: 'config' };
+    const zcodeOff = zcodeDisabled.has(path.resolve(storeEntry)) || zcodeDisabled.has(path.resolve(row.dir));
+    row.agents.zcode = { on: !zcodeOff, via: 'config' };
+    if (!row.agents.workbuddy) row.agents.workbuddy = { on: false };
+  }
+
+  // 断链/死环落在与行同名的 agent 条目上时，行级健康同步挂出警告（docs/16 §4.6）
+  const anomalyByRowName = new Map();
+  for (const a of anomalies) {
+    if ((a.kind === 'broken-link' || a.kind === 'dead-loop') && a.agent !== 'store') {
+      if (rowsByName.has(a.name)) anomalyByRowName.set(a.name, a);
+    }
+  }
+  for (const [name, a] of anomalyByRowName) {
+    rowsByName.get(name).health.push({ level: 'error', code: a.kind, msg: `${a.agent} 目录中的接入链异常（${a.path}）` });
+  }
+
+  // 触发统计按 skill 名聚合（沿用两端事件源）
+  const cutoff = Date.now() - 45 * 86400000;
+  const [ce, xe] = await Promise.all([
+    claudeSkillEvents(cutoff).catch(() => []),
+    codexSkillEvents(cutoff).catch(() => []),
+  ]);
+  const stats = new Map();
+  for (const e of [...ce, ...xe]) {
+    const s = stats.get(e.skill) || { hits: 0, last: 0 };
+    s.hits++; s.last = Math.max(s.last, e.t);
+    stats.set(e.skill, s);
+  }
+
+  // 项目级与插件保持原有扫描形态（折叠区、无图标列），带 origin 徽标进 items
+  const extraItems = [];
+  await scanPluginSkillItems(extraItems);
+  await scanProjectSkillItems(extraItems, { force, extraCwds });
+  const rowRealDirs = new Set(rows.map((row) => path.resolve(row.dir)));
+  const seenExtra = new Set();
+  const items = [...rows];
+  for (const it of extraItems) {
+    let real;
+    try { real = await fsp.realpath(it.dir); } catch { real = path.resolve(it.dir); }
+    const key = path.resolve(real);
+    if (rowRealDirs.has(key) || seenExtra.has(key)) continue; // cwd 恰为 HOME 时不与行重复
+    seenExtra.add(key);
+    it.origin = it.source === 'plugin' ? 'plugin' : 'project';
+    it.health = (it.codes || []).map((code, i) => ({ level: 'warn', code, msg: (it.issues || [])[i] || code }));
+    it.hits = 0;
+    it.last = 0;
+    items.push(it);
+  }
+  for (const it of items) {
+    const st = stats.get(it.skillName || it.name) || stats.get(it.name);
+    it.hits = st ? st.hits : 0;
+    it.last = st ? st.last : 0;
+  }
+
+  const counts = {
+    total: rows.length,
+    claude: rows.filter((r) => r.agents.claude.on).length,
+    codex: rows.filter((r) => r.agents.codex.on).length,
+    workbuddy: rows.filter((r) => r.agents.workbuddy.on).length,
+    zcode: rows.filter((r) => r.agents.zcode.on).length,
+    stock: rows.filter((r) => !r.agents.claude.on && !r.agents.codex.on && !r.agents.workbuddy.on && !r.agents.zcode.on).length,
+  };
+  // Claude 描述预算 = Claude 列亮着的行 + 插件（常驻部分）的 description 总量
+  let budgetChars = 0;
+  for (const it of items) {
+    if ((it.origin !== 'project' && it.agents && it.agents.claude && it.agents.claude.on && !it.residue)
+      || (it.origin === 'plugin' && !it.disabled && !it.residue)) budgetChars += it.descLen;
+  }
+  const data = {
+    ok: true, at: Date.now(), v: 2,
+    items,
+    anomalies,
+    counts,
+    roots: { store: AGENTS_SKILLS, claude: CLAUDE_SKILLS, codex: CODEX_SKILLS, zcode: ZCODE_SKILLS, workbuddy: WORKBUDDY_SKILLS, repo: REPO_SKILLS },
+    overview: {
+      total: rows.length,
+      stock: counts.stock,
+      issues: items.filter((it) => (it.health || []).length).length,
+      anomalies: anomalies.length,
+      budgetChars, budgetLimit: SKILL_BUDGET_CHARS, descCut: SKILL_DESC_CUT,
+    },
+  };
+  if (scanGeneration === skillsMutationGeneration) skillsV2Cache = { at: Date.now(), data };
+  return data;
+}
+
 // 启停/卸载的路径校验：只允许动「最近一次扫描出来的 skill 目录」，杜绝任意路径移动/删除
 async function validateSkillDir(dir, extraCwds = []) {
   const previous = skillsCache.data;
@@ -2628,7 +2986,7 @@ async function skillToggle(dir, enable, cwd = null) {
   if (!v.ok) return v;
   const snapshot = v.snapshot;
   const r = await skillToggleItem(v.item, enable);
-  if (r.ok) skillsCache = { at: 0, data: null };
+  if (r.ok) resetSkillsCaches();
   if (r.noop) return { ok: true, dir: r.dir };
   if (r.ok && v.item.toggleScope === 'claude-name') {
     const affected = (snapshot ? snapshot.items : []).filter((it) => it.toggleScope === 'claude-name' && (it.skillName || it.name) === (v.item.skillName || v.item.name)).length;
@@ -2671,7 +3029,7 @@ async function skillTrash(dir, cwd = null) {
   const v = await validateSkillDir(dir, cwd ? [path.resolve(cwd)] : []);
   if (!v.ok) return v;
   const r = await skillTrashItem(v.item);
-  if (r.ok) skillsCache = { at: 0, data: null };
+  if (r.ok) resetSkillsCaches();
   return r;
 }
 
@@ -2891,7 +3249,7 @@ function importTargetDetails(target, targetDir) {
 }
 
 async function importSuccessResult(status, target, targetDir) {
-  skillsCache = { at: 0, data: null };
+  resetSkillsCaches();
   const refreshed = await skillsData({ force: true });
   const item = (refreshed.items || []).find((candidate) => path.resolve(candidate.dir) === path.resolve(targetDir));
   return { ok: true, status, ...importTargetDetails(target, targetDir), targetDisabled: !!(item && item.disabled) };
@@ -3137,7 +3495,7 @@ async function skillBatch(parsed) {
     }
   }
 
-  if (changed) skillsCache = { at: 0, data: null };
+  if (changed) resetSkillsCaches();
   const summary = { success: 0, noop: 0, skipped: 0, failed: 0, total: results.length };
   for (const result of results) summary[result.status]++;
   return { ok: true, action: parsed.action, results, summary, restartRequired: [...restartRequired] };
@@ -3190,7 +3548,7 @@ async function builtinSkillInstall(id) {
       const st = await fsp.stat(path.join(p.src, name));
       if (st.isFile()) await fsp.writeFile(path.join(p.dst, name), await fsp.readFile(path.join(p.src, name)));
     }
-    skillsCache = { at: 0, data: null }; // skills 面板下次打开能立刻看到
+    resetSkillsCaches(); // skills 面板下次打开能立刻看到
     return { ok: true };
   } catch (e) { return { ok: false, error: e.message }; }
 }
@@ -3623,7 +3981,7 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, await agentProjects());
     }
     if (p === '/api/skills') {
-      return sendJSON(res, 200, await skillsData());
+      return sendJSON(res, 200, qp.get('v') === '2' ? await skillsDataV2() : await skillsData());
     }
     if (p === '/api/skills/discovery/search' && req.method === 'POST') {
       return sendJSON(res, 200, await skillDiscovery.search(await readBody(req)));
@@ -3650,8 +4008,12 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, await queueSkillsWrite(() => builtinSkillInstall(b.id)));
     }
     if (p === '/api/skills/refresh' && req.method === 'POST') {
+      // v2（行 = 原件，docs/16 §2）以 {v:2} 协商启用；旧客户端默认继续拿 v1 形状（硬切换归后续票）
       const b = await readBody(req);
       const extraCwds = b && b.cwd ? [b.cwd] : [];
+      if (b && b.v === 2) {
+        return sendJSON(res, 200, await skillsDataV2({ force: true, extraCwds }));
+      }
       return sendJSON(res, 200, await skillsData({ force: true, extraCwds }));
     }
     if (p === '/api/skills/toggle' && req.method === 'POST') {
