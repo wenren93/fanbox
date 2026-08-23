@@ -445,6 +445,8 @@ test('Same-source update preserves a WorkBuddy copy edited ahead of the old orig
   });
   assert.equal(updated.body.ok, true, JSON.stringify(updated.body));
   assert.deepEqual(updated.body.agents, ['workbuddy']);
+  assert.equal(updated.body.workBuddyStatus, 'preserved_ahead');
+  assert.match(updated.body.message, /WorkBuddy 抢先编辑.*保留.*未刷新.*其余接入已即时生效/);
   assert.match(await fs.readFile(workbuddySkill, 'utf8'), /WorkBuddy local edit/);
   assert.equal(await fs.readFile(path.join(home, '.agents', 'skills', 'fixture-skill', 'references', 'note.txt'), 'utf8'), 'second upstream version');
 });
