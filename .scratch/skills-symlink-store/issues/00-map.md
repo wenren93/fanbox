@@ -27,9 +27,10 @@ Skills 透视改造为「正本 + 软链」模型：`~/.agents/skills` 为唯一
 - [01 — 四个 agent 对 skills 目录的真实发现行为](https://github.com/wenren93/fanbox/issues/12)（本地: issues/01-agent-discovery-behavior.md）: Claude/Codex/ZCode 官方支持逐 skill 目录软链（Codex、ZCode 原生读 `~/.agents/skills`，ZCode 不按 realpath 去重致双列）；WorkBuddy 软链未证实且 `skills_disabled` 系 FanBox 自创；skills.sh 约定 = `.agents` 真实正本 + 逐 skill 相对链，FanBox 应取同构风格。
 
 - [02 — 链接模型的领域语言与 ADR 0001 改写](https://github.com/wenren93/fanbox/issues/13)（本地: issues/02-link-domain-model.md）: 一行一 Skill（正本+接入状态，导入/安装项退役）；正本=链条终点真实目录（含 ego 等外部正本）；各列混合原生机制（Claude 相对软链 / Codex config.toml / ZCode config.json / WorkBuddy 拷贝）；存量配置迁移时归一。CONTEXT.md 已重写。
+
+- [05 — 导入与发现页安装改为建链](https://github.com/wenren93/fanbox/issues/16)（本地: issues/05-import-install-via-links.md）: 拷贝导入彻底退役、行内图标即全部分发；「导入」让位收编（共用风险检查）；安装默认全选四 agent、纯库存合法；同源更新=原子换位+影响面提示+trash 回滚；卸载两级（卸载=删正本+全接入，点图标=取消接入）。CONTEXT.md 增「纯库存」「残留」。
 ## Not yet specified
 
-- 正本仓治理：第三方安装器（skills.sh CLI、cc-switch、手动 `git clone`）直接写 `~/.agents/skills` 与 FanBox 管理的并存规则——等 05 号票定了安装流程后再细化。
 - 存量迁移的真实 HOME 验收标准（dogfood 式清单）——等 03 号票出方案后细化。
 
 ## Out of scope
