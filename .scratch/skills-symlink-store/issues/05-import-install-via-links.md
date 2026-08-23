@@ -2,7 +2,7 @@
 
 **Type:** grilling · **Blocked by:** 02 · **Status:** resolved（2026-08-23）· **Claimed by:** zcode-session（2026-08-23）
 
-**GitHub issue:** [#16](https://github.com/wenren93/fanbox/issues/16)（母票 [#11](https://github.com/wenren93/fanbox/issues/11)）
+**GitHub issue:** [#16](https://github.com/wenren93/fanbox/issues/16)（母票 [#11](https://github.com/wenren93/fanbox/issues/11)）· **Resolution:** [issuecomment-5384524736](https://github.com/wenren93/fanbox/issues/16#issuecomment-5384524736)
 
 ## Question
 
