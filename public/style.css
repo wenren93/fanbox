@@ -1559,6 +1559,14 @@ body { transition: background-color 0.28s ease, color 0.28s ease; }
 .sk-batch-failures strong { display: block; margin-bottom: 5px; color: #b5483a; }
 .sk-batch-failures div { display: grid; grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1.2fr); gap: 14px; padding: 3px 0; color: var(--text-dim); }
 .sk-batch-failures em { color: #b5483a; font-style: normal; overflow-wrap: anywhere; }
+/* 批量 v2（issue 23 · docs/16 §4.4）：行选择模式的勾选框、表头整列批量图标 */
+.sk-cb { display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; }
+.sk-cb input { width: 13px; height: 13px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.sk-row.picking .sk-mtx .sk-ic { pointer-events: none; }
+.sk-colhead { font: inherit; line-height: 1; background: none; border: 1px solid transparent; cursor: pointer; padding: 3px 4px; border-radius: 6px; }
+.sk-colhead:hover { border-color: var(--border); background: var(--bg-3); }
+.sk-colhead:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sk-colbatch-acts { flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 /* 矩阵 UI（docs/16 §4）行网格：留白 | 名称/描述 | 四列图标 | 触发 | 健康 | mtime | ▸ */
 .sk-thead, .sk-row { display: grid; grid-template-columns: 20px minmax(0, 1fr) 188px 72px 128px 88px 22px; gap: 12px; align-items: center; }
 .sk-thead { padding: 8px 10px 7px; border-top: 1px solid var(--text); border-bottom: 1px solid var(--rule); font-size: 10px; color: var(--text-faint); letter-spacing: 0.12em; text-transform: uppercase; }

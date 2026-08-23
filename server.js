@@ -3201,26 +3201,42 @@ async function skillLinkWorkBuddyOff(name) {
   return { path: dest };
 }
 
+// v2 扫描里的矩阵行（行 = 原件；项目级与插件不在列模型，docs/16 §1）——link 端点与 batch v2 共用
+function matrixRowsFromScan(scan) {
+  return (scan.items || []).filter((it) => it.agents && it.origin !== 'project' && it.origin !== 'plugin');
+}
+
+// 每对象执行前 stat 原路径：外部移动/删除后不能凭名称猜测位置（沿袭「只动扫描清单内路径」）
+async function statSkillRowDir(row) {
+  try {
+    if (!(await fsp.stat(row.dir)).isDirectory()) throw new Error('不是目录');
+    return null;
+  } catch {
+    return `原件不可读：${row.dir}`;
+  }
+}
+
+// 四列分发本体（link 端点与 batch v2 共用）：按 ADR 0005 各列机制建/删接入。
+async function skillLinkColumn(row, agent, on) {
+  let r;
+  if (agent === 'claude') r = await skillLinkClaude(row, on);
+  else if (agent === 'codex') r = await skillLinkCodex(row, on);
+  else if (agent === 'zcode') r = await skillLinkZcode(row, on);
+  else r = on ? await skillLinkWorkBuddyOn(row) : await skillLinkWorkBuddyOff(row.name);
+  if (r.ok === undefined) r.ok = true;
+  return r;
+}
+
 async function skillLink(parsed) {
   // 校验沿袭「只动扫描清单内的路径」：name 必须是最近一次 v2 扫描出的原件行；
   // 项目级与插件不在列模型里（docs/16 §1），同样拒之门外。
   const scan = await skillsDataV2({ force: true });
-  const row = (scan.items || []).find((it) => it.agents && it.origin !== 'project' && it.origin !== 'plugin'
-    && it.name === parsed.name);
+  const row = matrixRowsFromScan(scan).find((it) => it.name === parsed.name);
   if (!row) return { ok: false, status: 'invalid_name', error: '不在已扫描的原件清单里' };
-  // 建链前 stat 原件有效性
+  const statError = await statSkillRowDir(row);
+  if (statError) return { ok: false, status: 'invalid_name', error: statError };
   try {
-    if (!(await fsp.stat(row.dir)).isDirectory()) throw new Error('不是目录');
-  } catch {
-    return { ok: false, status: 'invalid_name', error: `原件不可读：${row.dir}` };
-  }
-  try {
-    let r;
-    if (parsed.agent === 'claude') r = await skillLinkClaude(row, parsed.on);
-    else if (parsed.agent === 'codex') r = await skillLinkCodex(row, parsed.on);
-    else if (parsed.agent === 'zcode') r = await skillLinkZcode(row, parsed.on);
-    else r = parsed.on ? await skillLinkWorkBuddyOn(row) : await skillLinkWorkBuddyOff(row.name);
-    if (r.ok === undefined) r.ok = true;
+    const r = await skillLinkColumn(row, parsed.agent, parsed.on);
     return { agent: parsed.agent, name: parsed.name, on: parsed.on, ...r };
   } catch (e) {
     return { ok: false, agent: parsed.agent, name: parsed.name, on: parsed.on, error: e.message };
@@ -3611,88 +3627,119 @@ async function skillImport(parsed) {
   }
 }
 
+// ---------- 批量 v2（issue 23 · docs/16 §3）：行选择与整列接入批量 + 两级卸载 ----------
+// 形状：{names[], agent, on, scope:'rows'|'column'} 或 {names[], action:'uninstall'}。
+// 旧 {dirs[], action:enable|disable} 形状随矩阵 UI 退役（#22 起无调用方）；
+// scope 只区分来源（行选择 / 表头整列），两种作用域机械相同——整列的「影响 N 个」
+// 确认计数由前端按扫描现值先行呈现，服务端按 names 逐行执行。
 function parseSkillBatchRequest(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: '请求体格式错误' };
-  if (!['enable', 'disable', 'uninstall'].includes(body.action)) return { ok: false, error: '未知的批量操作' };
-  if (!Array.isArray(body.dirs) || body.dirs.length === 0) return { ok: false, error: 'dirs 必须是非空数组' };
-  if (body.dirs.some((dir) => typeof dir !== 'string' || !dir.trim() || dir.includes('\0'))) {
-    return { ok: false, error: 'dirs 只能包含非空路径字符串' };
-  }
-  if (body.cwd !== undefined && (typeof body.cwd !== 'string' || !body.cwd.trim() || body.cwd.includes('\0'))) {
-    return { ok: false, error: 'cwd 必须是非空路径字符串' };
+  if (!Array.isArray(body.names) || body.names.length === 0 || body.names.length > 500) {
+    return { ok: false, error: 'names 必须是非空数组' };
   }
   const seen = new Set();
-  const dirs = [];
-  for (const dir of body.dirs) {
-    const normalized = path.resolve(dir);
-    if (seen.has(normalized)) continue;
-    seen.add(normalized);
-    dirs.push(normalized);
+  const names = [];
+  for (const name of body.names) {
+    if (typeof name !== 'string' || !name || name.includes('\0')
+      || /[/\\]/.test(name) || name.startsWith('.') || name.length > 128) {
+      return { ok: false, error: 'names 只能包含不含路径分隔符的 Skill 名称' };
+    }
+    if (seen.has(name)) continue;
+    seen.add(name);
+    names.push(name);
   }
-  return { ok: true, action: body.action, dirs, cwd: body.cwd === undefined ? null : path.resolve(body.cwd) };
+  if (body.action !== undefined) {
+    if (body.action !== 'uninstall') return { ok: false, error: '未知的批量操作' };
+    if (body.agent !== undefined || body.on !== undefined || body.scope !== undefined) {
+      return { ok: false, error: '卸载批量只接受 names' };
+    }
+    return { ok: true, action: 'uninstall', names };
+  }
+  if (!SKILL_LINK_AGENTS.includes(body.agent)) return { ok: false, error: 'agent 必须是 claude/codex/zcode/workbuddy 之一' };
+  if (typeof body.on !== 'boolean') return { ok: false, error: 'on 必须是布尔值' };
+  if (body.scope !== 'rows' && body.scope !== 'column') return { ok: false, error: "scope 必须是 'rows' 或 'column'" };
+  return { ok: true, action: 'link', names, agent: body.agent, on: body.on, scope: body.scope };
 }
 
+// 逐对象独立结果，失败不影响其余对象（names 顺序执行，全部在 queueSkillsWrite 串行边界内）。
 async function skillBatch(parsed) {
-  const extraCwds = parsed.cwd ? [parsed.cwd] : [];
-  const snapshot = await skillsData({ force: true, extraCwds });
-  const byDir = new Map();
-  for (const item of snapshot.items || []) {
-    const normalized = path.resolve(item.dir);
-    if (!byDir.has(normalized)) byDir.set(normalized, item);
-  }
+  const scan = await skillsDataV2({ force: true });
+  const rowsByName = new Map(matrixRowsFromScan(scan).map((row) => [row.name, row]));
 
   const results = [];
   const restartRequired = new Set();
   let changed = false;
-  for (const dir of parsed.dirs) {
-    const item = byDir.get(dir);
-    if (!item) {
-      results.push({ dir, status: 'failed', error: '不在本次扫描的 skills 清单里' });
+  for (const name of parsed.names) {
+    const row = rowsByName.get(name);
+    if (!row) {
+      results.push({ name, status: 'failed', error: '不在已扫描的原件清单里' });
+      continue;
+    }
+    const statError = await statSkillRowDir(row);
+    if (statError) {
+      results.push({ name, status: 'failed', error: statError });
       continue;
     }
 
-    // 快照只负责认定目标身份；每一项执行前仍检查原路径，外部移动/删除后不能凭名称猜测新位置。
-    try { await fsp.lstat(item.dir); }
-    catch {
-      results.push({ dir, status: 'failed', error: '文件不存在' });
-      continue;
-    }
-
-    if (parsed.action !== 'uninstall' && item.residue) {
-      results.push({ dir, status: 'skipped', error: '残留文件不能启停，请直接清理' });
-      continue;
-    }
-
-    if (parsed.action !== 'uninstall') {
-      const enable = parsed.action === 'enable';
-      if (enable === !item.disabled) {
-        results.push({ dir, status: 'noop' });
-        continue;
+    if (parsed.action === 'link') {
+      const r = await skillLinkColumn(row, parsed.agent, parsed.on).catch((e) => ({ ok: false, error: e.message }));
+      if (r.ok) {
+        changed = changed || !r.noop;
+        // noop 不带重启代价：批量混合现状时 toast 只为真正发生的变更提示
+        if (!r.noop && r.restartRequired) restartRequired.add(r.restartRequired);
+        results.push({ name, status: r.noop ? 'noop' : 'success' });
+      } else {
+        results.push({ name, status: 'failed', ...(r.conflict ? { conflict: r.conflict } : { error: r.error || '操作失败' }) });
       }
-      const r = await skillToggleItem(item, enable);
+      continue;
+    }
+
+    // 卸载两级（docs/16 §1）：先取消全部接入，再动原件；任一列没取消干净就停手，
+    // 不给「链指进废纸篓」留缝。外部与仓库原件只取消接入——外部内容绝不删（docs/16 §6），
+    // 仓库内容由 git 管理不在服务端删。
+    let unlinkFailure = null;
+    for (const agent of SKILL_LINK_AGENTS) {
+      if (!((row.agents || {})[agent] || {}).on) continue;
+      const r = await skillLinkColumn(row, agent, false).catch((e) => ({ ok: false, error: e.message }));
       if (r.ok) {
         changed = true;
         if (r.restartRequired) restartRequired.add(r.restartRequired);
-        results.push({ dir, status: r.noop ? 'noop' : 'success' });
-      } else {
-        results.push({ dir, status: 'failed', error: r.error || '操作失败' });
-      }
+      } else if (!unlinkFailure) unlinkFailure = { agent, ...r };
+    }
+    if (unlinkFailure) {
+      // 失败结果带上出事的列：前端占用冲突弹窗要知道在讲哪一列的机制
+      results.push({
+        name, status: 'failed', agent: unlinkFailure.agent,
+        ...(unlinkFailure.conflict
+          ? { conflict: unlinkFailure.conflict, error: `取消接入未完成：${unlinkFailure.error || '目标位置被占用'}` }
+          : { error: `取消接入未完成：${unlinkFailure.error || '操作失败'}` }),
+      });
       continue;
     }
-
-    const r = await skillTrashItem(item);
-    if (r.ok) {
+    if (row.origin !== 'store') {
+      results.push({
+        name, status: 'unlinked',
+        note: row.origin === 'external'
+          ? '外部原件只取消接入，未触碰外部内容'
+          : '仓库家族原件由 git 管理，只取消接入',
+      });
+      continue;
+    }
+    const trashed = await skillTrashItem({ dir: row.dir });
+    if (trashed.ok) {
       changed = true;
-      results.push({ dir, status: 'success' });
+      results.push({ name, status: 'success', note: '原件已移入系统废纸篓，可恢复' });
     } else {
-      results.push({ dir, status: 'failed', error: r.error || '操作失败' });
+      results.push({ name, status: 'failed', error: trashed.error || '卸载失败' });
     }
   }
 
   if (changed) resetSkillsCaches();
-  const summary = { success: 0, noop: 0, skipped: 0, failed: 0, total: results.length };
+  const summary = { success: 0, noop: 0, unlinked: 0, failed: 0, total: results.length };
   for (const result of results) summary[result.status]++;
-  return { ok: true, action: parsed.action, results, summary, restartRequired: [...restartRequired] };
+  const out = { ok: true, action: parsed.action, results, summary, restartRequired: [...restartRequired] };
+  if (parsed.action === 'link') Object.assign(out, { agent: parsed.agent, on: parsed.on, scope: parsed.scope });
+  return out;
 }
 
 // Discovery's network/extraction work stays outside this queue.  Its install
@@ -4225,8 +4272,9 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, await queueSkillsWrite(() => skillTrash(b.dir, b.cwd)));
     }
     if (p === '/api/skills/batch' && req.method === 'POST') {
+      // 批量 v2（docs/16 §3）：行选择/整列接入批量 + 两级卸载；写入走串行队列，逐对象独立结果
       const parsed = parseSkillBatchRequest(await readBody(req));
-      if (!parsed.ok) return sendJSON(res, 400, { ok: false, error: parsed.error });
+      if (!parsed.ok) return sendJSON(res, 400, { ok: false, status: 'invalid_request', error: parsed.error });
       return sendJSON(res, 200, await queueSkillsWrite(() => skillBatch(parsed)));
     }
     if (p === '/api/skills/import' && req.method === 'POST') {

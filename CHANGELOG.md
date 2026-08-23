@@ -12,6 +12,7 @@
 ## [Unreleased]
 
 ### Added
+- **Skills 批量 v2 与两级卸载**：`POST /api/skills/batch` 升级为行模型形状——`{names[], agent, on, scope:'rows'|'column'}` 行选择与整列接入批量，`{names[], action:'uninstall'}` 卸载先取消全部接入、自管原件再进系统废纸篓；外部原件只取消接入绝不删内容，仓库原件由 git 管理同样不动内容。每对象独立结果，失败不影响其余。矩阵 UI 新增「批量」行选择模式（勾选行后按列 接入/取消接入/卸载）与表头图标整列批量（确认弹「影响 N 个」计数）；行级卸载与「取消全部接入」统一改走 batch 端点
 - **Skills 透视新增“已安装 / 发现”双页签与安全安装流程**：显式搜索 skills.sh，最多展示 20 条并保留上游顺序；同查询 10 分钟复用，最近一次成功结果可缓存 24 小时，离线缓存只读且不能发起安装。公开 GitHub 来源会先由 Git 固定到完整 commit，再从 codeload 受限下载到随机临时目录，经归档路径、链接、特殊文件、容量/数量、名称、权限、脚本、二进制资源、工具、依赖和许可证检查后确认安装。支持 Claude、Codex、Agents、WorkBuddy 四个受控目标、应用级默认目标、来源身份记录、同源更新、本地修改保护、异源/未知冲突、串行原子换位、废纸篓恢复和失败回滚；外部内容不会被执行，也不会自动安装依赖或交给 Agent 分析
 - **Skills Discovery 隐私与平台边界写入 README**：列明 skills.sh、GitHub Git 与 GitHub codeload 分别收到的数据；不新增产品遥测或搜索历史。首版仅 macOS 可安装，Windows/Linux 仍可发现和打开来源；不支持私有仓库、非 GitHub/任意 URL、项目级目标、自动或后台更新、自动依赖安装及第三方审计/安全认证
 - **一键启动新增 Codex 桌面应用**：在 Codex CLI 之外增加独立的「Codex 桌面应用」可选入口，放在 agent 列表最后并复用官方图标；自动检测 Mac 是否已安装，点击通过 `open -a Codex` 拉起 App

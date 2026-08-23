@@ -50,7 +50,7 @@ test('Rows render origin badge, four icons, hits, health and mtime', () => {
   assert.match(view, /<div class="sk-hits \$\{it\.hits \? '' : 'zero'\}">\$\{it\.hits \|\| '· 0 ·'\}<\/div>/);
   assert.match(view, /<div class="sk-health \$\{shown \? shown\.level : ''\}"/);
   assert.match(view, /<div class="sk-last">\$\{this\.ago\(it\.mtime\)\}<\/div>/);
-  assert.match(view, /class="sk-row \$\{stock \? 'stock' : ''\} \$\{this\.open\.has\(it\.dir\) \? 'expanded' : ''\}"/);
+  assert.match(view, /class="sk-row \$\{stock \? 'stock' : ''\} \$\{this\.open\.has\(it\.dir\) \? 'expanded' : ''\}\$\{sel \? ' selected' : ''\}\$\{this\.batchMode \? ' picking' : ''\}"/);
   assert.match(view, /<i class="sk-offtag">未接入<\/i>/);
 });
 
@@ -126,8 +126,9 @@ test('Row drawer exposes origin, per-column mechanism details, WB refresh, revea
 test('Uninstall keeps two-level semantics: store originals trash, external ones only unlink', () => {
   const { view } = skillsViewSource();
   assert.match(view, /async uninstallRow\(it\) \{\s*if \(this\.busy \|\| this\.refreshing\) return;\s*if \(it\.origin !== 'store'\) \{ await this\.unlinkAll\(it\); return; \}/);
-  assert.match(view, /async unlinkAll\(it\) \{[\s\S]{0,700}apiPost\('\/api\/skills\/link',\s*\{\s*name: it\.name, agent: c\.id, on: false \}\)/);
-  assert.match(view, /已取消 \$\{it\.name\} 的全部接入（原件不动）/);
+  assert.match(view, /async unlinkAll\(it\) \{[\s\S]{0,400}await this\.runUninstall\(\[it\.name\]\);/);
+  assert.match(view, /async runUninstall\(names\) \{[\s\S]{0,400}await this\.postBatch\(\{ names, action: 'uninstall' \},/);
+  assert.match(view, /else if \(first\.status === 'unlinked'\) toast\(`\$\{first\.name\}：\$\{first\.note \|\| '只取消接入（原件不动）'\}`\)/);
   assert.match(view, /卸载「\$\{it\.name\}」？先取消全部接入，再把原件移到系统废纸篓，可恢复。/);
 });
 
