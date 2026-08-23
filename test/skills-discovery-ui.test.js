@@ -73,14 +73,27 @@ test('Discovery actions use accessible icon buttons instead of visible text labe
   assert.match(js, /sk-disc-spinner/);
 });
 
-test('Installation confirmation supports four controlled targets without risk acknowledgement gate', () => {
+test('Installation confirmation supports multi-select Agents and pure stock without risk acknowledgement gate', () => {
   const js = source();
-  for (const target of ['claude', 'codex', 'agents', 'workbuddy']) assert.match(js, new RegExp(target));
+  for (const target of ['claude', 'codex', 'zcode', 'workbuddy']) assert.match(js, new RegExp(target));
+  assert.match(js, /defaultTargetAgents:\s*\['claude',\s*'codex',\s*'zcode',\s*'workbuddy'\]/);
+  assert.match(js, /type="checkbox" name="discovery-target"/);
+  assert.match(js, /agents[,}]/);
+  assert.doesNotMatch(js, /type="radio" name="discovery-target"/);
+  assert.doesNotMatch(js, /targetAgent:\s*target/);
+  assert.match(js, /不选则仅存入原件仓/);
   assert.doesNotMatch(js, /sk-disc-ack|name="acknowledge"|acknowledge,/);
   assert.doesNotMatch(js, /请先展开并确认风险明细/);
   assert.match(js, /\/api\/skills\/discovery\/install/);
   assert.match(js, /完整文件|文件清单/);
   assert.match(js, /binaryResources\)\s*\?\s*i\.binaryResources\s*:\s*\(Array\.isArray\(i\.binaries\)/);
+});
+
+test('Discovery success switches to Installed and expands the new original row', () => {
+  const js = source();
+  assert.match(js, /this\.activeTab\s*=\s*'installed'/);
+  assert.match(js, /this\.open\.add\(targetDir\)/);
+  assert.match(js, /await this\.reload\(\)/);
 });
 
 test('Discovery detail prioritizes the install decision and moves technical data into a drawer', () => {

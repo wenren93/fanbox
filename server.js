@@ -3244,6 +3244,47 @@ async function skillLink(parsed) {
   }
 }
 
+// 发现页安装与矩阵图标共用 skillLink；这里仅负责把多选转换为四列目标状态，
+// 并在任一列失败时恢复本次已改列，避免安装留下半套接入。
+async function setSkillConnections(name, selectedAgents) {
+  const scan = await skillsDataV2({ force: true });
+  const row = matrixRowsFromScan(scan).find((item) => item.name === name);
+  if (!row) return { ok: false, status: 'invalid_name', error: '新原件未出现在已扫描清单里' };
+  const previous = Object.fromEntries(SKILL_LINK_AGENTS.map((agent) => [agent, !!row.agents[agent].on]));
+  const desired = new Set(selectedAgents);
+  const changed = [];
+  const results = [];
+  for (const agent of SKILL_LINK_AGENTS) {
+    const on = desired.has(agent);
+    if (previous[agent] === on) continue;
+    const result = await skillLink({ ok: true, name, agent, on });
+    results.push(result);
+    if (!result.ok) {
+      const rollbackErrors = [];
+      for (const changedAgent of changed.reverse()) {
+        const restored = await skillLink({ ok: true, name, agent: changedAgent, on: previous[changedAgent] });
+        if (!restored.ok) rollbackErrors.push(`${changedAgent}: ${restored.error || '恢复失败'}`);
+      }
+      return {
+        ok: false,
+        status: rollbackErrors.length ? 'connection_rollback_failed' : 'connection_failed',
+        error: rollbackErrors.length
+          ? `${result.error || '接入失败'}；恢复也未完整完成：${rollbackErrors.join('；')}`
+          : result.error || '接入失败',
+        agent,
+        conflict: result.conflict,
+      };
+    }
+    changed.push(agent);
+  }
+  return { ok: true, previous, results };
+}
+
+async function restoreSkillConnections(name, previous) {
+  const selected = SKILL_LINK_AGENTS.filter((agent) => previous && previous[agent]);
+  return setSkillConnections(name, selected);
+}
+
 function parseSkillImportRequest(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: '请求体格式错误' };
   if (typeof body.sourceDir !== 'string' || !body.sourceDir.trim() || body.sourceDir.includes('\0')) {
@@ -4149,10 +4190,14 @@ skillDiscovery = createSkillDiscovery({
   configDir: CONFIG_DIR,
   platform: PLATFORM,
   targets: SKILL_IMPORT_TARGETS,
+  supportedAgents: SKILL_LINK_AGENTS,
+  storeRoot: AGENTS_SKILLS,
   queueWrite: queueSkillsWrite,
   trash: trashImportedSkill,
   fingerprint: skillTreeFingerprint,
-  refreshSkills: () => skillsData({ force: true }),
+  refreshSkills: () => skillsDataV2({ force: true }),
+  applyConnections: setSkillConnections,
+  restoreConnections: restoreSkillConnections,
   readConfig,
   updateConfig,
 });
@@ -4632,8 +4677,10 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/skills/discovery/install' && req.method === 'POST') {
       const body = await readBody(req);
       if (!body || typeof body.inspectionId !== 'string' || !/^[a-f0-9]{48}$/.test(body.inspectionId)
-        || typeof body.targetAgent !== 'string' || !Object.prototype.hasOwnProperty.call(SKILL_IMPORT_TARGETS, body.targetAgent)) {
-        return sendJSON(res, 400, { ok: false, status: 'invalid_request', error: '检查凭据或目标 Agent 无效' });
+        || body.targetAgent !== undefined
+        || (body.agents !== undefined && (!Array.isArray(body.agents)
+          || body.agents.some((agent) => !SKILL_LINK_AGENTS.includes(agent))))) {
+        return sendJSON(res, 400, { ok: false, status: 'invalid_request', error: '检查凭据或接入对象无效' });
       }
       return sendJSON(res, 200, await skillDiscovery.install(body));
     }

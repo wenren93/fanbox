@@ -5088,7 +5088,8 @@ const skillsView = {
   discovery: {
     input: '', query: '', results: [], status: 'idle', error: '', cached: false,
     cacheAgeMs: 0, installable: true, searching: false, inspecting: false,
-    inspectingEntryId: null, selectedEntryId: null, inspection: null, installError: '', defaultTargetAgent: 'codex', settingsLoaded: false,
+    inspectingEntryId: null, selectedEntryId: null, inspection: null, installError: '',
+    defaultTargetAgents: ['claude', 'codex', 'zcode', 'workbuddy'], selectedTargetAgents: null, settingsLoaded: false,
     installationPrerequisite: { ok: true },
   },
   async show() {
@@ -5464,8 +5465,11 @@ const skillsView = {
     this.discovery.settingsLoaded = true;
     try {
       const r = await api('/api/skills/discovery/settings');
-      const target = r && (r.defaultTargetAgent || (r.settings && r.settings.defaultTargetAgent));
-      if (['claude', 'codex', 'agents', 'workbuddy'].includes(target)) this.discovery.defaultTargetAgent = target;
+      const targets = r && (r.defaultTargetAgents || (r.settings && r.settings.defaultTargetAgents));
+      if (Array.isArray(targets)) {
+        this.discovery.defaultTargetAgents = ['claude', 'codex', 'zcode', 'workbuddy'].filter((agent) => targets.includes(agent));
+        if (!this.discovery.inspection) this.discovery.selectedTargetAgents = null;
+      }
       if (r && r.installationPrerequisite) this.discovery.installationPrerequisite = r.installationPrerequisite;
       if (state.skillsMode && this.activeTab === 'discovery') this.render();
     } catch { /* 默认目标是便利设置，读取失败不影响发现或安装 */ }
@@ -5550,6 +5554,7 @@ const skillsView = {
         d.inspection = r && r.inspection ? r.inspection : null;
       } else {
         d.inspection = r.inspection;
+        d.selectedTargetAgents = [...d.defaultTargetAgents];
         d.installError = '';
       }
     } catch (err) { d.installError = err.message || '检查失败，请稍后重试'; }
@@ -5573,19 +5578,20 @@ const skillsView = {
     const d = this.discovery, i = d.inspection;
     if (!i || d.inspecting) return;
     const area = $('#file-area');
-    const target = (area.querySelector('[name=discovery-target]:checked') || {}).value || d.defaultTargetAgent;
+    const agents = [...area.querySelectorAll('[name=discovery-target]:checked')].map((input) => input.value);
+    d.selectedTargetAgents = agents;
     const overwrite = Boolean(area.querySelector('#sk-disc-overwrite') && area.querySelector('#sk-disc-overwrite').checked);
     if (this.conflictNeedsOverwrite(i) && !overwrite) { toast('请明确确认替换现有安装项', true); return; }
     const remember = Boolean(area.querySelector('#sk-disc-remember') && area.querySelector('#sk-disc-remember').checked);
     d.inspecting = true; d.installError = ''; this.render();
     try {
       if (remember) {
-        const sr = await apiPost('/api/skills/discovery/settings', { defaultTargetAgent: target });
-        if (!sr || sr.ok !== false) d.defaultTargetAgent = target;
+        const sr = await apiPost('/api/skills/discovery/settings', { defaultTargetAgents: agents });
+        if (!sr || sr.ok !== false) d.defaultTargetAgents = [...agents];
       }
       const expected = i.expected || {};
       const r = await apiPost('/api/skills/discovery/install', {
-        inspectionId: i.id, targetAgent: target, overwrite,
+        inspectionId: i.id, agents, overwrite,
         expectedTargetHash: expected.targetHash || i.expectedTargetHash,
         expectedSourceHash: expected.sourceHash || i.contentHash,
       });
@@ -5621,7 +5627,7 @@ const skillsView = {
       const found = targetDir && (this.data.items || []).find((x) => x.dir === targetDir);
       if (found) this.open.add(found.dir);
       this.render();
-      toast(r.restartGuidance || r.message || `安装完成；新会话可发现${target === 'codex' ? '，Codex 可能需要重启' : ''}`);
+      toast(r.restartGuidance || r.message || '原件已安装；所选 Agent 的新会话可发现');
     } catch (err) { d.installError = err.message || '安装失败，请重试'; }
     finally {
       d.inspecting = false;
@@ -5686,7 +5692,9 @@ const skillsView = {
   discoveryInspectionHtml(i) {
     const list = this.inspectionLists(i);
     const source = i.sourceUrl || i.repository;
-    const targetLabels = { claude: 'Claude', codex: 'Codex', agents: 'Agents', workbuddy: 'WorkBuddy' };
+    const targetLabels = { claude: 'Claude', codex: 'Codex', zcode: 'ZCode', workbuddy: 'WorkBuddy' };
+    const selectedTargets = Array.isArray(this.discovery.selectedTargetAgents)
+      ? this.discovery.selectedTargetAgents : this.discovery.defaultTargetAgents;
     const enhanced = Boolean(i.enhancedConfirmation);
     const conflict = i.conflict || null;
     const overwrite = this.conflictNeedsOverwrite(i);
@@ -5711,7 +5719,7 @@ const skillsView = {
       ${conflict ? `<div class="sk-disc-conflict"><b>${escapeHtml(conflict.title || (blocked ? '同名异源冲突' : '目标安装项需要明确处置'))}</b><span>${escapeHtml(conflict.message || conflict.reason || '现有安装项不会被静默覆盖。')}</span>${conflict.dir ? `<code>${escapeHtml(tilde(conflict.dir))}</code>` : ''}</div>` : ''}
       ${overwrite ? `<label class="sk-disc-confirm-check danger"><input type="checkbox" id="sk-disc-overwrite"><span>我确认替换现有安装项；旧内容将移入系统废纸篓，可恢复。</span></label>` : ''}
       <div class="sk-disc-decision-bar">
-        <fieldset class="sk-disc-targets sk-disc-segments"><legend>安装到</legend><div>${Object.entries(targetLabels).map(([id, label]) => `<label><input type="radio" name="discovery-target" value="${id}" ${this.discovery.defaultTargetAgent === id ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div></fieldset>
+        <fieldset class="sk-disc-targets sk-disc-segments"><legend>接入到 · 不选则仅存入原件仓</legend><div>${Object.entries(targetLabels).map(([id, label]) => `<label><input type="checkbox" name="discovery-target" value="${id}" ${selectedTargets.includes(id) ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div></fieldset>
         <div class="sk-disc-confirm-actions"><button class="ghost-btn sk-disc-tech-btn" data-disc-act="open-details" aria-expanded="false">技术详情</button><button class="ghost-btn sk-disc-icon-btn" data-disc-act="source-inspection" data-source="${escapeHtml(source || '')}" aria-label="打开来源" title="打开来源">${ic('link', 'currentColor', 16)}</button><button class="primary sk-disc-icon-btn" data-disc-act="install" aria-label="${escapeHtml(installLabel)}" title="${escapeHtml(installLabel)}" ${blocked || this.discovery.inspecting ? 'disabled' : ''}>${this.discovery.inspecting ? `<span class="sk-disc-spinner">${ic('clock', 'currentColor', 16)}</span>` : ic('box', 'currentColor', 16)}</button></div>
       </div>
       <aside class="sk-disc-tech-drawer" aria-hidden="true" aria-labelledby="sk-disc-tech-title">
@@ -5720,7 +5728,7 @@ const skillsView = {
         <section><h4>本机检查</h4><dl><dt>脚本</dt><dd>${list.scripts.length}</dd><dt>二进制资源</dt><dd>${list.binaries.length}</dd><dt>工具声明</dt><dd>${list.tools.length}</dd><dt>外部依赖</dt><dd>${list.dependencies.length}</dd><dt>许可证</dt><dd>${escapeHtml(i.license || '许可证未知')}</dd></dl></section>
         ${this.discoveryDetailGroup('风险', list.risks)}${this.discoveryDetailGroup('脚本 / 可执行文件', list.scripts)}${this.discoveryDetailGroup('二进制资源', list.binaries)}${this.discoveryDetailGroup('工具声明', list.tools)}${this.discoveryDetailGroup('外部依赖', list.dependencies)}
         <div class="sk-disc-file-list"><b>完整文件清单</b>${list.paths.length ? `<ul>${list.paths.map((p) => `<li><code>${escapeHtml(p)}</code></li>`).join('')}</ul>` : '<span>没有其他文件</span>'}</div>
-        <label class="sk-disc-remember"><input type="checkbox" id="sk-disc-remember"><span>记住为以后安装的默认目标</span></label>
+        <label class="sk-disc-remember"><input type="checkbox" id="sk-disc-remember"><span>记住为以后安装的默认接入对象</span></label>
       </aside>
     </section>`;
   },
@@ -5771,6 +5779,11 @@ const skillsView = {
     if (openDetails) openDetails.onclick = () => setDetailsOpen(true);
     if (closeDetails) closeDetails.onclick = () => setDetailsOpen(false);
     if (drawer) drawer.onkeydown = (e) => { if (e.key === 'Escape') setDetailsOpen(false); };
+    area.querySelectorAll('[name=discovery-target]').forEach((input) => {
+      input.onchange = () => {
+        this.discovery.selectedTargetAgents = [...area.querySelectorAll('[name=discovery-target]:checked')].map((item) => item.value);
+      };
+    });
     const install = area.querySelector('[data-disc-act=install]');
     if (install) install.onclick = () => this.installDiscovery();
   },

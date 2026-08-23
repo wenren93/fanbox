@@ -241,7 +241,7 @@ function makeTar(entries) {
   return zlib.gzipSync(Buffer.concat(blocks));
 }
 
-test('Inspection pins a full SHA, reports deterministic risks, then installs to every controlled target with source identity', async (t) => {
+test('Inspection pins a full SHA, then installs one original and connects all selected Agents', async (t) => {
   if (process.platform !== 'darwin') return t.skip('external installation is macOS-only');
   const fixture = await makeFixtureRepository(t);
   const { request, home } = await startServer(t, {
@@ -249,28 +249,43 @@ test('Inspection pins a full SHA, reports deterministic risks, then installs to 
     FANBOX_TEST_DISCOVERY_ARCHIVE: fixture.archive,
   });
   const entry = { id: 'owner/repo/fixture-skill', name: 'fixture-skill', skillId: 'fixture-skill', source: 'owner/repo', installs: 1 };
-  for (const targetAgent of ['claude', 'codex', 'agents', 'workbuddy']) {
-    const inspected = await request('/api/skills/discovery/inspect', { entry });
-    assert.equal(inspected.body.ok, true, JSON.stringify(inspected.body));
-    assert.match(inspected.body.inspection.commit, /^[a-f0-9]{40}$/);
-    assert.equal(inspected.body.inspection.name, 'fixture-skill');
-    assert.equal(inspected.body.inspection.description, 'Fixed fixture with a folded YAML description');
-    assert.equal(inspected.body.inspection.enhancedConfirmation, true);
-    assert.ok(inspected.body.inspection.files.some((f) => f.path === 'run.sh'));
-    assert.deepEqual(inspected.body.inspection.binaries, ['references/asset.bin']);
-    assert.deepEqual(inspected.body.inspection.dependencies, ['references/package.json', 'local-runtime >= 1']);
-    const installed = await request('/api/skills/discovery/install', { inspectionId: inspected.body.inspection.id, targetAgent });
-    assert.equal(installed.body.ok, true, JSON.stringify(installed.body));
-    const root = { claude: '.claude', codex: '.codex', agents: '.agents', workbuddy: '.workbuddy' }[targetAgent];
-    const target = path.join(home, root, 'skills', 'fixture-skill');
-    assert.equal(await fs.readFile(path.join(target, 'references', 'note.txt'), 'utf8'), 'hello');
-    assert.deepEqual(await fs.readFile(path.join(target, 'references', 'asset.bin')), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]));
-    assert.equal((await fs.stat(path.join(target, 'run.sh'))).mode & 0o777, 0o755);
-    assert.equal((await fs.stat(path.join(target, 'SKILL.md'))).mode & 0o777, 0o644);
-  }
+  const inspected = await request('/api/skills/discovery/inspect', { entry });
+  assert.equal(inspected.body.ok, true, JSON.stringify(inspected.body));
+  assert.match(inspected.body.inspection.commit, /^[a-f0-9]{40}$/);
+  assert.equal(inspected.body.inspection.name, 'fixture-skill');
+  assert.equal(inspected.body.inspection.description, 'Fixed fixture with a folded YAML description');
+  assert.deepEqual(inspected.body.inspection.targets, [
+    { id: 'claude', label: 'Claude' },
+    { id: 'codex', label: 'Codex' },
+    { id: 'zcode', label: 'ZCode' },
+    { id: 'workbuddy', label: 'WorkBuddy' },
+  ]);
+  assert.equal(inspected.body.inspection.enhancedConfirmation, true);
+  assert.ok(inspected.body.inspection.files.some((f) => f.path === 'run.sh'));
+  assert.deepEqual(inspected.body.inspection.binaries, ['references/asset.bin']);
+  assert.deepEqual(inspected.body.inspection.dependencies, ['references/package.json', 'local-runtime >= 1']);
+  const installed = await request('/api/skills/discovery/install', {
+    inspectionId: inspected.body.inspection.id,
+    agents: ['claude', 'codex', 'zcode', 'workbuddy'],
+  });
+  assert.equal(installed.body.ok, true, JSON.stringify(installed.body));
+  const target = path.join(home, '.agents', 'skills', 'fixture-skill');
+  assert.equal(installed.body.targetDir, await fs.realpath(target));
+  assert.equal(await fs.readFile(path.join(target, 'references', 'note.txt'), 'utf8'), 'hello');
+  assert.deepEqual(await fs.readFile(path.join(target, 'references', 'asset.bin')), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]));
+  assert.equal((await fs.stat(path.join(target, 'run.sh'))).mode & 0o777, 0o755);
+  assert.equal((await fs.stat(path.join(target, 'SKILL.md'))).mode & 0o777, 0o644);
+  assert.equal((await fs.lstat(path.join(home, '.claude', 'skills', 'fixture-skill'))).isSymbolicLink(), true);
+  assert.equal(await fs.readFile(path.join(home, '.workbuddy', 'skills', 'fixture-skill', 'references', 'note.txt'), 'utf8'), 'hello');
+  const refreshed = await request('/api/skills/refresh', { v: 2 });
+  const row = refreshed.body.items.find((item) => item.name === 'fixture-skill');
+  assert.equal(installed.body.targetDir, row.dir, 'success points at the row the Installed view can expand');
+  assert.deepEqual(Object.fromEntries(Object.entries(row.agents).map(([agent, state]) => [agent, state.on])), {
+    claude: true, codex: true, zcode: true, workbuddy: true,
+  });
   const records = JSON.parse(await fs.readFile(path.join(home, '.fanbox', 'skill-sources.json'), 'utf8'));
   const installations = records.installations || records;
-  assert.equal(Object.keys(installations).length, 4);
+  assert.equal(Object.keys(installations).length, 1);
   for (const record of Object.values(installations)) {
     assert.equal(record.repository, 'github.com/owner/repo');
     assert.equal(record.skillPath, 'skills/fixture-skill');
@@ -280,9 +295,86 @@ test('Inspection pins a full SHA, reports deterministic risks, then installs to 
   const reinspected = await request('/api/skills/discovery/inspect', { entry });
   assert.equal(reinspected.body.inspection.actionLabel, '重新安装');
   const identical = await request('/api/skills/discovery/install', {
-    inspectionId: reinspected.body.inspection.id, targetAgent: 'codex', acknowledge: true,
+    inspectionId: reinspected.body.inspection.id,
+    agents: ['claude', 'codex', 'zcode', 'workbuddy'],
   });
-  assert.equal(identical.body.status, 'identical');
+  assert.equal(identical.body.status, 'identical', JSON.stringify(identical.body));
+});
+
+test('Discovery install connects only the selected Agent subset', async (t) => {
+  if (process.platform !== 'darwin') return t.skip('external installation is macOS-only');
+  const fixture = await makeFixtureRepository(t);
+  const { request, home } = await startServer(t, {
+    FANBOX_TEST_DISCOVERY_GIT_REPO: fixture.dir,
+    FANBOX_TEST_DISCOVERY_ARCHIVE: fixture.archive,
+  });
+  const inspected = await request('/api/skills/discovery/inspect', {
+    entry: { id: 'owner/repo/fixture-skill', name: 'fixture-skill', skillId: 'fixture-skill', source: 'owner/repo', installs: 1 },
+  });
+  const installed = await request('/api/skills/discovery/install', {
+    inspectionId: inspected.body.inspection.id,
+    agents: ['workbuddy', 'claude'],
+  });
+  assert.equal(installed.body.ok, true, JSON.stringify(installed.body));
+  assert.deepEqual(installed.body.agents, ['claude', 'workbuddy']);
+  const refreshed = await request('/api/skills/refresh', { v: 2 });
+  const row = refreshed.body.items.find((item) => item.name === 'fixture-skill');
+  assert.deepEqual(Object.fromEntries(Object.entries(row.agents).map(([agent, state]) => [agent, state.on])), {
+    claude: true, codex: false, zcode: false, workbuddy: true,
+  });
+  assert.match(await fs.readFile(path.join(home, '.codex', 'config.toml'), 'utf8'), /enabled\s*=\s*false/);
+  const zcode = JSON.parse(await fs.readFile(path.join(home, '.zcode', 'cli', 'config.json'), 'utf8'));
+  assert.deepEqual(zcode.skills[path.join(home, '.agents', 'skills', 'fixture-skill')], { enable: false });
+});
+
+test('Discovery install accepts an empty Agent selection as pure stock', async (t) => {
+  if (process.platform !== 'darwin') return t.skip('external installation is macOS-only');
+  const fixture = await makeFixtureRepository(t);
+  const { request, home } = await startServer(t, {
+    FANBOX_TEST_DISCOVERY_GIT_REPO: fixture.dir,
+    FANBOX_TEST_DISCOVERY_ARCHIVE: fixture.archive,
+  });
+  const inspected = await request('/api/skills/discovery/inspect', {
+    entry: { id: 'owner/repo/fixture-skill', name: 'fixture-skill', skillId: 'fixture-skill', source: 'owner/repo', installs: 1 },
+  });
+  const installed = await request('/api/skills/discovery/install', {
+    inspectionId: inspected.body.inspection.id,
+    agents: [],
+  });
+  assert.equal(installed.body.ok, true, JSON.stringify(installed.body));
+  assert.deepEqual(installed.body.agents, []);
+  assert.match(installed.body.message, /纯库存/);
+  assert.equal(await fs.readFile(path.join(home, '.agents', 'skills', 'fixture-skill', 'references', 'note.txt'), 'utf8'), 'hello');
+  await assert.rejects(fs.lstat(path.join(home, '.claude', 'skills', 'fixture-skill')), { code: 'ENOENT' });
+  await assert.rejects(fs.lstat(path.join(home, '.workbuddy', 'skills', 'fixture-skill')), { code: 'ENOENT' });
+  const refreshed = await request('/api/skills/refresh', { v: 2 });
+  const row = refreshed.body.items.find((item) => item.name === 'fixture-skill');
+  assert.deepEqual(Object.fromEntries(Object.entries(row.agents).map(([agent, state]) => [agent, state.on])), {
+    claude: false, codex: false, zcode: false, workbuddy: false,
+  });
+});
+
+test('Discovery install rolls back the original when a selected Agent connection is occupied', async (t) => {
+  if (process.platform !== 'darwin') return t.skip('external installation is macOS-only');
+  const fixture = await makeFixtureRepository(t);
+  const { request, home } = await startServer(t, {
+    FANBOX_TEST_DISCOVERY_GIT_REPO: fixture.dir,
+    FANBOX_TEST_DISCOVERY_ARCHIVE: fixture.archive,
+  });
+  const occupied = path.join(home, '.claude', 'skills', 'fixture-skill');
+  await fs.mkdir(occupied, { recursive: true });
+  await fs.writeFile(path.join(occupied, 'SKILL.md'), '---\nname: fixture-skill\ndescription: foreign copy\n---\n');
+  const inspected = await request('/api/skills/discovery/inspect', {
+    entry: { id: 'owner/repo/fixture-skill', name: 'fixture-skill', skillId: 'fixture-skill', source: 'owner/repo', installs: 1 },
+  });
+  const result = await request('/api/skills/discovery/install', {
+    inspectionId: inspected.body.inspection.id,
+    agents: ['claude', 'codex', 'zcode', 'workbuddy'],
+  });
+  assert.equal(result.body.status, 'connection_failed', JSON.stringify(result.body));
+  assert.deepEqual(result.body.conflict, { kind: 'occupied', path: occupied });
+  assert.match(await fs.readFile(path.join(occupied, 'SKILL.md'), 'utf8'), /foreign copy/);
+  await assert.rejects(fs.lstat(path.join(home, '.agents', 'skills', 'fixture-skill')), { code: 'ENOENT' });
 });
 
 test('Inspection blocks unsupported source and invalid controlled target input', async (t) => {
@@ -290,7 +382,9 @@ test('Inspection blocks unsupported source and invalid controlled target input',
   const unsupported = await request('/api/skills/discovery/inspect', { entry: { id: 'elsewhere/x', name: 'x', skillId: 'x', source: 'https://example.com/x', installs: 1 } });
   assert.equal(unsupported.body.ok, false);
   assert.equal(unsupported.body.status, 'unsupported_source');
-  const invalidTarget = await request('/api/skills/discovery/install', { inspectionId: 'not-a-token', targetAgent: '/tmp/custom' });
+  const invalidTarget = await request('/api/skills/discovery/install', {
+    inspectionId: '0'.repeat(48), targetAgent: '/tmp/custom',
+  });
   assert.equal(invalidTarget.status, 400);
 });
 
@@ -305,6 +399,7 @@ test('Discovery settings expose missing installation prerequisites without disab
   });
   const settings = await request('/api/skills/discovery/settings');
   assert.equal(settings.body.ok, true);
+  assert.deepEqual(settings.body.defaultTargetAgents, ['claude', 'codex', 'zcode', 'workbuddy']);
   assert.equal(settings.body.installationPrerequisite.ok, false);
   // 预检按平台短路：非 macOS 先报不支持平台，缺 Git 只在 macOS 上才轮得到
   assert.equal(settings.body.installationPrerequisite.status,
@@ -312,9 +407,17 @@ test('Discovery settings expose missing installation prerequisites without disab
   const searched = await request('/api/skills/discovery/search', { query: 'fixture' });
   assert.equal(searched.body.ok, true);
   assert.equal(searched.body.results.length, 1);
-  assert.equal((await request('/api/skills/discovery/settings', { defaultTargetAgent: 'workbuddy' })).body.ok, true);
+  assert.equal((await request('/api/skills/discovery/settings', {
+    defaultTargetAgents: ['workbuddy', 'claude'],
+  })).body.ok, true);
   const remembered = await request('/api/skills/discovery/settings');
-  assert.equal(remembered.body.defaultTargetAgent, 'workbuddy');
+  assert.deepEqual(remembered.body.defaultTargetAgents, ['claude', 'workbuddy']);
+  assert.equal((await request('/api/skills/discovery/settings', {
+    defaultTargetAgents: [],
+  })).body.ok, true, 'pure-stock default is a valid selection');
+  assert.equal((await request('/api/skills/discovery/settings', {
+    defaultTargetAgents: ['codex', '/tmp/custom'],
+  })).body.status, 'invalid_request');
 });
 
 test('Archive inspection rejects links and leaves controlled targets untouched', async (t) => {
@@ -335,7 +438,7 @@ test('Archive inspection rejects links and leaves controlled targets untouched',
   const inspected = await request('/api/skills/discovery/inspect', { entry: { id: 'owner/repo/unsafe-skill', name: 'unsafe-skill', skillId: 'unsafe-skill', source: 'owner/repo', installs: 1 } });
   assert.equal(inspected.body.ok, false);
   assert.match(inspected.body.status, /blocked|unsafe/);
-  await assert.rejects(fs.stat(path.join(home, '.codex', 'skills', 'unsafe-skill')), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(home, '.agents', 'skills', 'unsafe-skill')), { code: 'ENOENT' });
 });
 
 test('Archive inspection blocks unsafe names, hard links, special files, and special permission bits', async (t) => {
@@ -365,7 +468,7 @@ test('Archive inspection blocks unsafe names, hard links, special files, and spe
       assert.equal(inspected.body.ok, false, JSON.stringify(inspected.body));
       assert.equal(inspected.body.status, 'unsafe_content');
       assert.match(inspected.body.error, unsafe.error);
-      await assert.rejects(fs.stat(path.join(home, '.codex', 'skills', 'archive-safety-skill')), { code: 'ENOENT' });
+      await assert.rejects(fs.stat(path.join(home, '.agents', 'skills', 'archive-safety-skill')), { code: 'ENOENT' });
     });
   }
 });
@@ -387,7 +490,7 @@ test('Archive inspection rejects a compressed stream above 10 MiB before extract
   assert.equal(inspected.body.ok, false);
   assert.equal(inspected.body.status, 'unsafe_content');
   assert.match(inspected.body.error, /归档超过 10 MiB/);
-  await assert.rejects(fs.stat(path.join(home, '.codex', 'skills', 'compressed-limit-skill')), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(home, '.agents', 'skills', 'compressed-limit-skill')), { code: 'ENOENT' });
 });
 
 test('Archive inspection enforces per-file, expanded-size, and file-count limits', async (t) => {
@@ -418,7 +521,7 @@ test('Archive inspection enforces per-file, expanded-size, and file-count limits
     assert.equal(inspected.body.ok, false, JSON.stringify(inspected.body));
     assert.equal(inspected.body.status, 'unsafe_content');
     assert.match(inspected.body.error, expected[index]);
-    await assert.rejects(fs.stat(path.join(home, '.codex', 'skills', fixture.name)), { code: 'ENOENT' });
+    await assert.rejects(fs.stat(path.join(home, '.agents', 'skills', fixture.name)), { code: 'ENOENT' });
   }
 });
 
@@ -448,7 +551,7 @@ test('Inspection validates the entire executable file as UTF-8 before treating i
   assert.equal(inspected.body.ok, false);
   assert.equal(inspected.body.status, 'unsafe_content');
   assert.match(inspected.body.error, /未知可执行二进制/);
-  await assert.rejects(fs.stat(path.join(home, '.codex', 'skills', 'late-binary-skill')), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(home, '.agents', 'skills', 'late-binary-skill')), { code: 'ENOENT' });
 });
 
 test('Inspection rejects a SKILL.md that is not valid UTF-8', async (t) => {
@@ -472,7 +575,7 @@ test('Inspection rejects a SKILL.md that is not valid UTF-8', async (t) => {
   });
   assert.equal(inspected.body.ok, false);
   assert.equal(inspected.body.status, 'no_matching_candidate');
-  await assert.rejects(fs.stat(path.join(home, '.codex', 'skills', 'invalid-utf8-skill')), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(home, '.agents', 'skills', 'invalid-utf8-skill')), { code: 'ENOENT' });
 });
 
 test('Unknown existing target requires explicit replacement and uninstall removes its source record', async (t) => {
@@ -485,16 +588,16 @@ test('Unknown existing target requires explicit replacement and uninstall remove
     FANBOX_TEST_DISCOVERY_ARCHIVE: fixture.archive,
     FANBOX_TEST_SKILL_TRASH: trash,
   });
-  const target = path.join(home, '.codex', 'skills', 'fixture-skill');
+  const target = path.join(home, '.agents', 'skills', 'fixture-skill');
   await fs.mkdir(target, { recursive: true });
   await fs.writeFile(path.join(target, 'SKILL.md'), '---\nname: fixture-skill\ndescription: local fixture\n---\n');
   const entry = { id: 'owner/repo/fixture-skill', name: 'fixture-skill', skillId: 'fixture-skill', source: 'owner/repo', installs: 1 };
   const inspected = await request('/api/skills/discovery/inspect', { entry });
   assert.equal(inspected.body.ok, true);
-  const first = await request('/api/skills/discovery/install', { inspectionId: inspected.body.inspection.id, targetAgent: 'codex', acknowledge: true });
+  const first = await request('/api/skills/discovery/install', { inspectionId: inspected.body.inspection.id, agents: ['codex'] });
   assert.equal(first.body.status, 'unknown_conflict');
   const replaced = await request('/api/skills/discovery/install', {
-    inspectionId: inspected.body.inspection.id, targetAgent: 'codex', acknowledge: true,
+    inspectionId: inspected.body.inspection.id, agents: ['codex'],
     overwrite: true,
     expectedTargetHash: first.body.expectedTargetHash || first.body.targetHash,
     conflictFingerprint: first.body.conflictFingerprint,
@@ -520,15 +623,16 @@ test('Uninstall restores the installation when removing its source record fails'
   const entry = { id: 'owner/repo/fixture-skill', name: 'fixture-skill', skillId: 'fixture-skill', source: 'owner/repo', installs: 1 };
   const inspected = await request('/api/skills/discovery/inspect', { entry });
   assert.equal((await request('/api/skills/discovery/install', {
-    inspectionId: inspected.body.inspection.id, targetAgent: 'codex', acknowledge: true,
+    inspectionId: inspected.body.inspection.id, agents: ['codex'],
   })).body.ok, true);
-  const target = path.join(home, '.codex', 'skills', 'fixture-skill');
+  const target = path.join(home, '.agents', 'skills', 'fixture-skill');
   const removed = await request('/api/skills/trash', { dir: target });
   assert.equal(removed.body.ok, false);
   assert.equal(await fs.readFile(path.join(target, 'references', 'note.txt'), 'utf8'), 'hello');
   assert.deepEqual(await fs.readdir(trash), []);
   const records = JSON.parse(await fs.readFile(path.join(home, '.fanbox', 'skill-sources.json'), 'utf8'));
-  assert.ok(records.installations[path.resolve(target)]);
+  assert.equal(Object.keys(records.installations).length, 1);
+  assert.equal(Object.values(records.installations)[0].name, 'fixture-skill');
   const rootEntries = await fs.readdir(path.dirname(target));
   assert.deepEqual(rootEntries.filter((name) => name.startsWith('.fanbox-uninstall-')), []);
 });
@@ -544,10 +648,10 @@ test('A source-record write failure leaves no visible new installation or phanto
   const entry = { id: 'owner/repo/fixture-skill', name: 'fixture-skill', skillId: 'fixture-skill', source: 'owner/repo', installs: 1 };
   const inspected = await request('/api/skills/discovery/inspect', { entry });
   const result = await request('/api/skills/discovery/install', {
-    inspectionId: inspected.body.inspection.id, targetAgent: 'codex', acknowledge: true,
+    inspectionId: inspected.body.inspection.id, agents: ['codex'],
   });
   assert.equal(result.body.status, 'install_failed');
-  const target = path.join(home, '.codex', 'skills', 'fixture-skill');
+  const target = path.join(home, '.agents', 'skills', 'fixture-skill');
   await assert.rejects(fs.stat(target), { code: 'ENOENT' });
   const records = JSON.parse(await fs.readFile(path.join(home, '.fanbox', 'skill-sources.json'), 'utf8'));
   assert.deepEqual(records.installations, {});
@@ -566,17 +670,17 @@ test('Trash failure during an update restores old files and old source metadata'
   const entry = { id: 'owner/repo/fixture-skill', name: 'fixture-skill', skillId: 'fixture-skill', source: 'owner/repo', installs: 1 };
   const first = await request('/api/skills/discovery/inspect', { entry });
   assert.equal((await request('/api/skills/discovery/install', {
-    inspectionId: first.body.inspection.id, targetAgent: 'codex', acknowledge: true,
+    inspectionId: first.body.inspection.id, agents: ['codex'],
   })).body.ok, true);
-  const target = path.join(home, '.codex', 'skills', 'fixture-skill');
+  const target = path.join(home, '.agents', 'skills', 'fixture-skill');
   const recordsBefore = await fs.readFile(path.join(home, '.fanbox', 'skill-sources.json'));
   await fs.writeFile(path.join(target, 'local-note.txt'), 'must survive rollback', 'utf8');
   const inspected = await request('/api/skills/discovery/inspect', { entry });
   const conflict = await request('/api/skills/discovery/install', {
-    inspectionId: inspected.body.inspection.id, targetAgent: 'codex', acknowledge: true,
+    inspectionId: inspected.body.inspection.id, agents: ['codex'],
   });
   const failed = await request('/api/skills/discovery/install', {
-    inspectionId: inspected.body.inspection.id, targetAgent: 'codex', acknowledge: true,
+    inspectionId: inspected.body.inspection.id, agents: ['codex'],
     overwrite: true, expectedTargetHash: conflict.body.expectedTargetHash,
   });
   assert.equal(failed.body.status, 'install_failed');
@@ -599,23 +703,23 @@ test('Same-source reinstall detects local edits and requires a fresh explicit ov
   const entry = { id: 'owner/repo/fixture-skill', name: 'fixture-skill', skillId: 'fixture-skill', source: 'owner/repo', installs: 1 };
   const firstInspection = await request('/api/skills/discovery/inspect', { entry });
   assert.equal((await request('/api/skills/discovery/install', {
-    inspectionId: firstInspection.body.inspection.id, targetAgent: 'codex', acknowledge: true,
+    inspectionId: firstInspection.body.inspection.id, agents: ['codex'],
   })).body.ok, true);
-  const target = path.join(home, '.codex', 'skills', 'fixture-skill');
+  const target = path.join(home, '.agents', 'skills', 'fixture-skill');
   await fs.writeFile(path.join(target, 'local-note.txt'), 'keep recoverable', 'utf8');
   const secondInspection = await request('/api/skills/discovery/inspect', { entry });
   const conflict = await request('/api/skills/discovery/install', {
-    inspectionId: secondInspection.body.inspection.id, targetAgent: 'codex', acknowledge: true,
+    inspectionId: secondInspection.body.inspection.id, agents: ['codex'],
   });
   assert.equal(conflict.body.status, 'local_modified');
   assert.match(conflict.body.expectedTargetHash, /^[a-f0-9]{64}$/);
   const stale = '0'.repeat(64);
   assert.equal((await request('/api/skills/discovery/install', {
-    inspectionId: secondInspection.body.inspection.id, targetAgent: 'codex', acknowledge: true,
+    inspectionId: secondInspection.body.inspection.id, agents: ['codex'],
     overwrite: true, expectedTargetHash: stale,
   })).body.status, 'concurrent_changed');
   const updated = await request('/api/skills/discovery/install', {
-    inspectionId: secondInspection.body.inspection.id, targetAgent: 'codex', acknowledge: true,
+    inspectionId: secondInspection.body.inspection.id, agents: ['codex'],
     overwrite: true, expectedTargetHash: conflict.body.expectedTargetHash,
   });
   assert.equal(updated.body.ok, true, JSON.stringify(updated.body));
@@ -629,14 +733,14 @@ test('Same Skill name in another target directory is blocked without guessing id
   if (process.platform !== 'darwin') return t.skip('external installation is macOS-only');
   const fixture = await makeFixtureRepository(t);
   const { request, home } = await startServer(t, { FANBOX_TEST_DISCOVERY_GIT_REPO: fixture.dir, FANBOX_TEST_DISCOVERY_ARCHIVE: fixture.archive });
-  const existing = path.join(home, '.codex', 'skills', 'different-folder');
+  const existing = path.join(home, '.agents', 'skills', 'different-folder');
   await fs.mkdir(existing, { recursive: true });
   await fs.writeFile(path.join(existing, 'SKILL.md'), '---\nname: fixture-skill\ndescription: existing\n---\n');
   const inspected = await request('/api/skills/discovery/inspect', { entry: { id: 'owner/repo/fixture-skill', name: 'fixture-skill', skillId: 'fixture-skill', source: 'owner/repo', installs: 1 } });
-  const result = await request('/api/skills/discovery/install', { inspectionId: inspected.body.inspection.id, targetAgent: 'codex', acknowledge: true });
+  const result = await request('/api/skills/discovery/install', { inspectionId: inspected.body.inspection.id, agents: ['codex'] });
   assert.equal(result.body.status, 'different_source_conflict');
-  assert.equal(result.body.conflict.dir, existing);
-  await assert.rejects(fs.stat(path.join(home, '.codex', 'skills', 'fixture-skill')), { code: 'ENOENT' });
+  assert.equal(result.body.conflict.dir, await fs.realpath(existing));
+  await assert.rejects(fs.stat(path.join(home, '.agents', 'skills', 'fixture-skill')), { code: 'ENOENT' });
 });
 
 test('Matching Skill with a mismatched frontmatter name is blocked instead of disappearing as no candidate', async (t) => {
@@ -672,11 +776,11 @@ test('Concurrent installs are serialized and expose one complete installation', 
     request('/api/skills/discovery/inspect', { entry }),
   ]);
   const results = await Promise.all([
-    request('/api/skills/discovery/install', { inspectionId: first.body.inspection.id, targetAgent: 'codex', acknowledge: true }),
-    request('/api/skills/discovery/install', { inspectionId: second.body.inspection.id, targetAgent: 'codex', acknowledge: true }),
+    request('/api/skills/discovery/install', { inspectionId: first.body.inspection.id, agents: ['codex'] }),
+    request('/api/skills/discovery/install', { inspectionId: second.body.inspection.id, agents: ['codex'] }),
   ]);
   assert.deepEqual(results.map((result) => result.body.status).sort(), ['identical', 'installed']);
-  const target = path.join(home, '.codex', 'skills', 'fixture-skill');
+  const target = path.join(home, '.agents', 'skills', 'fixture-skill');
   assert.equal(await fs.readFile(path.join(target, 'references', 'note.txt'), 'utf8'), 'hello');
   const rootEntries = await fs.readdir(path.dirname(target));
   assert.deepEqual(rootEntries.filter((name) => name.startsWith('.fanbox-discovery-')), []);
