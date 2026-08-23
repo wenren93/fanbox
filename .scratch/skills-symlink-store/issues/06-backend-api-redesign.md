@@ -1,8 +1,8 @@
 # 06 — 后端扫描 / 启停 / 导入接口在链模型下的重设计
 
-**Type:** grilling · **Blocked by:** 02 · **Status:** open · **Claimed by:** —
+**Type:** grilling · **Blocked by:** 02 · **Status:** resolved（closed）· **Claimed by:** wenren93（2026-08-23）
 
-**GitHub issue:** [#17](https://github.com/wenren93/fanbox/issues/17)（母票 [#11](https://github.com/wenren93/fanbox/issues/11)）
+**GitHub issue:** [#17](https://github.com/wenren93/fanbox/issues/17)（母票 [#11](https://github.com/wenren93/fanbox/issues/11)）· **Resolution:** [issuecomment-5384532130](https://github.com/wenren93/fanbox/issues/17#issuecomment-5384532130)
 
 ## Question
 
