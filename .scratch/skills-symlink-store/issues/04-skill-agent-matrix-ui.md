@@ -1,8 +1,8 @@
 # 04 — Skill × Agent 图标矩阵的 UI 设计
 
-**Type:** grilling（可产出 prototype）· **Blocked by:** 02 · **Status:** open · **Claimed by:** —
+**Type:** grilling（可产出 prototype）· **Blocked by:** 02 · **Status:** resolved（closed）· **Claimed by:** wenren93（2026-08-23）
 
-**GitHub issue:** [#15](https://github.com/wenren93/fanbox/issues/15)（母票 [#11](https://github.com/wenren93/fanbox/issues/11)）
+**GitHub issue:** [#15](https://github.com/wenren93/fanbox/issues/15)（母票 [#11](https://github.com/wenren93/fanbox/issues/11)）· **Resolution:** [issuecomment-5384512269](https://github.com/wenren93/fanbox/issues/15#issuecomment-5384512269) · **原型:** [design-demos/skills-symlink-矩阵UI.html](https://github.com/wenren93/fanbox/blob/feature/design-demos/skills-symlink-%E7%9F%A9%E9%98%B5UI.html)
 
 ## Question
 

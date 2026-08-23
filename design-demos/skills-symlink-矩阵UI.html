@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Skills 透视 · 图标矩阵（低保真原型）</title>
+<style>
+  :root {
+    font-size: 14px;
+    --radius: 10px;
+    --font-ui: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+    --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+    --bg: #16181d; --panel: #1d2026; --panel2: #22262e;
+    --line: #2c313a; --text: #d8dce3; --dim: #8b93a1; --faint: #5c6470;
+    --accent: #4f9cf9; --ok: #3ecf8e; --warn: #f0b429; --bad: #f2555a;
+    --c-claude: #d97757; --c-codex: #8b93a1; --c-wb: #3ecf8e; --c-zcode: #9d7bea;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--font-ui); padding: 24px 28px 60px; }
+  .wrap { max-width: 1060px; margin: 0 auto; }
+
+  /* ── 顶部：页签 + agent 筛选（带计数） ─────────────── */
+  .tabs { display: flex; gap: 18px; border-bottom: 1px solid var(--line); padding-bottom: 0; }
+  .tabs a { color: var(--dim); text-decoration: none; padding: 6px 2px 12px; border-bottom: 2px solid transparent; }
+  .tabs a.on { color: var(--text); border-bottom-color: var(--accent); }
+  .agent-tabs { display: flex; gap: 8px; margin: 14px 0 10px; flex-wrap: wrap; align-items: center; }
+  .atab { display: inline-flex; align-items: center; gap: 7px; padding: 5px 12px; border-radius: 999px;
+          border: 1px solid var(--line); background: var(--panel); color: var(--dim); cursor: pointer; font-size: 13px; }
+  .atab .n { font-family: var(--font-mono); font-size: 12px; color: var(--faint); }
+  .atab.on { border-color: var(--accent); color: var(--text); }
+  .atab.on .n { color: var(--accent); }
+  .spacer { flex: 1; }
+  .chip { padding: 5px 12px; border-radius: 999px; border: 1px solid var(--line); background: none;
+          color: var(--dim); cursor: pointer; font-size: 13px; }
+  .chip.on { color: var(--text); border-color: var(--warn); }
+
+  /* ── 工具条 ─────────────── */
+  .toolbar { display: flex; gap: 10px; align-items: center; margin: 4px 0 10px; }
+  .toolbar input[type=search] { flex: 1; max-width: 320px; background: var(--panel); border: 1px solid var(--line);
+          border-radius: 8px; padding: 7px 12px; color: var(--text); outline: none; }
+  select { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; color: var(--dim); }
+  .btn { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 14px;
+         color: var(--text); cursor: pointer; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  /* ── 表头 + 行网格：勾选 | 名称/描述 | 图标矩阵 | 触发 | 健康 | mtime | ▸ ── */
+  .sk-thead, .sk-row { display: grid;
+    grid-template-columns: 24px minmax(0,1fr) 200px 72px 110px 90px 22px;
+    gap: 12px; align-items: center; padding: 0 10px; }
+  .sk-thead { color: var(--faint); font-size: 12px; height: 34px; border-bottom: 1px solid var(--line); }
+  .mtx-head { display: flex; gap: 8px; justify-content: center; }
+  .mtx-head .h { cursor: pointer; padding: 2px 6px; border-radius: 6px; }
+  .mtx-head .h:hover { background: var(--panel2); }
+  .sk-row { height: 52px; border-bottom: 1px solid var(--line); border-radius: 6px; }
+  .sk-row:hover { background: var(--panel); }
+  .sk-row.stock { opacity: .62; }
+  .name { font-weight: 600; font-size: 13.5px; }
+  .desc { color: var(--dim); font-size: 12px; margin-top: 2px;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { display: inline-block; font-size: 10.5px; padding: 1px 7px; border-radius: 5px; margin-left: 8px;
+           vertical-align: 1px; border: 1px solid var(--line); color: var(--dim); }
+  .badge.repo { color: #c39bf2; border-color: #56407a; }
+  .badge.ext  { color: var(--warn); border-color: #6a5320; }
+  .badge.stock{ color: var(--faint); }
+  .num { font-family: var(--font-mono); font-size: 12px; color: var(--dim); }
+  .when { font-family: var(--font-mono); font-size: 11px; color: var(--faint); }
+  .health { font-size: 11.5px; }
+  .health .ok  { color: var(--ok); }
+  .health .warn{ color: var(--warn); }
+  .health .bad { color: var(--bad); }
+
+  /* ── 图标矩阵 ─────────────── */
+  .mtx { display: flex; gap: 8px; justify-content: center; }
+  .ic { width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center;
+        font-size: 11px; font-weight: 700; cursor: pointer; border: 1px solid transparent;
+        background: var(--panel2); color: var(--faint); transition: all .15s; }
+  .ic:hover { border-color: var(--faint); }
+  .ic.busy { animation: pulse .7s infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  .ic.lit.c   { background: #3a2318; color: var(--c-claude); border-color: var(--c-claude); }
+  .ic.lit.x   { background: #23262c; color: #c7cdd8; border-color: var(--c-codex); }
+  .ic.lit.w   { background: #14322a; color: var(--c-wb); border-color: var(--c-wb); }
+  .ic.lit.z   { background: #251d3d; color: var(--c-zcode); border-color: var(--c-zcode); }
+
+  /* ── 展开的详情抽屉 ─────────────── */
+  .drawer { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+            padding: 16px 20px; margin: 6px 10px 10px; font-size: 13px; }
+  .drawer h4 { font-size: 13px; margin-bottom: 10px; }
+  .drawer .kv { display: grid; grid-template-columns: 90px 1fr; gap: 4px 14px; color: var(--dim); }
+  .drawer .kv b { color: var(--text); font-weight: 500; }
+  .drawer .acts { margin-top: 12px; display: flex; gap: 8px; }
+
+  /* ── 其他来源折叠区 ─────────────── */
+  .others { margin-top: 26px; }
+  .others summary { cursor: pointer; color: var(--dim); padding: 8px 4px; }
+  .others .orow { display: flex; gap: 12px; align-items: center; padding: 8px 10px; color: var(--dim);
+                  border-bottom: 1px dashed var(--line); font-size: 13px; }
+  .others .orow .src { font-size: 11px; border: 1px solid var(--line); border-radius: 5px; padding: 1px 7px; }
+
+  /* ── toast ─────────────── */
+  #toast { position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%);
+           background: #0f1115; border: 1px solid var(--line); color: var(--text);
+           padding: 9px 18px; border-radius: 999px; font-size: 13px; display: none; }
+  .hint { color: var(--faint); font-size: 12px; margin-top: 18px; line-height: 1.9; }
+  .hint b { color: var(--dim); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="tabs">
+    <a class="on" href="#">已安装</a><a href="#">发现</a>
+  </div>
+
+  <div class="agent-tabs">
+    <span class="atab on">全部 <span class="n">77</span></span>
+    <span class="atab"><span style="color:var(--c-claude)">✳</span> Claude <span class="n">24</span></span>
+    <span class="atab"><span style="color:#c7cdd8">◇</span> Codex <span class="n">27</span></span>
+    <span class="atab"><span style="color:var(--c-wb)">⌂</span> WorkBuddy <span class="n">60</span></span>
+    <span class="atab"><span style="color:var(--c-zcode)">▲</span> ZCode <span class="n">24</span></span>
+    <span class="spacer"></span>
+    <span class="chip" title="四列全灰的正本，切换显示/隐藏">只看未接入 40</span>
+  </div>
+
+  <div class="toolbar">
+    <input type="search" placeholder="搜索名称 / 描述…">
+    <select><option>按触发排序</option><option>按最近使用</option><option>按健康</option><option>按名称</option></select>
+    <span class="spacer"></span>
+    <button class="btn" id="batchBtn">批量</button>
+  </div>
+
+  <div class="sk-thead">
+    <div></div><div>SKILL / 描述</div>
+    <div class="mtx-head">
+      <span class="h" style="color:var(--c-claude)" title="整列批量：接入/取消接入 Claude">✳</span>
+      <span class="h" style="color:#c7cdd8" title="整列批量：config.toml 启/停">◇</span>
+      <span class="h" style="color:var(--c-wb)" title="整列批量：拷贝入/移出">⌂</span>
+      <span class="h" style="color:var(--c-zcode)" title="整列批量：config.json 启/停">▲</span>
+    </div>
+    <div style="text-align:right">触发</div><div>健康</div><div>更新</div><div></div>
+  </div>
+
+  <div id="rows"></div>
+
+  <details class="others">
+    <summary>其他来源：项目级（3）· 插件（2）— 不参与全局矩阵，保持原列表形态</summary>
+    <div class="orow"><span class="src">项目·claude</span> fanbox/.claude/skills/xxx — <span class="num">随项目走，无图标列</span></div>
+    <div class="orow"><span class="src">项目·agents</span> fanbox/.agents/skills/*（即仓库正本，全局矩阵已覆盖，此处仅列余量）</div>
+    <div class="orow"><span class="src">插件</span> browser-use / document-skills … — 插件体系自管</div>
+  </details>
+
+  <p class="hint">
+    <b>低保真原型要点</b>：一行 = 一个正本；四列图标 = 各 agent 接入状态（亮=接入）。机制差异只在 tooltip 与详情抽屉里呈现：
+    Claude=逐 skill 相对软链 · Codex=config.toml（改后需重启）· WorkBuddy=拷贝（取消接入移入 skills_disabled）· ZCode=config.json。
+    灰行=未接入的「库存」正本。外部正本（ego）带 <b>外部</b> 徽标，卸载只取消接入不碰外部内容。
+  </p>
+</div>
+<div id="toast"></div>
+
+<script>
+const ROWS = [
+  { name:'wayfinder', desc:'Plan a huge chunk of work as a shared map of decision tickets…', badge:'repo', hits:128, health:['ok','—'], mtime:'08-23 13:04',
+    icons:{c:1,x:1,w:1,z:1}, note:'仓库正本 · 链 ../.agents/skills/wayfinder → fanbox/.agents/skills/wayfinder' },
+  { name:'eli5', desc:'Explain a topic like I\x27m a 5 year old…', badge:'', hits:96, health:['ok','—'], mtime:'07-23',
+    icons:{c:1,x:1,w:0,z:1}, note:'正本仓真实目录 ~/.agents/skills/eli5' },
+  { name:'ego-browser', desc:'ego-lite Chromium-based browser friendly to agents…', badge:'ext', hits:54, health:['ok','—'], mtime:'08-12',
+    icons:{c:1,x:1,w:1,z:1}, note:'外部正本 ~/.local/share/ego/ego-skills（ego 工具自管，只取消接入不删内容）' },
+  { name:'implement', desc:'Implement a piece of work based on a spec or set of tickets…', badge:'repo', hits:41, health:['warn','WB拷贝落后'], mtime:'08-23 13:04',
+    icons:{c:1,x:1,w:1,z:1}, note:'WorkBuddy 拷贝 08-12 落后于仓库正本 — 详情抽屉提供「刷新拷贝」' },
+  { name:'a-stock-data', desc:'A股行情数据查询…（迁移收编件）', badge:'', hits:0, health:['ok','—'], mtime:'08-15',
+    icons:{c:0,x:1,w:0,z:0}, note:'新收编进正本仓；迁移保持 Codex 可见，其余列待你逐个点亮' },
+  { name:'grill-me', desc:'Relentless interview to sharpen a plan…（死环恢复件）', badge:'repo', hits:0, health:['ok','—'], mtime:'08-23',
+    icons:{c:0,x:1,w:0,z:0}, note:'恢复进仓库家族；Codex 原生默认见（config 缺省=启用），ZCode 首迁写 enable:false' },
+  { name:'writing-beats', desc:'Writing beats…（WorkBuddy 独有件收编）', badge:'', hits:0, health:['ok','—'], mtime:'08-12',
+    icons:{c:0,x:1,w:1,z:0}, note:'收编进正本仓后 Codex 原生可见；WB 图标=其本地拷贝在' },
+  { name:'baoyu-translate', desc:'This skill should be used when the user asks to translate…', badge:'', hits:12, health:['ok','—'], mtime:'07-23',
+    icons:{c:1,x:1,w:0,z:1}, note:'' },
+  { name:'stock-watcher', desc:'股票盯盘提醒…（WB 独有件收编，未接入示例）', badge:'stock', hits:0, health:['ok','—'], mtime:'08-12',
+    icons:{c:0,x:1,w:1,z:0}, note:'' },
+  { name:'wechat-reminder', desc:'微信定时提醒…（迁移收编件）', badge:'', hits:3, health:['ok','—'], mtime:'08-20',
+    icons:{c:0,x:1,w:1,z:0}, note:'' },
+];
+const MECH = { c:'Claude · 软链 ~/.claude/skills/', x:'Codex · config.toml 启停（重启生效）', w:'WorkBuddy · 拷贝接入 / 移入 skills_disabled', z:'ZCode · config.json enable 开关' };
+const $ = s => document.querySelector(s);
+function toast(msg){ const t=$('#toast'); t.textContent=msg; t.style.display='block'; clearTimeout(t._h); t._h=setTimeout(()=>t.style.display='none',1800); }
+
+$('#rows').innerHTML = ROWS.map((r,i)=>`
+  <div class="sk-row ${r.badge==='stock'?'stock':''}" data-i="${i}">
+    <div></div>
+    <div style="min-width:0">
+      <span class="name">${r.name}</span>
+      ${r.badge==='repo'?'<span class="badge repo">仓库</span>':''}
+      ${r.badge==='ext'?'<span class="badge ext">外部·ego</span>':''}
+      ${r.badge==='stock'?'<span class="badge stock">未接入</span>':''}
+      <div class="desc">${r.desc}</div>
+    </div>
+    <div class="mtx">${['c','x','w','z'].map(k=>`
+      <span class="ic ${r.icons[k]?'lit '+k:''}" data-k="${k}" title="${MECH[k]}${r.icons[k]?' · 点击取消接入':' · 点击接入'}">${{c:'✳',x:'◇',w:'⌂',z:'▲'}[k]}</span>`).join('')}
+    </div>
+    <div class="num" style="text-align:right">${r.hits||''}</div>
+    <div class="health"><span class="${r.health[0]}">${r.health[1]}</span></div>
+    <div class="when">${r.mtime}</div>
+    <div style="color:var(--faint);cursor:pointer" onclick="this.closest('.sk-row').nextElementSibling.classList.toggle('open');this.textContent=this.textContent==='▸'?'▾':'▸'">▸</div>
+  </div>
+  <div class="drawer" style="display:none"></div>
+`).join('') + '<div style="text-align:center;color:var(--faint);font-size:12px;padding:14px">… 其余 67 行（共 77 个正本）</div>';
+
+// 图标点选：busy → 切换 → toast（真实实现里：Claude 建/删链，Codex/ZCode 写 config，WB 拷贝/移出）
+document.querySelectorAll('.ic').forEach(ic=>ic.addEventListener('click',e=>{
+  e.stopPropagation();
+  const row=ic.closest('.sk-row'); const r=ROWS[+row.dataset.i]; const k=ic.dataset.k;
+  ic.classList.add('busy');
+  setTimeout(()=>{
+    ic.classList.remove('busy'); r.icons[k]^=1; ic.classList.toggle('lit'); ic.classList.toggle(k);
+    toast(`${r.name} · ${MECH[k].split(' ·')[0]} ${r.icons[k]?'已接入':'已取消接入'}${k==='x'?'（重启 Codex 生效）':''}${k==='w'?(r.icons[k]?'（拷贝完成）':'（已移入 skills_disabled）'):''}`);
+    if(!r.icons.c&&!r.icons.x&&!r.icons.w&&!r.icons.z) row.classList.add('stock'); else row.classList.remove('stock');
+  }, 350);
+}));
+
+// 详情抽屉（首行演示完整形态）
+document.querySelectorAll('.drawer')[0].style.display='none';
+document.querySelectorAll('.sk-row .name')[0].closest('.sk-row').addEventListener('click',function(){
+  const d=this.nextElementSibling; const r=ROWS[0];
+  d.style.display = d.style.display==='none'?'block':'none';
+  d.innerHTML = `<h4>${r.name} — 接入详情</h4>
+    <div class="kv">
+      <span>正本</span><b>${r.note}</b>
+      <span>Claude</span><b>软链 ~/.claude/skills/${r.name} → ../.agents/skills/${r.name} ✓</b>
+      <span>Codex</span><b>config.toml 未条目 = 默认启用（原生读正本仓）✓</b>
+      <span>ZCode</span><b>config.json enable:true ✓</b>
+      <span>WorkBuddy</span><b>拷贝 ~/.workbuddy/skills/${r.name}（08-12，<span style="color:var(--warn)">落后于正本</span>）</b>
+    </div>
+    <div class="acts"><button class="btn primary">刷新 WB 拷贝</button><button class="btn">在 Finder 中显示</button><button class="btn">卸载正本（trash）</button></div>`;
+});
+$('#batchBtn').addEventListener('click',()=>toast('批量模式：勾选行 → 按列执行接入/取消接入；表头图标 = 整列批量（有确认）'));
+</script>
+</body>
+</html>
