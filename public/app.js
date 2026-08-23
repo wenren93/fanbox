@@ -1862,74 +1862,23 @@ function confirmDialog(msg) {
   });
 }
 
-function skillImportTargetDialog(item, roots) {
-  const labels = { claude: 'Claude', codex: 'Codex', agents: 'Agents 共享目录', workbuddy: 'WorkBuddy' };
-  const options = Object.entries(labels).filter(([id]) => {
-    const root = roots && roots[id];
-    return root && (item.importTargets || []).includes(id);
-  });
-  if (!options.length) return Promise.resolve(null);
+// 接入目标位被同名实体占用（POST /api/skills/link 的结构化冲突）：FanBox 不静默覆盖，
+// 引导到「收编 / 覆盖接管」两条出路；完整流程随后续票接通，先给「在文件区显示」出口。
+function skillOccupiedDialog(item, agent, conflictPath) {
+  const col = SKILL_MATRIX_COLUMNS.find((c) => c.id === agent) || { label: agent };
+  const where = tilde(conflictPath || '');
   return new Promise((resolve) => {
     const ov = document.createElement('div');
     ov.className = 'input-overlay sk-import-overlay';
-    ov.innerHTML = `<div class="input-dialog sk-import-dialog" role="dialog" aria-modal="true" aria-labelledby="sk-import-title">
-      <div class="input-title" id="sk-import-title">导入“${escapeHtml(item.name)}”到…</div>
-      <div class="sk-import-note">选择一个目标 Agent。导入后是独立副本，不会与来源同步。</div>
-      <div class="sk-import-targets" role="radiogroup" aria-label="目标 Agent">
-        ${options.map(([id, label], index) => `<label class="sk-import-target"><input type="radio" name="skill-import-target" value="${id}" ${index === 0 ? 'checked' : ''}><span><b>${label}</b><small>${escapeHtml(tilde(roots[id]))}</small></span></label>`).join('')}
-      </div>
-      ${item.source === 'plugin' ? '<div class="sk-import-plugin-note">插件提供的 Skill 导入后由你独立管理，不再随插件更新。</div>' : ''}
-      <div class="input-actions"><button class="ghost-btn" data-act="cancel">取消</button><button class="primary" data-act="import">导入</button></div>
-    </div>`;
-    document.body.appendChild(ov);
-    const done = (value) => { ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(value); };
-    const submit = () => done((ov.querySelector('input[name=skill-import-target]:checked') || {}).value || null);
-    function onKey(ev) {
-      if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); done(null); }
-      else if (ev.key === 'Enter') { ev.preventDefault(); ev.stopPropagation(); submit(); }
-    }
-    ov.querySelector('[data-act=cancel]').onclick = () => done(null);
-    ov.querySelector('[data-act=import]').onclick = submit;
-    ov.onclick = (ev) => { if (ev.target === ov) done(null); };
-    document.addEventListener('keydown', onKey, true);
-    ov.querySelector('[data-act=cancel]').focus();
-  });
-}
-
-function skillImportConflictDialog(item, result) {
-  return new Promise((resolve) => {
-    const ov = document.createElement('div');
-    ov.className = 'input-overlay sk-import-overlay';
-    ov.innerHTML = `<div class="input-dialog sk-import-dialog" role="alertdialog" aria-modal="true" aria-labelledby="sk-overwrite-title" aria-describedby="sk-overwrite-note">
-      <div class="input-title" id="sk-overwrite-title">覆盖目标安装项？</div>
-      <div class="sk-import-conflict-meta"><span>来源</span><b>${escapeHtml(item.name)}</b><span>目标 Agent</span><b>${escapeHtml(result.targetLabel)}</b><span>目标位置</span><code>${escapeHtml(tilde(result.targetDir))}</code></div>
-      <div class="sk-import-note" id="sk-overwrite-note">覆盖会用来源完整替换目标，不会合并文件。原目标将移入系统废纸篓，可恢复。</div>
-      <div class="input-actions"><button class="ghost-btn" data-act="cancel">取消</button><button class="danger sk-overwrite-btn" data-act="overwrite">覆盖</button></div>
-    </div>`;
-    document.body.appendChild(ov);
-    const done = (value) => { ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(value); };
-    function onKey(ev) { if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); done(false); } }
-    ov.querySelector('[data-act=cancel]').onclick = () => done(false);
-    ov.querySelector('[data-act=overwrite]').onclick = () => done(true);
-    ov.onclick = (ev) => { if (ev.target === ov) done(false); };
-    document.addEventListener('keydown', onKey, true);
-    ov.querySelector('[data-act=cancel]').focus();
-  });
-}
-
-function skillImportAmbiguityDialog(result) {
-  const conflict = result.conflict || {};
-  return new Promise((resolve) => {
-    const ov = document.createElement('div');
-    ov.className = 'input-overlay sk-import-overlay';
-    ov.innerHTML = `<div class="input-dialog sk-import-dialog" role="alertdialog" aria-modal="true" aria-labelledby="sk-ambiguity-title">
-      <div class="input-title" id="sk-ambiguity-title">目标已有同名 Skill</div>
-      <div class="sk-import-note">“${escapeHtml(conflict.name || conflict.skillName || '未知安装项')}”使用相同 Skill 名称。请先修改名称或卸载冲突安装项，再重试导入。</div>
-      <div class="sk-import-conflict-path">${escapeHtml(tilde(conflict.dir || result.targetDir || ''))}</div>
+    ov.innerHTML = `<div class="input-dialog sk-import-dialog" role="alertdialog" aria-modal="true" aria-labelledby="sk-occupied-title">
+      <div class="input-title" id="sk-occupied-title">目标位已被同名实体占用</div>
+      <div class="sk-import-note">给 ${escapeHtml(col.label)} 接入「${escapeHtml(item.name)}」需要写入 <code>${escapeHtml(where)}</code>，那里已有一个同名实体（真实目录、外部链或断链）。FanBox 不会静默替换它。</div>
+      <div class="sk-import-note">两条出路：<b>收编</b>——把现有内容提升为原件后再接入；<b>覆盖接管</b>——确认后完整替换，旧内容移入系统废纸篓可恢复。两个流程的完整入口随后续版本提供。</div>
+      <div class="sk-import-conflict-path">${escapeHtml(where)}</div>
       <div class="input-actions"><button class="ghost-btn" data-act="cancel">关闭</button><button class="primary" data-act="reveal">在文件区显示</button></div>
     </div>`;
     document.body.appendChild(ov);
-    const done = (value) => { ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(value); };
+    const done = (reveal) => { ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(reveal); };
     function onKey(ev) { if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); done(false); } }
     ov.querySelector('[data-act=cancel]').onclick = () => done(false);
     ov.querySelector('[data-act=reveal]').onclick = () => done(true);
@@ -1938,6 +1887,7 @@ function skillImportAmbiguityDialog(result) {
     ov.querySelector('[data-act=cancel]').focus();
   });
 }
+
 // ---------- 截图直通车：系统截屏落盘 → 右下角浮出直通卡，终端/素材/标注一步到位 ----------
 const shotTray = {
   el: null, timer: null,
@@ -5031,9 +4981,32 @@ const usagePanel = {
 };
 
 // ---------- Skills 透视（主区全屏视图）----------
+// 矩阵四列（docs/16 §4 + ADR 0005）：图标外观统一亮/灰，机制差异只藏在 tooltip 与详情抽屉
+const SKILL_MATRIX_COLUMNS = [
+  { id: 'claude', sym: '✳', label: 'Claude', mech: '相对软链 ~/.claude/skills/<name> → ~/.agents/skills/<name>' },
+  { id: 'codex', sym: '◇', label: 'Codex', mech: 'config.toml 启停，重启 Codex 后生效' },
+  { id: 'workbuddy', sym: '⌂', label: 'WorkBuddy', mech: '拷贝入 ~/.workbuddy/skills，取消接入移入同级 skills_disabled' },
+  { id: 'zcode', sym: '▲', label: 'ZCode', mech: 'config.json 按原件路径的 enable 开关' },
+];
+// 原件徽标（docs/16 §1）：store 自管不标；repo 家族 git 是真源；external 只取消接入、绝不删内容
+const SKILL_ORIGIN_BADGES = {
+  repo: { text: '仓库', title: '仓库家族原件：内容在 fanbox 仓库里由 git 管理，原件仓放转指链' },
+  external: { text: '外部', title: '外部原件：外部工具自管的目录，FanBox 只引用不改动；卸载只取消接入、不删内容' },
+};
+const SKILL_HEALTH_SHORT = {
+  'broken-link': '断链',
+  'dead-loop': '死环',
+  'wb-drift': 'WB拷贝落后',
+  'externally-modified': '已被外部修改',
+  'desc-missing': '缺描述',
+  'desc-over-cut': '描述超截断',
+  'missing-skill-md': '缺 SKILL.md',
+};
 const skillsView = {
-  data: null, filter: 'all', sort: 'hits', query: '', open: new Set(),
-  batchMode: false, selected: new Set(), busy: false, refreshing: false, batchResult: null,
+  // 矩阵 UI（docs/16 §4）：一行 = 一个原件，四列图标 = 各 Agent 接入现值（refresh v2）；
+  // 图标外观统一亮/灰，机制差异只藏在 tooltip 与详情抽屉，代价提示走 toast。
+  data: null, filter: 'all', agent: 'all', stockOnly: false, sort: 'hits', query: '', open: new Set(),
+  busy: false, refreshing: false, linkBusy: new Set(), othersOpen: false,
   activeTab: 'installed',
   discovery: {
     input: '', query: '', results: [], status: 'idle', error: '', cached: false,
@@ -5044,16 +5017,18 @@ const skillsView = {
   async show() {
     state.skillsMode = true; state.recentMode = false; state.cursor = -1;
     this.activeTab = 'installed';
-    this.batchMode = false; this.selected.clear(); this.busy = false; this.batchResult = null;
+    this.agent = 'all'; this.stockOnly = false; this.busy = false; this.linkBusy.clear();
     renderBreadcrumb();
     $('#file-area').innerHTML = '<div class="cmdk-loading">扫描本机 skills…</div>';
-    try { this.data = await apiPost('/api/skills/refresh', { cwd: state.cwd }); } catch { $('#file-area').innerHTML = '<div class="nav-empty">扫描失败</div>'; return; }
+    try { this.data = await this.fetchScan(); } catch { $('#file-area').innerHTML = '<div class="nav-empty">扫描失败</div>'; return; }
     this.render();
     this.loadDiscoverySettings();
   },
+  // v2（行 = 原件，docs/16 §2）以 {v:2} 协商启用；旧形状只服务硬切换前的旧调用方
+  fetchScan() { return apiPost('/api/skills/refresh', { cwd: state.cwd, v: 2 }); },
   async reload() {
     try {
-      this.data = await apiPost('/api/skills/refresh', { cwd: state.cwd });
+      this.data = await this.fetchScan();
       if (state.skillsMode) this.render();
       return true;
     } catch {
@@ -5065,11 +5040,11 @@ const skillsView = {
     if (this.busy || this.refreshing) return;
     this.refreshing = true; this.render();
     try {
-      this.data = await apiPost('/api/skills/refresh', { cwd: state.cwd });
+      this.data = await this.fetchScan();
       const dirs = new Set((this.data.items || []).map((x) => x.dir));
-      this.selected = new Set([...this.selected].filter((dir) => dirs.has(dir)));
       this.open = new Set([...this.open].filter((dir) => dirs.has(dir)));
-      toast(`已刷新，共发现 ${this.data.overview.total} 个 Skill 安装项`);
+      const c = this.data.counts || {};
+      toast(`已刷新：${c.total || 0} 个原件，其中 ${c.stock || 0} 个未接入`);
     } catch (err) {
       toast('刷新失败：' + (err.message || '请求失败'), true);
     } finally {
@@ -5089,123 +5064,193 @@ const skillsView = {
     if (m < 1440) return Math.round(m / 60) + ' 小时前';
     return Math.round(m / 1440) + ' 天前';
   },
+  // ── 行模型：矩阵行 = 原件（origin ∈ store/repo/external）；项目级与插件进折叠区 ──
+  matrixRows() {
+    return (this.data.items || []).filter((x) => x.agents && x.origin !== 'project' && x.origin !== 'plugin');
+  },
+  extraRows() {
+    return (this.data.items || []).filter((x) => x.origin === 'project' || x.origin === 'plugin');
+  },
+  isStock(x) {
+    const a = x.agents || {};
+    return !a.claude.on && !a.codex.on && !a.workbuddy.on && !a.zcode.on;
+  },
+  // 重名 = 多个原件声明同一 skillName，触发统计会混在一起（次级筛选「重名」）
+  dupNames() {
+    const seen = new Map();
+    for (const x of this.matrixRows()) {
+      const key = (x.skillName || x.name || '').toLocaleLowerCase();
+      seen.set(key, (seen.get(key) || 0) + 1);
+    }
+    return new Set([...seen].filter(([, n]) => n > 1).map(([k]) => k));
+  },
   rows() {
-    let arr = (this.data.items || []).slice();
+    let arr = this.matrixRows();
     const f = this.filter;
-    if (f === 'dup') arr = arr.filter((x) => x.copies);
-    else if (f === 'bad') arr = arr.filter((x) => x.issues.length);
-    else if (f === 'project') arr = arr.filter((x) => x.source === 'project');
-    else if (f === 'codex') arr = arr.filter((x) => x.source === 'codex' || x.source === 'agents');
-    else if (f !== 'all') arr = arr.filter((x) => x.source === f);
+    if (f === 'dup') { const dup = this.dupNames(); arr = arr.filter((x) => dup.has((x.skillName || x.name || '').toLocaleLowerCase())); }
+    else if (f === 'bad') arr = arr.filter((x) => (x.health || []).length);
+    if (this.agent !== 'all') arr = arr.filter((x) => x.agents && x.agents[this.agent] && x.agents[this.agent].on);
+    if (this.stockOnly) arr = arr.filter((x) => this.isStock(x));
     const q = this.query.trim().toLocaleLowerCase();
-    if (q) arr = arr.filter((x) => [x.name, x.desc, x.label, x.projectAgent, x.projectName, x.dir, ...(x.issues || [])].filter(Boolean).join('\n').toLocaleLowerCase().includes(q));
-    const ho = (x) => (x.residue || x.issues.length ? 0 : x.disabled ? 1 : 2);
+    if (q) arr = arr.filter((x) => [x.name, x.skillName, x.desc, x.dir, ...(x.health || []).map((h) => h.msg)].filter(Boolean).join('\n').toLocaleLowerCase().includes(q));
+    const ho = (x) => ((x.health || []).some((h) => h.level === 'error') ? 0 : (x.health || []).length ? 1 : 2);
     if (this.sort === 'hits') arr.sort((a, b) => b.hits - a.hits || b.last - a.last || a.name.localeCompare(b.name));
-    if (this.sort === 'recent') arr.sort((a, b) => b.last - a.last || b.hits - a.hits);
-    if (this.sort === 'health') arr.sort((a, b) => ho(a) - ho(b) || b.hits - a.hits);
-    if (this.sort === 'name') arr.sort((a, b) => a.name.localeCompare(b.name));
+    else if (this.sort === 'recent') arr.sort((a, b) => b.last - a.last || b.hits - a.hits);
+    else if (this.sort === 'health') arr.sort((a, b) => ho(a) - ho(b) || b.hits - a.hits);
+    else if (this.sort === 'updated') arr.sort((a, b) => b.mtime - a.mtime || b.hits - a.hits);
+    else if (this.sort === 'name') arr.sort((a, b) => a.name.localeCompare(b.name));
     return arr;
   },
-  batchCounts() {
-    const selected = (this.data.items || []).filter((x) => this.selected.has(x.dir));
-    return {
-      total: this.selected.size,
-      enable: selected.filter((x) => !x.residue && x.toggleSupported !== false && x.disabled).length,
-      disable: selected.filter((x) => !x.residue && x.toggleSupported !== false && !x.disabled).length,
-      uninstall: this.selected.size,
-    };
-  },
-  batchSummary() {
-    if (!this.batchResult) return '';
-    const s = this.batchResult.summary || {};
-    const parts = [];
-    if (s.success) parts.push(`完成 ${s.success}`);
-    if (s.noop) parts.push(`无需处理 ${s.noop}`);
-    if (s.skipped) parts.push(`跳过 ${s.skipped}`);
-    if (s.failed) parts.push(`失败 ${s.failed}`);
-    return parts.join(' · ') || '没有需要处理的项目';
-  },
-  async runBatch(action) {
-    if (this.busy) return;
-    const dirs = [...this.selected];
-    if (!dirs.length) return;
-    const counts = this.batchCounts();
-    if ((action === 'enable' && !counts.enable) || (action === 'disable' && !counts.disable)) return;
-    if (action === 'uninstall') {
-      const ok = await confirmDialog(`卸载选中的 ${dirs.length} 个 Skill 安装项？它们将被移到系统废纸篓，可恢复。`);
-      if (!ok) return;
-    }
-    const before = new Map((this.data.items || []).map((x) => [x.dir, { name: x.name, label: x.label }]));
-    this.busy = true; this.batchResult = null; this.render();
+  rowByDir(dir) { return (this.data.items || []).find((x) => x.dir === dir); },
+  // ── 四列接入：点图标调 /api/skills/link，busy → toast（代价如 Codex 重启随 toast 呈现）──
+  async toggleLink(it, agent) {
+    if (this.busy || this.refreshing) return;
+    const on = !((it.agents || {})[agent] || {}).on;
+    const key = `${it.dir}:${agent}`;
+    if (this.linkBusy.has(key)) return;
+    this.linkBusy.add(key); this.render();
     try {
-      const r = await apiPost('/api/skills/batch', { action, dirs, cwd: state.cwd });
-      if (!r || r.ok === false || !Array.isArray(r.results)) throw new Error((r && r.error) || '服务端没有返回操作结果');
-      const failures = r.results.filter((x) => x.status === 'failed').map((x) => ({ ...x, ...(before.get(x.dir) || {}) }));
-      const summary = r.summary || r.results.reduce((s, x) => { s[x.status] = (s[x.status] || 0) + 1; s.total++; return s; }, { success: 0, noop: 0, skipped: 0, failed: 0, total: 0 });
-      this.selected = new Set(failures.map((x) => x.dir));
-      this.batchResult = { action, summary, failures };
-      const verb = { enable: '启用', disable: '停用', uninstall: '卸载' }[action];
-      if (failures.length) toast(`${verb}完成，${failures.length} 项失败`, true);
-      else if ((r.restartRequired || []).includes('codex')) toast(`批量${verb}完成；重启 Codex 后生效`);
-      else toast(`批量${verb}完成`);
-    } catch (e) {
-      this.batchResult = { action, summary: { success: 0, noop: 0, skipped: 0, failed: dirs.length, total: dirs.length }, failures: dirs.map((dir) => ({ dir, ...(before.get(dir) || {}), error: e.message || '请求失败' })) };
-      toast('批量操作失败：' + (e.message || '请求失败'), true);
-    } finally {
-      this.busy = false;
-      await this.reload();
-    }
-  },
-  async importSkill(it) {
-    if (this.busy || it.residue) return;
-    if (!Array.isArray(it.importTargets)) {
-      toast('目标列表尚未就绪；请刷新或重启 FanBox 后重试', true);
-      return;
-    }
-    if (!it.importTargets.length) {
-      toast('没有可导入的目标 Agent', true);
-      return;
-    }
-    const targetAgent = await skillImportTargetDialog(it, this.data.roots || {});
-    if (!targetAgent) return;
-    this.busy = true; this.render();
-    try {
-      let r = await apiPost('/api/skills/import', { sourceDir: it.dir, targetAgent, cwd: state.cwd });
-      if (r && r.status === 'content_conflict') {
-        const overwrite = await skillImportConflictDialog(it, r);
-        if (!overwrite) return;
-        r = await apiPost('/api/skills/import', {
-          sourceDir: it.dir, targetAgent, cwd: state.cwd,
-          overwrite: true, sourceFingerprint: r.sourceFingerprint, conflictFingerprint: r.conflictFingerprint,
-        });
-      }
-      if (r && (r.status === 'created' || r.status === 'overwritten')) {
-        const disabled = r.targetDisabled ? '；目标仍处于停用状态，可用现有开关启用' : '';
-        toast(`已导入到 ${r.targetLabel}；新会话可发现${disabled}`);
-      } else if (r && r.status === 'identical') {
-        toast(`${r.targetLabel} 已有相同安装项`);
-      } else if (r && r.status === 'name_ambiguity') {
-        const reveal = await skillImportAmbiguityDialog(r);
-        if (reveal && r.conflict && r.conflict.dir) await navigate(dirOf(r.conflict.dir));
-      } else if (r && r.status === 'concurrent_changed') {
-        toast('目标内容已变化，请重试', true);
-      } else if (r && r.status === 'source_changed') {
-        toast('来源内容已变化，请重新检查后重试', true);
-      } else if (r && r.status === 'unsafe_content') {
-        toast(`来源包含不安全内容：${r.problemPath || '未知路径'}；请修复后重试`, true);
-      } else if (r && r.status === 'invalid_source') {
-        toast('来源已失效；请刷新并确认安装项后重试', true);
-      } else if (r && r.status === 'self_import') {
-        toast('来源已经位于该目标位置', true);
+      const r = await apiPost('/api/skills/link', { name: it.name, agent, on });
+      if (!r || r.ok === false) {
+        if (r && r.conflict && r.conflict.kind === 'occupied') {
+          if (await skillOccupiedDialog(it, agent, r.conflict.path)) navigate(dirOf(r.conflict.path));
+        } else toast((r && (r.error || r.status)) || '操作失败', true);
       } else {
-        toast('导入失败：' + ((r && r.error) || '请重试'), true);
+        const col = SKILL_MATRIX_COLUMNS.find((c) => c.id === agent) || { label: agent };
+        let msg = `${it.name} · ${col.label} 已${on ? '接入' : '取消接入'}`;
+        if (agent === 'workbuddy') msg += on ? '（已从原件拷入）' : '（拷贝移入 skills_disabled，可恢复）';
+        if (r.restartRequired === 'codex' || (Array.isArray(r.restartRequired) && r.restartRequired.includes('codex'))) msg += '；重启 Codex 后生效';
+        toast(msg);
       }
     } catch (err) {
-      toast('导入失败：' + (err.message || '请求失败'), true);
+      toast('操作失败：' + (err.message || '请求失败'), true);
+    } finally {
+      this.linkBusy.delete(key);
+      await this.reload();
+    }
+  },
+  // WorkBuddy 拷贝落后时的「刷新拷贝」：取消接入（旧拷贝进 skills_disabled 可恢复）再从原件拷入
+  async refreshWorkBuddyCopy(it) {
+    if (this.busy || this.refreshing) return;
+    const key = `${it.dir}:workbuddy`;
+    if (this.linkBusy.has(key)) return;
+    this.linkBusy.add(key); this.render();
+    try {
+      for (const on of [false, true]) {
+        const r = await apiPost('/api/skills/link', { name: it.name, agent: 'workbuddy', on });
+        if (!r || r.ok === false) {
+          if (r && r.conflict && r.conflict.kind === 'occupied') {
+            if (await skillOccupiedDialog(it, 'workbuddy', r.conflict.path)) navigate(dirOf(r.conflict.path));
+          } else toast((r && (r.error || r.status)) || '刷新拷贝失败', true);
+          return;
+        }
+      }
+      toast(`${it.name} · WorkBuddy 拷贝已按原件重拷（旧拷贝在 skills_disabled，可恢复）`);
+    } catch (err) {
+      toast('刷新拷贝失败：' + (err.message || '请求失败'), true);
+    } finally {
+      this.linkBusy.delete(key);
+      await this.reload();
+    }
+  },
+  async unlinkAll(it) {
+    if (this.busy || this.refreshing) return;
+    const lit = SKILL_MATRIX_COLUMNS.filter((c) => ((it.agents || {})[c.id] || {}).on);
+    if (!lit.length) { toast('四列都没有接入'); return; }
+    this.busy = true; this.render();
+    let failed = 0;
+    try {
+      for (const c of lit) {
+        const r = await apiPost('/api/skills/link', { name: it.name, agent: c.id, on: false });
+        if (!r || r.ok === false) failed++;
+      }
+      toast(failed ? `取消接入完成，${failed} 列失败` : `已取消 ${it.name} 的全部接入（原件不动）`, failed > 0);
+    } catch (err) {
+      toast('取消接入失败：' + (err.message || '请求失败'), true);
     } finally {
       this.busy = false;
       await this.reload();
     }
+  },
+  // 行级卸载只对原件仓自管原件开放：先逐列取消接入，再把原件送系统废纸篓；
+  // 外部原件绝不删内容（只取消接入）；仓库家族由 git 管理，不在此删。
+  async uninstallRow(it) {
+    if (this.busy || this.refreshing) return;
+    if (it.origin !== 'store') { await this.unlinkAll(it); return; }
+    const ok = await confirmDialog(`卸载「${it.name}」？先取消全部接入，再把原件移到系统废纸篓，可恢复。`);
+    if (!ok) return;
+    this.busy = true; this.open.delete(it.dir); this.render();
+    try {
+      for (const c of SKILL_MATRIX_COLUMNS) {
+        if (((it.agents || {})[c.id] || {}).on) await apiPost('/api/skills/link', { name: it.name, agent: c.id, on: false });
+      }
+      const r = await apiPost('/api/skills/trash', { dir: it.dir, cwd: state.cwd });
+      if (r && r.ok) toast('已卸载，可从系统废纸篓恢复');
+      else toast('卸载失败：' + ((r && r.error) || ''), true);
+    } catch (err) {
+      toast('卸载失败：' + (err.message || '请求失败'), true);
+    } finally {
+      this.busy = false;
+      await this.reload();
+    }
+  },
+  // 项目级/插件行的收编入口（POST /api/skills/annex 随后续票落地；未就绪时给出说明）
+  async annexItem(it) {
+    if (this.busy || this.refreshing) return;
+    this.busy = true; this.render();
+    let done = false;
+    try {
+      const r = await apiPost('/api/skills/annex', { dir: it.dir, cwd: state.cwd });
+      if (r && r.ok) {
+        done = true;
+        toast(`已收编为原件：${it.name}`);
+      } else toast('收编失败：' + ((r && r.error) || '流程随后续版本提供'), true);
+    } catch {
+      toast('收编流程随后续版本提供——当前可先在文件区手动迁移', true);
+    } finally {
+      this.busy = false;
+      if (done) await this.reload();
+      else if (state.skillsMode && this.data) this.render();
+    }
+  },
+  // 项目级/插件保持原形态：启停仍走 /api/skills/toggle（硬切换归后续票）
+  async toggleExtra(it) {
+    if (this.busy) return;
+    this.busy = true; this.render();
+    try {
+      const r = await apiPost('/api/skills/toggle', { dir: it.dir, enable: it.disabled, cwd: state.cwd });
+      if (r && r.ok) {
+        const verb = it.disabled ? '启用' : '停用';
+        toast(r.restartRequired === 'codex' ? `已${verb}；重启 Codex 后生效` : `已${verb} ${it.name}`);
+      } else toast('操作失败：' + ((r && r.error) || ''), true);
+    } catch (err) {
+      toast('操作失败：' + (err.message || '请求失败'), true);
+    } finally {
+      this.busy = false;
+      await this.reload();
+    }
+  },
+  async trashExtra(it) {
+    if (this.busy) return;
+    const ok = await confirmDialog(`把「${it.name}」移到废纸篓？（系统废纸篓里随时可恢复）`);
+    if (!ok) return;
+    this.busy = true; this.open.delete(it.dir); this.render();
+    try {
+      const r = await apiPost('/api/skills/trash', { dir: it.dir, cwd: state.cwd });
+      if (r && r.ok) toast('已卸载，可从系统废纸篓恢复');
+      else toast('卸载失败：' + ((r && r.error) || ''), true);
+    } catch (err) {
+      toast('卸载失败：' + (err.message || '请求失败'), true);
+    } finally {
+      this.busy = false;
+      await this.reload();
+    }
+  },
+  async editSkill(it) {
+    if (this.busy) return;
+    await navigate(it.dir);
+    const e2 = state.entries.find((x) => x.name === 'SKILL.md');
+    if (e2) { state.selected = e2.path; openPreview(e2); renderFiles(); }
   },
   async loadDiscoverySettings() {
     if (this.discovery.settingsLoaded) return;
@@ -5523,164 +5568,215 @@ const skillsView = {
     if (install) install.onclick = () => this.installDiscovery();
   },
   renderInstalled() {
-    const o = this.data.overview;
-    const items = this.data.items || [];
+    const o = this.data.overview || {};
+    const counts = this.data.counts || {};
     const rows = this.rows();
-    const batch = this.batchCounts();
-    const allVisibleSelected = rows.length > 0 && rows.every((x) => this.selected.has(x.dir));
-    const someVisibleSelected = rows.some((x) => this.selected.has(x.dir));
-    const cnt = (fn) => items.filter(fn).length;
-    const over = o.budgetChars > o.budgetLimit;
-    const ratio = (o.budgetChars / o.budgetLimit).toFixed(1);
     const locked = this.busy || this.refreshing;
-    let h = `<div class="sk-wrap ${this.batchMode ? 'is-batch' : ''} ${locked ? 'is-busy' : ''}">
+    const over = (o.budgetChars || 0) > (o.budgetLimit || 0);
+    const ratio = ((o.budgetChars || 0) / (o.budgetLimit || 1)).toFixed(1);
+    const dupCount = this.dupNames().size;
+    let h = `<div class="sk-wrap ${locked ? 'is-busy' : ''}">
       ${this.tabsHtml()}
       <div class="sk-stats">
-        <div class="sk-stat"><div class="sk-num">${o.unique}<small>/${o.total}</small></div><div class="sk-lbl">全部 skills</div><div class="sk-note">唯一 / 含跨端副本</div></div>
-        <div class="sk-stat"><div class="sk-num good">${o.active}</div><div class="sk-lbl">45 天内活跃</div><div class="sk-note">共 ${o.totalHits} 次触发</div></div>
-        <div class="sk-stat dust"><div class="sk-num">${o.dust}</div><div class="sk-lbl">在吃灰</div><div class="sk-note">45 天零触发</div></div>
-        <div class="sk-stat ${o.issues ? 'alert' : ''}"><div class="sk-num">${o.issues}</div><div class="sk-lbl">有问题</div><div class="sk-note">截断 / 缺 frontmatter / 残留</div></div>
+        <div class="sk-stat"><div class="sk-num">${counts.total || 0}</div><div class="sk-lbl">原件</div><div class="sk-note">一行一个，四列图标 = 接入现值</div></div>
+        <div class="sk-stat dust"><div class="sk-num">${counts.stock || 0}</div><div class="sk-lbl">未接入</div><div class="sk-note">四列全灰的纯库存是合法形态</div></div>
+        <div class="sk-stat ${o.issues ? 'alert' : ''}"><div class="sk-num">${o.issues || 0}</div><div class="sk-lbl">健康提示</div><div class="sk-note">漂移 / 断链 / 描述问题</div></div>
+        <div class="sk-stat ${o.anomalies ? 'alert' : ''}"><div class="sk-num">${o.anomalies || 0}</div><div class="sk-lbl">扫描异常</div><div class="sk-note">待收编 / 待清理 / 待迁移</div></div>
         <div class="sk-budget">
-          <div class="sk-lbl" style="display:flex;justify-content:space-between"><span>Claude 常驻预算（描述总量）</span>${over ? `<b class="bad-t">≈超限 ${ratio}×</b>` : ''}</div>
-          <div class="sk-bar"><i style="width:${Math.min(100, o.budgetChars / o.budgetLimit * 41)}%"></i><em></em></div>
-          <div class="sk-cap"><span>${o.budgetChars.toLocaleString()} 字符 / 预算约 ${o.budgetLimit.toLocaleString()}（估算）</span><span>${over ? '超出部分被静默丢弃，对应 skill 不会触发' : ''}</span></div>
+          <div class="sk-lbl" style="display:flex;justify-content:space-between"><span>Claude 常驻预算（Claude 列亮着的行 + 插件）</span>${over ? `<b class="bad-t">≈超限 ${ratio}×</b>` : ''}</div>
+          <div class="sk-bar"><i style="width:${Math.min(100, (o.budgetChars || 0) / (o.budgetLimit || 1) * 41)}%"></i><em></em></div>
+          <div class="sk-cap"><span>${(o.budgetChars || 0).toLocaleString()} 字符 / 预算约 ${(o.budgetLimit || 0).toLocaleString()}（估算）</span><span>${over ? '超出部分被静默丢弃，对应 skill 不会触发' : ''}</span></div>
         </div>
+      </div>
+      <div class="sk-agent-tabs" role="tablist" aria-label="按接入列筛选">
+        <button class="sk-atab ${this.agent === 'all' ? 'on' : ''}" data-agent-tab="all">全部 <i>${counts.total || 0}</i></button>
+        ${SKILL_MATRIX_COLUMNS.map((c) => `<button class="sk-atab ${this.agent === c.id ? 'on' : ''}" data-agent-tab="${c.id}" title="只看 ${escapeHtml(c.label)} 列已接入的原件"><span class="sym ${c.id}">${c.sym}</span>${c.label} <i>${counts[c.id] || 0}</i></button>`).join('')}
+        <span class="sk-atabs-spacer"></span>
+        <button class="sk-atab ${this.stockOnly ? 'on' : ''}" id="sk-stock-chip" title="四列全灰的纯库存原件，切换显示/隐藏">只看未接入 <i>${counts.stock || 0}</i></button>
       </div>
       <div class="sk-tools">
         <div class="sk-chips">
-          ${[['all', '全部', items.length],
-             ['claude', 'Claude', cnt((x) => x.source === 'claude')],
-             ['codex', 'Codex', cnt((x) => x.source === 'codex' || x.source === 'agents')],
-             ['workbuddy', 'WorkBuddy', cnt((x) => x.source === 'workbuddy')],
-             ['project', '项目', cnt((x) => x.source === 'project')],
-             ['plugin', '插件', cnt((x) => x.source === 'plugin')],
-             ['dup', '跨端重复', cnt((x) => x.copies)],
-             ['bad', '仅看问题', o.issues]]
+          ${[['all', '全部', this.matrixRows().length],
+             ['dup', '重名', dupCount],
+             ['bad', '仅看健康提示', o.issues || 0]]
             .map(([k, lbl, n]) => `<button class="sk-chip ${this.filter === k ? 'on' : ''}" data-f="${k}" ${locked ? 'disabled' : ''}>${lbl} <i>${n}</i></button>`).join('')}
         </div>
         <select class="sk-sort" id="sk-sort" ${locked ? 'disabled' : ''}>
           <option value="hits" ${this.sort === 'hits' ? 'selected' : ''}>按触发次数</option>
           <option value="recent" ${this.sort === 'recent' ? 'selected' : ''}>按最后触发</option>
           <option value="health" ${this.sort === 'health' ? 'selected' : ''}>按健康度</option>
+          <option value="updated" ${this.sort === 'updated' ? 'selected' : ''}>按内容更新</option>
           <option value="name" ${this.sort === 'name' ? 'selected' : ''}>按名称</option>
         </select>
         <div class="sk-search ${this.query ? 'has-query' : ''}" role="search">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
-          <input type="search" id="sk-search" value="${escapeHtml(this.query)}" placeholder="搜索 Skill" aria-label="搜索 Skill 名称、描述、来源或路径" autocomplete="off" spellcheck="false" ${locked ? 'disabled' : ''}>
+          <input type="search" id="sk-search" value="${escapeHtml(this.query)}" placeholder="搜索 Skill" aria-label="搜索 Skill 名称、描述、路径或健康提示" autocomplete="off" spellcheck="false" ${locked ? 'disabled' : ''}>
         </div>
-        <button class="ghost-btn sk-refresh ${this.refreshing ? 'is-refreshing' : ''}" id="sk-refresh" title="重新扫描本机 Skills" aria-label="重新扫描本机 Skills" ${this.busy || this.refreshing ? 'disabled' : ''}>
+        <button class="ghost-btn sk-refresh ${this.refreshing ? 'is-refreshing' : ''}" id="sk-refresh" title="重新扫描本机 Skills" aria-label="重新扫描本机 Skills" ${locked ? 'disabled' : ''}>
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/></svg><span>${this.refreshing ? '刷新中…' : '刷新'}</span>
         </button>
-        <button class="ghost-btn sk-batch-toggle ${this.batchMode ? 'active' : ''}" id="sk-batch-toggle" ${locked ? 'disabled' : ''}>${this.batchMode ? '退出批量管理' : '批量管理'}</button>
       </div>
-      ${this.batchMode ? `<section class="sk-batch-bar" aria-label="批量操作">
-        <div class="sk-batch-count"><span>本次选择</span><b>${batch.total}</b><em>项</em></div>
-        <div class="sk-batch-actions">
-          <button data-batch-action="enable" ${this.busy || !batch.enable ? 'disabled' : ''}>启用 <b>${batch.enable}</b></button>
-          <button data-batch-action="disable" ${this.busy || !batch.disable ? 'disabled' : ''}>停用 <b>${batch.disable}</b></button>
-          <button class="danger" data-batch-action="uninstall" ${this.busy || !batch.uninstall ? 'disabled' : ''}>卸载 <b>${batch.uninstall}</b></button>
-        </div>
-        <div class="sk-batch-status" role="status">${this.busy ? '<span class="sk-busy-dot"></span> 正在逐项处理…' : escapeHtml(this.batchSummary() || '选择后可启用、停用或卸载')}</div>
-      </section>${this.batchResult && this.batchResult.failures.length ? `<div class="sk-batch-failures" role="alert">
-        <strong>${escapeHtml(this.batchSummary())}</strong>
-        ${this.batchResult.failures.map((x) => `<div><span>${escapeHtml(x.name || tilde(x.dir))}${x.label ? ` · ${escapeHtml(x.label)}` : ''}</span><em>${escapeHtml(x.error || '操作失败')}</em></div>`).join('')}
-      </div>` : ''}` : ''}
-      <div class="sk-thead">${this.batchMode ? `<label class="sk-check-cell"><input type="checkbox" id="sk-select-all" aria-label="全选当前筛选结果" ${allVisibleSelected ? 'checked' : ''} ${someVisibleSelected && !allVisibleSelected ? 'data-partial="true"' : ''} ${this.busy || !rows.length ? 'disabled' : ''}></label>` : ''}<span></span><span>Skill</span><span>来源</span><span class="r">45 天触发</span><span class="r">最后触发</span><span class="r">启用</span><span></span></div>`;
-    if (!rows.length) h += `<div class="sk-empty">${this.query ? `没有找到“${escapeHtml(this.query)}”` : '当前筛选下没有 Skill'}</div>`;
-    let dustMarked = false;
+      <div class="sk-thead"><span></span><span>Skill / 描述</span><div class="sk-mtx-head">${SKILL_MATRIX_COLUMNS.map((c) => `<span class="sym ${c.id}" title="${escapeHtml(c.label)} · ${escapeHtml(c.mech)}">${c.sym}</span>`).join('')}</div><span class="r">触发</span><span>健康</span><span class="r">更新</span><span></span></div>`;
+    if (!rows.length) h += `<div class="sk-empty">${this.query ? `没有找到“${escapeHtml(this.query)}”` : '当前筛选下没有原件'}</div>`;
     rows.forEach((it) => {
-      if (this.sort === 'hits' && this.filter === 'all' && !this.query && !dustMarked && it.hits === 0) {
-        h += `<div class="sk-mark">以下 ${o.dust} 个 45 天零触发——启用中的描述仍在每次会话占用预算</div>`;
-        dustMarked = true;
-      }
-      const key = it.dir;
-      const dot = it.issues.length ? (it.residue || it.issues.some((s) => s.includes('缺')) ? 'bad' : 'warn') : 'ok';
-      const toggleTitles = {
-        plugin: 'Claude 插件 Skill 请通过插件管理启停',
-        'claude-settings': it.disabled ? '启用（更新 Claude Settings）' : '停用（更新 Claude Settings）',
-        'codex-config': it.disabled ? '启用（更新 Codex config.toml，重启 Codex 后生效）' : '停用（更新 Codex config.toml，重启 Codex 后生效）',
-        directory: it.disabled
-          ? '启用（移回 skills 目录）'
-          : it.source === 'workbuddy' || it.projectAgent === 'workbuddy'
-            ? '停用 WorkBuddy Skill（移入同级 skills_disabled 目录，后续会话将不再发现）'
-            : '停用（移入 _disabled/，后续会话将不再发现）',
-      };
-      const toggleTitle = toggleTitles[it.toggleStrategy] || toggleTitles.directory;
-      h += `<div class="sk-row ${this.open.has(key) ? 'expanded' : ''} ${it.disabled ? 'off' : ''} ${this.selected.has(key) ? 'selected' : ''}" data-dir="${escapeHtml(key)}" draggable="${this.busy ? 'false' : 'true'}">
-        ${this.batchMode ? `<label class="sk-check-cell" title="选择 ${escapeHtml(it.name)}"><input type="checkbox" data-act="select" aria-label="选择 ${escapeHtml(it.name)}" ${this.selected.has(key) ? 'checked' : ''} ${this.busy ? 'disabled' : ''}></label>` : ''}
-        <span class="sk-dot ${dot}"></span>
-        <div class="sk-name">
-          <div class="nm">${escapeHtml(it.name)}${it.copies ? ` <i class="sk-dup">${it.copies.length} 处副本</i>` : ''}${it.disabled ? ' <i class="sk-offtag">已停用</i>' : it.invocationMode === 'manual' ? ' <i class="sk-offtag">仅手动</i>' : ''}</div>
-          <div class="ds">${escapeHtml(it.issues[0] || it.desc || '')}</div>
-        </div>
-        ${this.srcTag(it)}
-        <div class="sk-hits ${it.hits ? '' : 'zero'}">${it.hits || '· 0 ·'}</div>
-        <div class="sk-last">${this.ago(it.last)}</div>
-        ${it.residue
-          ? '<div class="sk-last r">残留</div>'
-          : it.toggleSupported === false ? `<span class="sk-last r" title="${toggleTitle}">插件管理</span>`
-          : `<label class="sk-switch ${it.disabled ? '' : 'on'} ${this.busy ? 'locked' : ''}" data-act="toggle" title="${toggleTitle}"><i></i></label>`}
-        <span class="sk-chev">▸</span>
-      </div>`;
-      if (this.open.has(key)) {
-        const cut = this.data.overview.descCut;
-        h += `<div class="sk-detail">
-          <div>
-            <div class="fd">${escapeHtml(it.desc || '（无 description）')}${it.descLen > 240 ? '…' : ''}</div>
-            ${it.descLen > cut ? `<div class="fd-cut">⚠ description 共 ${it.descLen.toLocaleString()} 字符，第 ${cut.toLocaleString()} 字符之后模型看不见——靠后段触发词的场景不会触发</div>` : ''}
-            ${it.issues.map((s) => `<div class="fd-cut">⚠ ${escapeHtml(s)}</div>`).join('')}
-            <div class="fd-acts">
-              ${it.residue ? '' : `<button data-act="invoke" class="primary" ${this.busy ? 'disabled' : ''}>▶ 终端调用</button>`}
-              ${it.residue ? '' : `<button data-act="import" ${this.busy ? 'disabled' : ''}>导入到…</button>`}
-              <button data-act="reveal" ${this.busy ? 'disabled' : ''}>在文件区显示</button>
-              ${it.residue ? '' : `<button data-act="edit" ${this.busy ? 'disabled' : ''}>编辑 SKILL.md</button>`}
-              <button data-act="trash" class="danger" ${this.busy ? 'disabled' : ''}>卸载</button>
-            </div>
-          </div>
-          <dl class="fd-meta">
-            <dt>描述体积</dt><dd>${it.descLen.toLocaleString()} 字符${it.descLen > cut ? ' · 超截断线' : ''}</dd>
-            <dt>路径</dt><dd class="mono">${escapeHtml(tilde(it.dir))}</dd>
-            ${it.copies ? `<dt>全部副本</dt><dd class="mono">${it.copies.map(escapeHtml).join('<br>')}</dd>` : ''}
-          </dl>
-        </div>`;
-      }
+      h += this.matrixRowHtml(it);
+      if (this.open.has(it.dir)) h += this.rowDrawerHtml(it);
     });
+    h += this.othersHtml(this.extraRows());
     h += '</div>';
     const area = $('#file-area');
     area.innerHTML = h;
     this.bind(area);
   },
+  originBadge(it) {
+    const b = SKILL_ORIGIN_BADGES[it.origin];
+    return b ? ` <i class="sk-origin ${it.origin}" title="${escapeHtml(b.title)}">${b.text}</i>` : '';
+  },
+  linkIconHtml(it, c) {
+    const st = ((it.agents || {})[c.id]) || {};
+    const on = Boolean(st.on);
+    const busy = this.linkBusy.has(`${it.dir}:${c.id}`);
+    const drift = c.id === 'workbuddy' && st.drift ? '（拷贝落后于原件）' : '';
+    const label = `${it.name} · ${c.label}${on ? '：取消接入' : '：接入'}`;
+    return `<span class="sk-ic ${c.id} ${on ? 'lit' : ''} ${busy ? 'busy' : ''}" data-link-agent="${c.id}" role="button" aria-pressed="${on}" aria-label="${escapeHtml(label)}" title="${escapeHtml(`${c.label} · ${c.mech}${drift}${on ? ' · 点击取消接入' : ' · 点击接入'}`)}">${c.sym}</span>`;
+  },
+  matrixRowHtml(it) {
+    const stock = this.isStock(it);
+    const dup = this.dupNames().has((it.skillName || it.name || '').toLocaleLowerCase());
+    const health = it.health || [];
+    const bad = health.find((x) => x.level === 'error');
+    const shown = bad || health.find((x) => x.level === 'warn');
+    // 断链/死环落在同名 agent 条目上时给行级警告 + 「查看」修复入口（docs/16 §4.6）
+    const anomaly = bad && (this.data.anomalies || []).find((a) => a.name === it.name
+      && (a.kind === 'broken-link' || a.kind === 'dead-loop') && a.agent !== 'store');
+    return `<div class="sk-row ${stock ? 'stock' : ''} ${this.open.has(it.dir) ? 'expanded' : ''}" data-dir="${escapeHtml(it.dir)}" draggable="${this.busy ? 'false' : 'true'}">
+      <span class="sk-dot ${bad ? 'bad' : health.length ? 'warn' : 'ok'}"></span>
+      <div class="sk-name">
+        <div class="nm">${escapeHtml(it.name)}${this.originBadge(it)}${stock ? ' <i class="sk-offtag">未接入</i>' : ''}${dup ? ' <i class="sk-dup" title="多个原件声明同名 Skill，触发统计混在一起">重名</i>' : ''}</div>
+        <div class="ds">${escapeHtml((shown && shown.msg) || it.desc || '')}</div>
+        ${bad ? `<div class="sk-row-alert">⚠ ${escapeHtml(bad.msg)}${anomaly ? `<button data-act="reveal-anomaly" data-path="${escapeHtml(anomaly.path)}">查看</button>` : ''}</div>` : ''}
+      </div>
+      <div class="sk-mtx">${SKILL_MATRIX_COLUMNS.map((c) => this.linkIconHtml(it, c)).join('')}</div>
+      <div class="sk-hits ${it.hits ? '' : 'zero'}">${it.hits || '· 0 ·'}</div>
+      <div class="sk-health ${shown ? shown.level : ''}" title="${escapeHtml(shown ? shown.msg : '无健康提示')}">${shown ? escapeHtml(SKILL_HEALTH_SHORT[shown.code] || shown.code || shown.msg) : '<span>—</span>'}</div>
+      <div class="sk-last">${this.ago(it.mtime)}</div>
+      <span class="sk-chev">▸</span>
+    </div>`;
+  },
+  rowDrawerHtml(it) {
+    const cut = (this.data.overview || {}).descCut;
+    const health = it.health || [];
+    const originText = {
+      store: '原件仓自管（~/.agents/skills）',
+      repo: '仓库家族（fanbox/.agents/skills，git 是唯一真源）',
+      external: '外部原件（外部工具自管：只取消接入、绝不删内容）',
+    }[it.origin] || it.origin;
+    const detailRows = SKILL_MATRIX_COLUMNS.map((c) => {
+      const st = ((it.agents || {})[c.id]) || {};
+      const detail = {
+        claude: st.on ? `相对软链已建：~/.claude/skills/${it.name} → ~/.agents/skills/${it.name}` : '未建链（~/.claude/skills 下没有指向原件仓的相对链）',
+        codex: st.on ? 'config.toml 无禁用条目 = 默认启用（Codex 原生扫描原件仓）' : 'config.toml 已写 enabled=false 选择器（重启 Codex 生效）',
+        zcode: st.on ? 'config.json 未禁用 = 默认启用' : 'config.json 已写 enable:false',
+        workbuddy: st.on ? `拷贝在 ~/.workbuddy/skills/${it.name}${st.drift ? '（落后于原件——可在下方刷新拷贝）' : ''}` : '无激活拷贝（停用拷贝移入同级 skills_disabled）',
+      }[c.id];
+      return `<dt><span class="sk-ic ${c.id} ${st.on ? 'lit' : ''}">${c.sym}</span>${c.label}</dt><dd>${escapeHtml(detail)}</dd>`;
+    }).join('');
+    const wbOn = ((it.agents || {}).workbuddy || {}).on;
+    return `<div class="sk-detail">
+      <div>
+        <div class="fd">${escapeHtml(it.desc || '（无 description）')}</div>
+        ${health.map((x) => `<div class="fd-cut ${x.level === 'error' ? 'bad' : ''}">⚠ ${escapeHtml(x.msg)}</div>`).join('')}
+        ${it.descLen > cut ? `<div class="fd-cut">⚠ description 共 ${(it.descLen || 0).toLocaleString()} 字符，第 ${(cut || 0).toLocaleString()} 字符之后模型看不见——靠后段触发词的场景不会触发</div>` : ''}
+        <dl class="sk-link-matrix">${detailRows}</dl>
+        <div class="fd-acts">
+          <button data-act="invoke" class="primary" ${this.busy ? 'disabled' : ''}>▶ 终端调用</button>
+          <button data-act="edit" ${this.busy ? 'disabled' : ''}>编辑 SKILL.md</button>
+          ${wbOn ? `<button data-act="refresh-wb" ${this.busy || this.linkBusy.has(`${it.dir}:workbuddy`) ? 'disabled' : ''} title="取消接入（旧拷贝进 skills_disabled 可恢复）后从原件重新拷入">刷新 WB 拷贝</button>` : ''}
+          <button data-act="reveal" ${this.busy ? 'disabled' : ''}>在文件区显示</button>
+          ${it.origin === 'store'
+            ? `<button data-act="uninstall" class="danger" ${this.busy ? 'disabled' : ''}>卸载原件（trash）</button>`
+            : `<button data-act="unlink-all" ${this.busy ? 'disabled' : ''}>取消全部接入</button>`}
+        </div>
+      </div>
+      <dl class="fd-meta">
+        <dt>原件路径</dt><dd class="mono">${escapeHtml(tilde(it.dir))}</dd>
+        <dt>来源</dt><dd>${escapeHtml(originText)}</dd>
+        <dt>触发</dt><dd>45 天 ${it.hits || 0} 次 · 最后 ${this.ago(it.last)}</dd>
+        <dt>内容更新</dt><dd>${this.ago(it.mtime)}</dd>
+      </dl>
+    </div>`;
+  },
+  // 项目级与插件进底部折叠区：保持原列表形态、无图标列（docs/16 §4.3）
+  othersHtml(extras) {
+    if (!extras.length) return '';
+    const proj = extras.filter((x) => x.origin === 'project').length;
+    const plug = extras.filter((x) => x.origin === 'plugin').length;
+    return `<details class="sk-others" ${this.othersOpen ? 'open' : ''}>
+      <summary>项目级（${proj}）与插件（${plug}）— 不参与全局矩阵，保持原列表形态</summary>
+      ${extras.map((it) => this.extraRowHtml(it)).join('')}
+    </details>`;
+  },
+  extraRowHtml(it) {
+    const issues = it.issues || [];
+    return `<div class="sk-orow ${this.open.has(it.dir) ? 'expanded' : ''}" data-dir="${escapeHtml(it.dir)}">
+      <span class="sk-dot ${issues.length ? 'warn' : 'ok'}"></span>
+      <div class="sk-name">
+        <div class="nm">${escapeHtml(it.name)}${it.disabled ? ' <i class="sk-offtag">已停用</i>' : it.invocationMode === 'manual' ? ' <i class="sk-offtag">仅手动</i>' : ''}</div>
+        <div class="ds">${escapeHtml(issues[0] || it.desc || '')}</div>
+      </div>
+      ${this.srcTag(it)}
+      <div class="sk-hits ${it.hits ? '' : 'zero'}">${it.hits || '· 0 ·'}</div>
+      <div class="sk-last">${this.ago(it.last)}</div>
+      ${it.residue
+        ? '<div class="sk-last r">残留</div>'
+        : it.toggleSupported === false ? '<span class="sk-last r" title="Claude 插件 Skill 请通过插件管理启停">插件管理</span>'
+        : `<label class="sk-switch ${it.disabled ? '' : 'on'} ${this.busy ? 'locked' : ''}" data-act="toggle" title="${it.disabled ? '启用' : '停用'}（更新 ${it.source === 'plugin' ? '插件管理' : 'Agent 配置'}）"><i></i></label>`}
+      <span class="sk-chev">▸</span>
+    </div>
+    ${this.open.has(it.dir) ? this.extraDetailHtml(it) : ''}`;
+  },
+  extraDetailHtml(it) {
+    return `<div class="sk-detail">
+      <div>
+        <div class="fd">${escapeHtml(it.desc || '（无 description）')}</div>
+        ${(it.issues || []).map((s) => `<div class="fd-cut">⚠ ${escapeHtml(s)}</div>`).join('')}
+        <div class="fd-acts">
+          ${it.residue ? '' : `<button data-act="invoke" class="primary" ${this.busy ? 'disabled' : ''}>▶ 终端调用</button>`}
+          <button data-act="annex" ${this.busy ? 'disabled' : ''} title="把这份内容提升为原件仓中的原件（收编）">收编为原件</button>
+          <button data-act="reveal" ${this.busy ? 'disabled' : ''}>在文件区显示</button>
+          ${it.residue ? '' : `<button data-act="edit" ${this.busy ? 'disabled' : ''}>编辑 SKILL.md</button>`}
+          <button data-act="trash" class="danger" ${this.busy ? 'disabled' : ''}>卸载</button>
+        </div>
+      </div>
+      <dl class="fd-meta">
+        <dt>路径</dt><dd class="mono">${escapeHtml(tilde(it.dir))}</dd>
+        <dt>来源</dt><dd>${escapeHtml(it.label || (it.origin === 'plugin' ? 'Claude 插件' : '项目级'))}</dd>
+      </dl>
+    </div>`;
+  },
   bind(area) {
     this.bindTabs(area);
     const refresh = area.querySelector('#sk-refresh');
     if (refresh) refresh.onclick = () => this.refreshScan();
-    const batchToggle = area.querySelector('#sk-batch-toggle');
-    if (batchToggle) batchToggle.onclick = () => {
-      if (this.busy) return;
-      this.batchMode = !this.batchMode;
-      this.selected.clear(); this.batchResult = null;
-      this.render();
-    };
-    const selectAll = area.querySelector('#sk-select-all');
-    if (selectAll) {
-      selectAll.indeterminate = selectAll.dataset.partial === 'true';
-      selectAll.onchange = () => {
-        if (this.busy) return;
-        const visible = this.rows();
-        if (selectAll.checked) visible.forEach((x) => this.selected.add(x.dir));
-        else visible.forEach((x) => this.selected.delete(x.dir));
-        this.batchResult = null; this.render();
+    area.querySelectorAll('[data-agent-tab]').forEach((btn) => {
+      btn.onclick = () => {
+        if (this.busy || btn.dataset.agentTab === this.agent) return;
+        this.agent = btn.dataset.agentTab; this.render();
       };
-    }
-    area.querySelectorAll('[data-batch-action]').forEach((btn) => {
-      btn.onclick = () => this.runBatch(btn.dataset.batchAction);
     });
+    const stockChip = area.querySelector('#sk-stock-chip');
+    if (stockChip) stockChip.onclick = () => { if (this.busy) return; this.stockOnly = !this.stockOnly; this.render(); };
+    area.querySelector('.sk-chips').onclick = (e) => {
+      const c = e.target.closest('.sk-chip'); if (!c || this.busy) return;
+      this.filter = c.dataset.f; this.render();
+    };
+    area.querySelector('#sk-sort').onchange = (e) => { if (this.busy) return; this.sort = e.target.value; this.render(); };
     const search = area.querySelector('#sk-search');
     if (search) {
       let composing = false;
       const applySearch = (value) => {
         if (this.busy || value === this.query) return;
-        this.query = value; this.selected.clear(); this.batchResult = null; this.render();
+        this.query = value; this.render();
         const next = area.querySelector('#sk-search');
         if (next) { next.focus({ preventScroll: true }); next.setSelectionRange(value.length, value.length); }
       };
@@ -5688,76 +5784,54 @@ const skillsView = {
       search.oncompositionend = (e) => { composing = false; applySearch(e.target.value); };
       search.oninput = (e) => { if (!composing && !e.isComposing) applySearch(e.target.value); };
     }
-    area.querySelector('.sk-chips').onclick = (e) => {
-      const c = e.target.closest('.sk-chip'); if (!c) return;
-      if (this.busy) return;
-      this.filter = c.dataset.f; this.selected.clear(); this.batchResult = null; this.render();
-    };
-    area.querySelector('#sk-sort').onchange = (e) => { if (this.busy) return; this.sort = e.target.value; this.render(); };
+    const others = area.querySelector('.sk-others');
+    if (others) others.addEventListener('toggle', () => { this.othersOpen = others.open; });
     area.querySelector('.sk-wrap').addEventListener('click', async (e) => {
-      if (e.target.closest('.sk-check-cell') && !e.target.closest('[data-act]')) { e.stopPropagation(); return; }
-      const row = e.target.closest('.sk-row');
+      const icon = e.target.closest('[data-link-agent]');
+      const container = e.target.closest('.sk-row, .sk-orow');
       const detail = e.target.closest('.sk-detail');
       const act = e.target.closest('[data-act]');
-      const dir = row ? row.dataset.dir : detail ? detail.previousElementSibling.dataset.dir : null;
+      let dir = null;
+      if (container) dir = container.dataset.dir;
+      else if (detail && detail.previousElementSibling) dir = detail.previousElementSibling.dataset.dir;
       if (!dir) return;
-      const it = this.data.items.find((x) => x.dir === dir);
-      if (act && it) {
+      const it = this.rowByDir(dir);
+      if (!it) return;
+      if (icon && it.agents) { e.stopPropagation(); this.toggleLink(it, icon.dataset.linkAgent); return; }
+      if (act && act.dataset.act === 'reveal-anomaly') { e.stopPropagation(); navigate(dirOf(act.dataset.path)); return; }
+      if (act && it.agents) {
+        // 矩阵行的抽屉动作
         e.stopPropagation();
-        if (act.dataset.act === 'select') {
-          if (this.busy) return;
-          act.checked ? this.selected.add(dir) : this.selected.delete(dir);
-          this.batchResult = null; this.render();
-        } else if (act.dataset.act === 'toggle') {
-          if (this.busy) return;
-          this.busy = true; this.render();
-          try {
-            const r = await apiPost('/api/skills/toggle', { dir, enable: it.disabled, cwd: state.cwd });
-                if (r.ok) {
-                  if (this.selected.has(dir) && r.dir && r.dir !== dir) { this.selected.delete(dir); this.selected.add(r.dir); }
-                  const done = it.disabled ? '已启用 ' + it.name : '已停用 ' + it.name + '（文件还在，随时可启用）';
-                  const sameName = r.affected > 1 ? `；同名 Claude 安装项共 ${r.affected} 个已同步` : '';
-                  toast((r.restartRequired === 'codex' ? done + '；重启 Codex 后生效' : done) + sameName);
-                }
-            else toast('操作失败：' + (r.error || ''), true);
-          } catch (err) { toast('操作失败：' + (err.message || '请求失败'), true); }
-          finally { this.busy = false; await this.reload(); }
-        } else if (act.dataset.act === 'invoke') {
-          if (this.busy) return;
-          invokeSkillInTerm(it.name);
-        } else if (act.dataset.act === 'import') {
-          await this.importSkill(it);
-        } else if (act.dataset.act === 'reveal') {
-          if (this.busy) return;
-          navigate(dirOf(it.dir));
-        } else if (act.dataset.act === 'edit') {
-          if (this.busy) return;
-          await navigate(it.dir);
-          const e2 = state.entries.find((x) => x.name === 'SKILL.md');
-          if (e2) { state.selected = e2.path; openPreview(e2); renderFiles(); }
-        } else if (act.dataset.act === 'trash') {
-          if (this.busy) return;
-          const ok = await confirmDialog(`把「${it.name}」移到废纸篓？（系统废纸篓里随时可恢复）`);
-          if (!ok) return;
-          this.busy = true; this.render();
-          try {
-            const r = await apiPost('/api/skills/trash', { dir, cwd: state.cwd });
-            if (r.ok) { toast('已卸载，可从系统废纸篓恢复'); this.open.delete(dir); this.selected.delete(dir); }
-            else toast('卸载失败：' + (r.error || ''), true);
-          } catch (err) { toast('卸载失败：' + (err.message || '请求失败'), true); }
-          finally { this.busy = false; await this.reload(); }
-        }
+        const a = act.dataset.act;
+        if (a === 'invoke') invokeSkillInTerm(it.skillName || it.name);
+        else if (a === 'refresh-wb') await this.refreshWorkBuddyCopy(it);
+        else if (a === 'reveal') navigate(dirOf(it.dir));
+        else if (a === 'uninstall') await this.uninstallRow(it);
+        else if (a === 'unlink-all') await this.unlinkAll(it);
+        else if (a === 'edit') await this.editSkill(it);
         return;
       }
-      if (row && !this.busy) { this.open.has(dir) ? this.open.delete(dir) : this.open.add(dir); this.render(); }
+      if (act) {
+        // 项目级/插件：保持原形态的启停与动作
+        e.stopPropagation();
+        const a = act.dataset.act;
+        if (a === 'toggle') await this.toggleExtra(it);
+        else if (a === 'invoke') invokeSkillInTerm(it.skillName || it.name);
+        else if (a === 'annex') await this.annexItem(it);
+        else if (a === 'reveal') navigate(dirOf(it.dir));
+        else if (a === 'trash') await this.trashExtra(it);
+        else if (a === 'edit') await this.editSkill(it);
+        return;
+      }
+      if (container && !this.busy) { this.open.has(dir) ? this.open.delete(dir) : this.open.add(dir); this.render(); }
     });
     // 拖 skill 行 → 终端：带 skill 名专用类型；text/plain 给外部目标
-    area.querySelectorAll('.sk-row').forEach((r) => {
+    area.querySelectorAll('.sk-row, .sk-orow').forEach((r) => {
       r.addEventListener('dragstart', (ev) => {
-        const it = this.data.items.find((x) => x.dir === r.dataset.dir);
+        const it = this.rowByDir(r.dataset.dir);
         if (!it) return;
-        ev.dataTransfer.setData('application/x-fanbox-skill', it.name);
-        ev.dataTransfer.setData('text/plain', '/' + it.name);
+        ev.dataTransfer.setData('application/x-fanbox-skill', it.skillName || it.name);
+        ev.dataTransfer.setData('text/plain', '/' + (it.skillName || it.name));
         ev.dataTransfer.effectAllowed = 'copy';
       });
     });
