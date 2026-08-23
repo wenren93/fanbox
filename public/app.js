@@ -5064,6 +5064,7 @@ const SKILL_MATRIX_COLUMNS = [
   { id: 'workbuddy', sym: '⌂', label: 'WorkBuddy', mech: '拷贝入 ~/.workbuddy/skills，取消接入移入同级 skills_disabled' },
   { id: 'zcode', sym: '▲', label: 'ZCode', mech: 'config.json 按原件路径的 enable 开关' },
 ];
+const DISCOVERY_TARGETS = SKILL_MATRIX_COLUMNS.map(({ id, label }) => ({ id, label }));
 // 原件徽标（docs/16 §1）：store 自管不标；repo 家族 git 是真源；external 只取消接入、绝不删内容
 const SKILL_ORIGIN_BADGES = {
   repo: { text: '仓库', title: '仓库家族原件：内容在 fanbox 仓库里由 git 管理，原件仓放转指链' },
@@ -5089,7 +5090,8 @@ const skillsView = {
     input: '', query: '', results: [], status: 'idle', error: '', cached: false,
     cacheAgeMs: 0, installable: true, searching: false, inspecting: false,
     inspectingEntryId: null, selectedEntryId: null, inspection: null, installError: '',
-    defaultTargetAgents: ['claude', 'codex', 'zcode', 'workbuddy'], selectedTargetAgents: null, settingsLoaded: false,
+    defaultTargetAgents: DISCOVERY_TARGETS.map((target) => target.id), selectedTargetAgents: null, settingsLoaded: false,
+    riskAcknowledged: false,
     installationPrerequisite: { ok: true },
   },
   async show() {
@@ -5467,7 +5469,7 @@ const skillsView = {
       const r = await api('/api/skills/discovery/settings');
       const targets = r && (r.defaultTargetAgents || (r.settings && r.settings.defaultTargetAgents));
       if (Array.isArray(targets)) {
-        this.discovery.defaultTargetAgents = ['claude', 'codex', 'zcode', 'workbuddy'].filter((agent) => targets.includes(agent));
+        this.discovery.defaultTargetAgents = DISCOVERY_TARGETS.map((target) => target.id).filter((agent) => targets.includes(agent));
         if (!this.discovery.inspection) this.discovery.selectedTargetAgents = null;
       }
       if (r && r.installationPrerequisite) this.discovery.installationPrerequisite = r.installationPrerequisite;
@@ -5555,6 +5557,7 @@ const skillsView = {
       } else {
         d.inspection = r.inspection;
         d.selectedTargetAgents = [...d.defaultTargetAgents];
+        d.riskAcknowledged = false;
         d.installError = '';
       }
     } catch (err) { d.installError = err.message || '检查失败，请稍后重试'; }
@@ -5580,6 +5583,9 @@ const skillsView = {
     const area = $('#file-area');
     const agents = [...area.querySelectorAll('[name=discovery-target]:checked')].map((input) => input.value);
     d.selectedTargetAgents = agents;
+    const acknowledge = Boolean(area.querySelector('#sk-disc-ack') && area.querySelector('#sk-disc-ack').checked);
+    d.riskAcknowledged = acknowledge;
+    if (i.enhancedConfirmation && !acknowledge) { toast('请先展开并确认风险明细', true); return; }
     const overwrite = Boolean(area.querySelector('#sk-disc-overwrite') && area.querySelector('#sk-disc-overwrite').checked);
     if (this.conflictNeedsOverwrite(i) && !overwrite) { toast('请明确确认替换现有安装项', true); return; }
     const remember = Boolean(area.querySelector('#sk-disc-remember') && area.querySelector('#sk-disc-remember').checked);
@@ -5591,7 +5597,7 @@ const skillsView = {
       }
       const expected = i.expected || {};
       const r = await apiPost('/api/skills/discovery/install', {
-        inspectionId: i.id, agents, overwrite,
+        inspectionId: i.id, agents, acknowledge, overwrite,
         expectedTargetHash: expected.targetHash || i.expectedTargetHash,
         expectedSourceHash: expected.sourceHash || i.contentHash,
       });
@@ -5692,7 +5698,6 @@ const skillsView = {
   discoveryInspectionHtml(i) {
     const list = this.inspectionLists(i);
     const source = i.sourceUrl || i.repository;
-    const targetLabels = { claude: 'Claude', codex: 'Codex', zcode: 'ZCode', workbuddy: 'WorkBuddy' };
     const selectedTargets = Array.isArray(this.discovery.selectedTargetAgents)
       ? this.discovery.selectedTargetAgents : this.discovery.defaultTargetAgents;
     const enhanced = Boolean(i.enhancedConfirmation);
@@ -5713,20 +5718,21 @@ const skillsView = {
         <div class="sk-disc-decision-title"><h2 id="sk-disc-confirm-title">${escapeHtml(i.name || 'Skill 安装确认')}</h2><span>${escapeHtml(repoLabel)}</span></div>
       </div>
       <p class="sk-disc-decision-desc">${escapeHtml(i.description || '（无 description）')}</p>
-      <div class="sk-disc-decision-summary"><span>${fileCount.toLocaleString()} 个文件</span><i></i><span>${escapeHtml(fmtSize(Number(i.totalSize || 0)) || '0 B')}</span><i></i><span>${declaredCount ? `${declaredCount} 项脚本、工具或依赖声明` : '无脚本与外部依赖'}</span>${riskCount ? `<i></i><b>${riskCount} 项风险</b>` : ''}</div>
+      <div class="sk-disc-decision-summary"><span>${fileCount.toLocaleString()} 个文件</span><i></i><span>${escapeHtml(fmtSize(Number(i.totalSize || 0)) || '0 B')}</span><i></i><span>${declaredCount ? `${declaredCount} 项脚本、工具或依赖声明` : '无脚本与外部依赖'}</span>${riskCount ? `<i></i><b>${riskCount} 项风险</b>` : ''}${i.update ? `<i></i><b>影响 ${Number(i.affectedConnections || 0)} 个现有接入</b>` : ''}</div>
       <div class="sk-disc-decision-risk ${riskCount || blocked ? 'warn' : 'safe'}">${ic(riskCount || blocked ? 'alert' : 'eye', 'currentColor', 16)}<span>${riskCount || blocked ? `需要留意：<b>${escapeHtml(riskText)}</b>` : '<b>本机检查未发现额外风险</b>'}</span></div>
       ${this.discovery.installError ? `<div class="sk-disc-install-error" role="alert"><b>安装失败，确认内容已保留</b><span>${escapeHtml(this.discovery.installError)}</span></div>` : ''}
       ${conflict ? `<div class="sk-disc-conflict"><b>${escapeHtml(conflict.title || (blocked ? '同名异源冲突' : '目标安装项需要明确处置'))}</b><span>${escapeHtml(conflict.message || conflict.reason || '现有安装项不会被静默覆盖。')}</span>${conflict.dir ? `<code>${escapeHtml(tilde(conflict.dir))}</code>` : ''}</div>` : ''}
       ${overwrite ? `<label class="sk-disc-confirm-check danger"><input type="checkbox" id="sk-disc-overwrite"><span>我确认替换现有安装项；旧内容将移入系统废纸篓，可恢复。</span></label>` : ''}
       <div class="sk-disc-decision-bar">
-        <fieldset class="sk-disc-targets sk-disc-segments"><legend>接入到 · 不选则仅存入原件仓</legend><div>${Object.entries(targetLabels).map(([id, label]) => `<label><input type="checkbox" name="discovery-target" value="${id}" ${selectedTargets.includes(id) ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div></fieldset>
-        <div class="sk-disc-confirm-actions"><button class="ghost-btn sk-disc-tech-btn" data-disc-act="open-details" aria-expanded="false">技术详情</button><button class="ghost-btn sk-disc-icon-btn" data-disc-act="source-inspection" data-source="${escapeHtml(source || '')}" aria-label="打开来源" title="打开来源">${ic('link', 'currentColor', 16)}</button><button class="primary sk-disc-icon-btn" data-disc-act="install" aria-label="${escapeHtml(installLabel)}" title="${escapeHtml(installLabel)}" ${blocked || this.discovery.inspecting ? 'disabled' : ''}>${this.discovery.inspecting ? `<span class="sk-disc-spinner">${ic('clock', 'currentColor', 16)}</span>` : ic('box', 'currentColor', 16)}</button></div>
+        <fieldset class="sk-disc-targets sk-disc-segments"><legend>接入到 · 不选则仅存入原件仓</legend><div>${DISCOVERY_TARGETS.map(({ id, label }) => `<label><input type="checkbox" name="discovery-target" value="${id}" ${selectedTargets.includes(id) ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div></fieldset>
+        <div class="sk-disc-confirm-actions"><button class="ghost-btn sk-disc-tech-btn" data-disc-act="open-details" aria-expanded="${enhanced ? 'true' : 'false'}">技术详情</button><button class="ghost-btn sk-disc-icon-btn" data-disc-act="source-inspection" data-source="${escapeHtml(source || '')}" aria-label="打开来源" title="打开来源">${ic('link', 'currentColor', 16)}</button><button class="primary sk-disc-icon-btn" data-disc-act="install" aria-label="${escapeHtml(installLabel)}" title="${escapeHtml(installLabel)}" ${blocked || this.discovery.inspecting || (enhanced && !this.discovery.riskAcknowledged) ? 'disabled' : ''}>${this.discovery.inspecting ? `<span class="sk-disc-spinner">${ic('clock', 'currentColor', 16)}</span>` : ic('box', 'currentColor', 16)}</button></div>
       </div>
-      <aside class="sk-disc-tech-drawer" aria-hidden="true" aria-labelledby="sk-disc-tech-title">
+      <aside class="sk-disc-tech-drawer ${enhanced ? 'open' : ''}" aria-hidden="${String(!enhanced)}" aria-labelledby="sk-disc-tech-title">
         <div class="sk-disc-tech-head"><h3 id="sk-disc-tech-title">技术详情</h3><button class="ghost-btn sk-disc-icon-btn" data-disc-act="close-details" aria-label="关闭技术详情" title="关闭技术详情">${ic('x', 'currentColor', 16)}</button></div>
         <section><h4>来源</h4><dl><dt>公开仓库</dt><dd>${escapeHtml(i.repository || '—')}</dd><dt>作者</dt><dd>${escapeHtml(i.author || '—')}</dd><dt>Skill 路径</dt><dd><code>${escapeHtml(i.skillPath || '—')}</code></dd><dt>固定 commit</dt><dd><code>${escapeHtml((i.commit || '').slice(0, 12) || '—')}</code></dd></dl></section>
         <section><h4>本机检查</h4><dl><dt>脚本</dt><dd>${list.scripts.length}</dd><dt>二进制资源</dt><dd>${list.binaries.length}</dd><dt>工具声明</dt><dd>${list.tools.length}</dd><dt>外部依赖</dt><dd>${list.dependencies.length}</dd><dt>许可证</dt><dd>${escapeHtml(i.license || '许可证未知')}</dd></dl></section>
         ${this.discoveryDetailGroup('风险', list.risks)}${this.discoveryDetailGroup('脚本 / 可执行文件', list.scripts)}${this.discoveryDetailGroup('二进制资源', list.binaries)}${this.discoveryDetailGroup('工具声明', list.tools)}${this.discoveryDetailGroup('外部依赖', list.dependencies)}
+        ${enhanced ? `<label class="sk-disc-confirm-check"><input type="checkbox" id="sk-disc-ack" ${this.discovery.riskAcknowledged ? 'checked' : ''}><span>我已展开并查看风险明细，确认继续安装。</span></label>` : ''}
         <div class="sk-disc-file-list"><b>完整文件清单</b>${list.paths.length ? `<ul>${list.paths.map((p) => `<li><code>${escapeHtml(p)}</code></li>`).join('')}</ul>` : '<span>没有其他文件</span>'}</div>
         <label class="sk-disc-remember"><input type="checkbox" id="sk-disc-remember"><span>记住为以后安装的默认接入对象</span></label>
       </aside>
@@ -5760,7 +5766,7 @@ const skillsView = {
       if (inspect) inspect.onclick = () => this.inspectDiscovery(entry);
     });
     const close = area.querySelector('[data-disc-act=close-inspection]');
-    if (close) close.onclick = () => { this.discovery.inspection = null; this.discovery.installError = ''; this.discovery.selectedEntryId = null; this.render(); };
+    if (close) close.onclick = () => { this.discovery.inspection = null; this.discovery.installError = ''; this.discovery.selectedEntryId = null; this.discovery.riskAcknowledged = false; this.render(); };
     const sourceInspection = area.querySelector('[data-disc-act=source-inspection]');
     if (sourceInspection) sourceInspection.onclick = () => this.openDiscoverySource(sourceInspection.dataset.source);
     const drawer = area.querySelector('.sk-disc-tech-drawer');
@@ -5785,6 +5791,11 @@ const skillsView = {
       };
     });
     const install = area.querySelector('[data-disc-act=install]');
+    const acknowledge = area.querySelector('#sk-disc-ack');
+    if (acknowledge) acknowledge.onchange = () => {
+      this.discovery.riskAcknowledged = acknowledge.checked;
+      if (install) install.disabled = !acknowledge.checked || this.discovery.inspecting;
+    };
     if (install) install.onclick = () => this.installDiscovery();
   },
   // 扫描异常处置卡（docs/14 入口一）：real-dir 残留给「收编为原件」，

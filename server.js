@@ -3202,6 +3202,37 @@ async function skillLinkWorkBuddyOff(name) {
   return { path: dest };
 }
 
+// 更新原件后，WorkBuddy 的激活拷贝需要按现有「先停用、再接入」路径重拷。
+// 旧拷贝留在 skills_disabled，既符合漂移刷新规则，也给安装事务保留可恢复备份。
+async function refreshSkillWorkBuddy(row) {
+  const off = await skillLinkColumn(row, 'workbuddy', false);
+  if (!off.ok) return off;
+  const on = await skillLinkColumn(row, 'workbuddy', true);
+  if (on.ok) return { ok: true, refreshed: true, backupPath: off.path };
+  if (off.path) {
+    const active = path.join(WORKBUDDY_SKILLS, row.name);
+    try {
+      await fsp.rm(active, { recursive: true, force: true });
+      await fsp.rename(off.path, active);
+    } catch (error) {
+      return { ...on, error: `${on.error || '刷新拷贝失败'}；旧拷贝恢复失败：${error.message}` };
+    }
+  }
+  return on;
+}
+
+async function restoreRefreshedWorkBuddy(name, backupPath) {
+  if (!backupPath) return { ok: true };
+  const active = path.join(WORKBUDDY_SKILLS, name);
+  try {
+    await fsp.rm(active, { recursive: true, force: true });
+    await fsp.rename(backupPath, active);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+}
+
 // v2 扫描里的矩阵行（行 = 原件；项目级与插件不在列模型，docs/16 §1）——link 端点与 batch v2 共用
 function matrixRowsFromScan(scan) {
   return (scan.items || []).filter((it) => it.agents && it.origin !== 'project' && it.origin !== 'plugin');
@@ -3246,7 +3277,7 @@ async function skillLink(parsed) {
 
 // 发现页安装与矩阵图标共用 skillLink；这里仅负责把多选转换为四列目标状态，
 // 并在任一列失败时恢复本次已改列，避免安装留下半套接入。
-async function setSkillConnections(name, selectedAgents) {
+async function setSkillConnections(name, selectedAgents, options = {}) {
   const scan = await skillsDataV2({ force: true });
   const row = matrixRowsFromScan(scan).find((item) => item.name === name);
   if (!row) return { ok: false, status: 'invalid_name', error: '新原件未出现在已扫描清单里' };
@@ -3254,10 +3285,14 @@ async function setSkillConnections(name, selectedAgents) {
   const desired = new Set(selectedAgents);
   const changed = [];
   const results = [];
+  let workbuddyBackup = null;
   for (const agent of SKILL_LINK_AGENTS) {
     const on = desired.has(agent);
-    if (previous[agent] === on) continue;
-    const result = await skillLink({ ok: true, name, agent, on });
+    const refreshWorkBuddy = agent === 'workbuddy' && on && previous[agent] && options.refreshWorkBuddy;
+    if (previous[agent] === on && !refreshWorkBuddy) continue;
+    const result = refreshWorkBuddy
+      ? await refreshSkillWorkBuddy(row)
+      : await skillLink({ ok: true, name, agent, on });
     results.push(result);
     if (!result.ok) {
       const rollbackErrors = [];
@@ -3275,12 +3310,15 @@ async function setSkillConnections(name, selectedAgents) {
         conflict: result.conflict,
       };
     }
+    if (refreshWorkBuddy) workbuddyBackup = result.backupPath || null;
     changed.push(agent);
   }
-  return { ok: true, previous, results };
+  return { ok: true, previous, results, workbuddyBackup };
 }
 
-async function restoreSkillConnections(name, previous) {
+async function restoreSkillConnections(name, previous, connectionState = {}) {
+  const restoredWorkBuddy = await restoreRefreshedWorkBuddy(name, connectionState.workbuddyBackup);
+  if (!restoredWorkBuddy.ok) return restoredWorkBuddy;
   const selected = SKILL_LINK_AGENTS.filter((agent) => previous && previous[agent]);
   return setSkillConnections(name, selected);
 }

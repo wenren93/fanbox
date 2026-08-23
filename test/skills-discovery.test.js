@@ -264,9 +264,15 @@ test('Inspection pins a full SHA, then installs one original and connects all se
   assert.ok(inspected.body.inspection.files.some((f) => f.path === 'run.sh'));
   assert.deepEqual(inspected.body.inspection.binaries, ['references/asset.bin']);
   assert.deepEqual(inspected.body.inspection.dependencies, ['references/package.json', 'local-runtime >= 1']);
+  const unacknowledged = await request('/api/skills/discovery/install', {
+    inspectionId: inspected.body.inspection.id,
+    agents: ['claude', 'codex', 'zcode', 'workbuddy'],
+  });
+  assert.equal(unacknowledged.body.status, 'risk_acknowledgement_required');
   const installed = await request('/api/skills/discovery/install', {
     inspectionId: inspected.body.inspection.id,
     agents: ['claude', 'codex', 'zcode', 'workbuddy'],
+    acknowledge: true,
   });
   assert.equal(installed.body.ok, true, JSON.stringify(installed.body));
   const target = path.join(home, '.agents', 'skills', 'fixture-skill');
@@ -297,6 +303,7 @@ test('Inspection pins a full SHA, then installs one original and connects all se
   const identical = await request('/api/skills/discovery/install', {
     inspectionId: reinspected.body.inspection.id,
     agents: ['claude', 'codex', 'zcode', 'workbuddy'],
+    acknowledge: true,
   });
   assert.equal(identical.body.status, 'identical', JSON.stringify(identical.body));
 });
@@ -314,6 +321,7 @@ test('Discovery install connects only the selected Agent subset', async (t) => {
   const installed = await request('/api/skills/discovery/install', {
     inspectionId: inspected.body.inspection.id,
     agents: ['workbuddy', 'claude'],
+    acknowledge: true,
   });
   assert.equal(installed.body.ok, true, JSON.stringify(installed.body));
   assert.deepEqual(installed.body.agents, ['claude', 'workbuddy']);
@@ -340,6 +348,7 @@ test('Discovery install accepts an empty Agent selection as pure stock', async (
   const installed = await request('/api/skills/discovery/install', {
     inspectionId: inspected.body.inspection.id,
     agents: [],
+    acknowledge: true,
   });
   assert.equal(installed.body.ok, true, JSON.stringify(installed.body));
   assert.deepEqual(installed.body.agents, []);
@@ -352,6 +361,42 @@ test('Discovery install accepts an empty Agent selection as pure stock', async (
   assert.deepEqual(Object.fromEntries(Object.entries(row.agents).map(([agent, state]) => [agent, state.on])), {
     claude: false, codex: false, zcode: false, workbuddy: false,
   });
+});
+
+test('Same-source update reports affected connections and refreshes an active WorkBuddy copy', async (t) => {
+  if (process.platform !== 'darwin') return t.skip('external installation is macOS-only');
+  const fixture = await makeFixtureRepository(t);
+  const { request, home } = await startServer(t, {
+    FANBOX_TEST_DISCOVERY_GIT_REPO: fixture.dir,
+    FANBOX_TEST_DISCOVERY_ARCHIVE: fixture.archive,
+  });
+  const entry = { id: 'owner/repo/fixture-skill', name: 'fixture-skill', skillId: 'fixture-skill', source: 'owner/repo', installs: 1 };
+  const first = await request('/api/skills/discovery/inspect', { entry });
+  assert.equal((await request('/api/skills/discovery/install', {
+    inspectionId: first.body.inspection.id,
+    agents: ['workbuddy'],
+    acknowledge: true,
+  })).body.ok, true);
+
+  const note = path.join(fixture.dir, 'skills', 'fixture-skill', 'references', 'note.txt');
+  await fs.writeFile(note, 'updated upstream', 'utf8');
+  await execFileP('git', ['add', 'skills/fixture-skill/references/note.txt'], { cwd: fixture.dir });
+  await execFileP('git', ['-c', 'user.email=test@example.invalid', '-c', 'user.name=Fixture', 'commit', '-qm', 'update'], { cwd: fixture.dir });
+  const updateSha = (await execFileP('git', ['rev-parse', 'HEAD'], { cwd: fixture.dir })).stdout.trim();
+  await execFileP('git', ['archive', '--format=tar.gz', `--prefix=repo-${updateSha}/`, '-o', fixture.archive, updateSha], { cwd: fixture.dir });
+
+  const second = await request('/api/skills/discovery/inspect', { entry });
+  assert.equal(second.body.inspection.update, true);
+  assert.equal(second.body.inspection.affectedConnections, 1);
+  const updated = await request('/api/skills/discovery/install', {
+    inspectionId: second.body.inspection.id,
+    agents: ['workbuddy'],
+    acknowledge: true,
+  });
+  assert.equal(updated.body.ok, true, JSON.stringify(updated.body));
+  assert.equal(updated.body.status, 'updated');
+  assert.equal(await fs.readFile(path.join(home, '.agents', 'skills', 'fixture-skill', 'references', 'note.txt'), 'utf8'), 'updated upstream');
+  assert.equal(await fs.readFile(path.join(home, '.workbuddy', 'skills', 'fixture-skill', 'references', 'note.txt'), 'utf8'), 'updated upstream');
 });
 
 test('Discovery install rolls back the original when a selected Agent connection is occupied', async (t) => {
@@ -370,6 +415,7 @@ test('Discovery install rolls back the original when a selected Agent connection
   const result = await request('/api/skills/discovery/install', {
     inspectionId: inspected.body.inspection.id,
     agents: ['claude', 'codex', 'zcode', 'workbuddy'],
+    acknowledge: true,
   });
   assert.equal(result.body.status, 'connection_failed', JSON.stringify(result.body));
   assert.deepEqual(result.body.conflict, { kind: 'occupied', path: occupied });
@@ -594,10 +640,11 @@ test('Unknown existing target requires explicit replacement and uninstall remove
   const entry = { id: 'owner/repo/fixture-skill', name: 'fixture-skill', skillId: 'fixture-skill', source: 'owner/repo', installs: 1 };
   const inspected = await request('/api/skills/discovery/inspect', { entry });
   assert.equal(inspected.body.ok, true);
-  const first = await request('/api/skills/discovery/install', { inspectionId: inspected.body.inspection.id, agents: ['codex'] });
+  const first = await request('/api/skills/discovery/install', { inspectionId: inspected.body.inspection.id, agents: ['codex'], acknowledge: true });
   assert.equal(first.body.status, 'unknown_conflict');
   const replaced = await request('/api/skills/discovery/install', {
     inspectionId: inspected.body.inspection.id, agents: ['codex'],
+    acknowledge: true,
     overwrite: true,
     expectedTargetHash: first.body.expectedTargetHash || first.body.targetHash,
     conflictFingerprint: first.body.conflictFingerprint,
@@ -607,6 +654,52 @@ test('Unknown existing target requires explicit replacement and uninstall remove
   assert.equal(removed.body.ok, true);
   const records = JSON.parse(await fs.readFile(path.join(home, '.fanbox', 'skill-sources.json'), 'utf8'));
   assert.equal(Object.keys(records.installations || records).length, 0);
+});
+
+test('Foreign-original takeover supports all, subset, and empty Agent selections', async (t) => {
+  if (process.platform !== 'darwin') return t.skip('external installation is macOS-only');
+  const fixture = await makeFixtureRepository(t);
+  const cases = [
+    { label: 'all', agents: ['claude', 'codex', 'zcode', 'workbuddy'] },
+    { label: 'subset', agents: ['claude', 'workbuddy'] },
+    { label: 'empty', agents: [] },
+  ];
+  for (const scenario of cases) {
+    await t.test(scenario.label, async (t) => {
+      const { request, home } = await startServer(t, {
+        FANBOX_TEST_DISCOVERY_GIT_REPO: fixture.dir,
+        FANBOX_TEST_DISCOVERY_ARCHIVE: fixture.archive,
+      });
+      const target = path.join(home, '.agents', 'skills', 'fixture-skill');
+      await fs.mkdir(target, { recursive: true });
+      await fs.writeFile(path.join(target, 'SKILL.md'), '---\nname: fixture-skill\ndescription: foreign original\n---\n');
+      const entry = { id: 'owner/repo/fixture-skill', name: 'fixture-skill', skillId: 'fixture-skill', source: 'owner/repo', installs: 1 };
+      const inspected = await request('/api/skills/discovery/inspect', { entry });
+      const conflict = await request('/api/skills/discovery/install', {
+        inspectionId: inspected.body.inspection.id,
+        agents: scenario.agents,
+        acknowledge: true,
+      });
+      assert.equal(conflict.body.status, 'unknown_conflict');
+      const replaced = await request('/api/skills/discovery/install', {
+        inspectionId: inspected.body.inspection.id,
+        agents: scenario.agents,
+        acknowledge: true,
+        overwrite: true,
+        expectedTargetHash: conflict.body.expectedTargetHash,
+      });
+      assert.equal(replaced.body.ok, true, JSON.stringify(replaced.body));
+      const refreshed = await request('/api/skills/refresh', { v: 2 });
+      const row = refreshed.body.items.find((item) => item.name === 'fixture-skill');
+      const selected = new Set(scenario.agents);
+      assert.deepEqual(Object.fromEntries(Object.entries(row.agents).map(([agent, state]) => [agent, state.on])), {
+        claude: selected.has('claude'),
+        codex: selected.has('codex'),
+        zcode: selected.has('zcode'),
+        workbuddy: selected.has('workbuddy'),
+      });
+    });
+  }
 });
 
 test('Uninstall restores the installation when removing its source record fails', async (t) => {
@@ -624,6 +717,7 @@ test('Uninstall restores the installation when removing its source record fails'
   const inspected = await request('/api/skills/discovery/inspect', { entry });
   assert.equal((await request('/api/skills/discovery/install', {
     inspectionId: inspected.body.inspection.id, agents: ['codex'],
+    acknowledge: true,
   })).body.ok, true);
   const target = path.join(home, '.agents', 'skills', 'fixture-skill');
   const removed = await request('/api/skills/trash', { dir: target });
@@ -649,6 +743,7 @@ test('A source-record write failure leaves no visible new installation or phanto
   const inspected = await request('/api/skills/discovery/inspect', { entry });
   const result = await request('/api/skills/discovery/install', {
     inspectionId: inspected.body.inspection.id, agents: ['codex'],
+    acknowledge: true,
   });
   assert.equal(result.body.status, 'install_failed');
   const target = path.join(home, '.agents', 'skills', 'fixture-skill');
@@ -670,21 +765,27 @@ test('Trash failure during an update restores old files and old source metadata'
   const entry = { id: 'owner/repo/fixture-skill', name: 'fixture-skill', skillId: 'fixture-skill', source: 'owner/repo', installs: 1 };
   const first = await request('/api/skills/discovery/inspect', { entry });
   assert.equal((await request('/api/skills/discovery/install', {
-    inspectionId: first.body.inspection.id, agents: ['codex'],
+    inspectionId: first.body.inspection.id, agents: ['workbuddy'],
+    acknowledge: true,
   })).body.ok, true);
   const target = path.join(home, '.agents', 'skills', 'fixture-skill');
+  const workbuddy = path.join(home, '.workbuddy', 'skills', 'fixture-skill');
   const recordsBefore = await fs.readFile(path.join(home, '.fanbox', 'skill-sources.json'));
   await fs.writeFile(path.join(target, 'local-note.txt'), 'must survive rollback', 'utf8');
+  await fs.writeFile(path.join(workbuddy, 'wb-marker.txt'), 'old copy must survive rollback', 'utf8');
   const inspected = await request('/api/skills/discovery/inspect', { entry });
   const conflict = await request('/api/skills/discovery/install', {
-    inspectionId: inspected.body.inspection.id, agents: ['codex'],
+    inspectionId: inspected.body.inspection.id, agents: ['workbuddy'],
+    acknowledge: true,
   });
   const failed = await request('/api/skills/discovery/install', {
-    inspectionId: inspected.body.inspection.id, agents: ['codex'],
+    inspectionId: inspected.body.inspection.id, agents: ['workbuddy'],
+    acknowledge: true,
     overwrite: true, expectedTargetHash: conflict.body.expectedTargetHash,
   });
   assert.equal(failed.body.status, 'install_failed');
   assert.equal(await fs.readFile(path.join(target, 'local-note.txt'), 'utf8'), 'must survive rollback');
+  assert.equal(await fs.readFile(path.join(workbuddy, 'wb-marker.txt'), 'utf8'), 'old copy must survive rollback');
   assert.deepEqual(await fs.readFile(path.join(home, '.fanbox', 'skill-sources.json')), recordsBefore);
   const rootEntries = await fs.readdir(path.dirname(target));
   assert.deepEqual(rootEntries.filter((name) => name.startsWith('.fanbox-discovery-')), []);
@@ -704,22 +805,26 @@ test('Same-source reinstall detects local edits and requires a fresh explicit ov
   const firstInspection = await request('/api/skills/discovery/inspect', { entry });
   assert.equal((await request('/api/skills/discovery/install', {
     inspectionId: firstInspection.body.inspection.id, agents: ['codex'],
+    acknowledge: true,
   })).body.ok, true);
   const target = path.join(home, '.agents', 'skills', 'fixture-skill');
   await fs.writeFile(path.join(target, 'local-note.txt'), 'keep recoverable', 'utf8');
   const secondInspection = await request('/api/skills/discovery/inspect', { entry });
   const conflict = await request('/api/skills/discovery/install', {
     inspectionId: secondInspection.body.inspection.id, agents: ['codex'],
+    acknowledge: true,
   });
   assert.equal(conflict.body.status, 'local_modified');
   assert.match(conflict.body.expectedTargetHash, /^[a-f0-9]{64}$/);
   const stale = '0'.repeat(64);
   assert.equal((await request('/api/skills/discovery/install', {
     inspectionId: secondInspection.body.inspection.id, agents: ['codex'],
+    acknowledge: true,
     overwrite: true, expectedTargetHash: stale,
   })).body.status, 'concurrent_changed');
   const updated = await request('/api/skills/discovery/install', {
     inspectionId: secondInspection.body.inspection.id, agents: ['codex'],
+    acknowledge: true,
     overwrite: true, expectedTargetHash: conflict.body.expectedTargetHash,
   });
   assert.equal(updated.body.ok, true, JSON.stringify(updated.body));
@@ -737,7 +842,7 @@ test('Same Skill name in another target directory is blocked without guessing id
   await fs.mkdir(existing, { recursive: true });
   await fs.writeFile(path.join(existing, 'SKILL.md'), '---\nname: fixture-skill\ndescription: existing\n---\n');
   const inspected = await request('/api/skills/discovery/inspect', { entry: { id: 'owner/repo/fixture-skill', name: 'fixture-skill', skillId: 'fixture-skill', source: 'owner/repo', installs: 1 } });
-  const result = await request('/api/skills/discovery/install', { inspectionId: inspected.body.inspection.id, agents: ['codex'] });
+  const result = await request('/api/skills/discovery/install', { inspectionId: inspected.body.inspection.id, agents: ['codex'], acknowledge: true });
   assert.equal(result.body.status, 'different_source_conflict');
   assert.equal(result.body.conflict.dir, await fs.realpath(existing));
   await assert.rejects(fs.stat(path.join(home, '.agents', 'skills', 'fixture-skill')), { code: 'ENOENT' });
@@ -776,8 +881,8 @@ test('Concurrent installs are serialized and expose one complete installation', 
     request('/api/skills/discovery/inspect', { entry }),
   ]);
   const results = await Promise.all([
-    request('/api/skills/discovery/install', { inspectionId: first.body.inspection.id, agents: ['codex'] }),
-    request('/api/skills/discovery/install', { inspectionId: second.body.inspection.id, agents: ['codex'] }),
+    request('/api/skills/discovery/install', { inspectionId: first.body.inspection.id, agents: ['codex'], acknowledge: true }),
+    request('/api/skills/discovery/install', { inspectionId: second.body.inspection.id, agents: ['codex'], acknowledge: true }),
   ]);
   assert.deepEqual(results.map((result) => result.body.status).sort(), ['identical', 'installed']);
   const target = path.join(home, '.agents', 'skills', 'fixture-skill');
