@@ -28,6 +28,10 @@ Skills 透视改造为「正本 + 软链」模型：`~/.agents/skills` 为唯一
 
 - [02 — 链接模型的领域语言与 ADR 0001 改写](https://github.com/wenren93/fanbox/issues/13)（本地: issues/02-link-domain-model.md）: 一行一 Skill（正本+接入状态，导入/安装项退役）；正本=链条终点真实目录（含 ego 等外部正本）；各列混合原生机制（Claude 相对软链 / Codex config.toml / ZCode config.json / WorkBuddy 拷贝）；存量配置迁移时归一。CONTEXT.md 已重写。
 
+- [03 — 存量拷贝与死环的一次性迁移方案](https://github.com/wenren93/fanbox/issues/14)（本地: issues/03-existing-copies-migration.md）: 一次性向导（漂移矩阵最新默认胜出+可改判）；仓库家族正本留仓库、`.agents` 放相对链；Codex 零链（收编三件+清 38 死链）；WorkBuddy 零改动+37 独有件拷入；死名三张恢复进仓库；全程 trash 可回滚+前后可见性快照 diff 验收；ZCode 段依 02 终稿修正（删双链+首迁批量写 config.json）。
+
+- [04 — Skill × Agent 图标矩阵的 UI 设计](https://github.com/wenren93/fanbox/issues/15)（本地: issues/04-skill-agent-matrix-ui.md）: 一行一正本+四列统一图标（机制藏 tooltip）；库存混排+chip 开关；agent 页签带计数替代 source 筛选、项目级/插件折叠区；行选择+整列批量；WB 列拷贝接入/skills_disabled+落后提示；低保真原型已出（design-demos/skills-symlink-矩阵UI.html）。
+
 - [05 — 导入与发现页安装改为建链](https://github.com/wenren93/fanbox/issues/16)（本地: issues/05-import-install-via-links.md）: 拷贝导入彻底退役、行内图标即全部分发；「导入」让位收编（共用风险检查）；安装默认全选四 agent、纯库存合法；同源更新=原子换位+影响面提示+trash 回滚；卸载两级（卸载=删正本+全接入，点图标=取消接入）。CONTEXT.md 增「纯库存」「残留」。
 ## Not yet specified
 
