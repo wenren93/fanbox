@@ -34,10 +34,13 @@ Skills 透视改造为「正本 + 软链」模型：`~/.agents/skills` 为唯一
 
 - [05 — 导入与发现页安装改为建链](https://github.com/wenren93/fanbox/issues/16)（本地: issues/05-import-install-via-links.md）: 拷贝导入彻底退役、行内图标即全部分发；「导入」让位收编（共用风险检查）；安装默认全选四 agent、纯库存合法；同源更新=原子换位+影响面提示+trash 回滚；卸载两级（卸载=删正本+全接入，点图标=取消接入）。CONTEXT.md 增「纯库存」「残留」。
 
+- [06 — 后端扫描 / 启停 / 导入接口在链模型下的重设计](https://github.com/wenren93/fanbox/issues/17)（本地: issues/06-backend-api-redesign.md）: refresh v2 行=正本+anomalies+counts；单一 /api/skills/link 四列分发（相对链/config/WB 拷贝）+batch v2（行/整列+uninstall 外部正本不删）+annex 收编+import/discovery 一律入正本仓；独立 migrate/scan|snapshot|execute 族；状态只读现值不合成残留；硬切换删 /toggle 与三策略；queueSkillsWrite/trashPath 沿用。
+
 - [08 — 正本仓的第三方写入并存规则](https://github.com/wenren93/fanbox/issues/19)（本地: issues/08-store-third-party-coexistence.md）: 外来正本（无来源身份：收编件/第三方装入/手动放入）同权管理接入与卸载、来源 chip 区分、无同源更新；同名冲突走覆盖接管流程、外部覆盖由健康检查发现；写互斥不加锁。CONTEXT.md 增「外来正本」。
 ## Not yet specified
 
-（无——迁移验收标准已并入 07 号票范围；前沿仅剩 06 号票在解、07 号票待解锁。）
+- WorkBuddy 软链跟随性单链实测（ego-browser 式）——02 已拍拷贝接入，实测仅在未来想链化 WorkBuddy 时点亮。
+（迁移验收标准已并入 07 号票范围。）
 
 ## Out of scope
 
