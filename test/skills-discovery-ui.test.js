@@ -73,14 +73,29 @@ test('Discovery actions use accessible icon buttons instead of visible text labe
   assert.match(js, /sk-disc-spinner/);
 });
 
-test('Installation confirmation supports four controlled targets without risk acknowledgement gate', () => {
+test('Installation confirmation derives multi-select Agents from the matrix and gates enhanced risk acknowledgement', () => {
   const js = source();
-  for (const target of ['claude', 'codex', 'agents', 'workbuddy']) assert.match(js, new RegExp(target));
-  assert.doesNotMatch(js, /sk-disc-ack|name="acknowledge"|acknowledge,/);
-  assert.doesNotMatch(js, /请先展开并确认风险明细/);
+  for (const target of ['claude', 'codex', 'zcode', 'workbuddy']) assert.match(js, new RegExp(target));
+  assert.match(js, /const DISCOVERY_TARGETS = SKILL_MATRIX_COLUMNS\.map/);
+  assert.match(js, /defaultTargetAgents:\s*DISCOVERY_TARGETS\.map/);
+  assert.match(js, /type="checkbox" name="discovery-target"/);
+  assert.match(js, /agents[,}]/);
+  assert.doesNotMatch(js, /type="radio" name="discovery-target"/);
+  assert.doesNotMatch(js, /targetAgent:\s*target/);
+  assert.match(js, /不选则仅存入原件仓/);
+  assert.match(js, /id="sk-disc-ack"/);
+  assert.match(js, /acknowledge[,}]/);
+  assert.match(js, /请先展开并确认风险明细/);
   assert.match(js, /\/api\/skills\/discovery\/install/);
   assert.match(js, /完整文件|文件清单/);
   assert.match(js, /binaryResources\)\s*\?\s*i\.binaryResources\s*:\s*\(Array\.isArray\(i\.binaries\)/);
+});
+
+test('Discovery success switches to Installed and expands the new original row', () => {
+  const js = source();
+  assert.match(js, /this\.activeTab\s*=\s*'installed'/);
+  assert.match(js, /this\.open\.add\(targetDir\)/);
+  assert.match(js, /await this\.reload\(\)/);
 });
 
 test('Discovery detail prioritizes the install decision and moves technical data into a drawer', () => {
@@ -88,12 +103,18 @@ test('Discovery detail prioritizes the install decision and moves technical data
   const css = styles();
   assert.match(js, /class="sk-disc-inspection sk-disc-decision"/);
   assert.match(js, /class="sk-disc-decision-summary"/);
-  assert.match(js, /data-disc-act="open-details"[^>]*aria-expanded="false"/);
-  assert.match(js, /class="sk-disc-tech-drawer"[^>]*aria-hidden="true"/);
+  assert.match(js, /data-disc-act="open-details"[^>]*aria-expanded="\$\{enhanced \? 'true' : 'false'\}"/);
+  assert.match(js, /class="sk-disc-tech-drawer \$\{enhanced \? 'open' : ''\}"[^>]*aria-hidden="\$\{String\(!enhanced\)\}"/);
   assert.match(js, /data-disc-act="close-details"/);
   assert.match(js, /setDetailsOpen/);
   assert.match(css, /\.sk-disc-tech-drawer\s*\{[^}]*position:absolute[^}]*transform:translateX\(105%\)/s);
   assert.match(css, /\.sk-disc-tech-drawer\.open\s*\{[^}]*transform:none/s);
+});
+
+test('Same-source update confirmation reports the affected Agent connection count', () => {
+  const js = source();
+  assert.match(js, /affectedConnections/);
+  assert.match(js, /影响.*现有接入/);
 });
 
 test('Discovery presents cached and failed states without treating them as empty results', () => {
