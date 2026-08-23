@@ -2189,6 +2189,26 @@ async function setCodexSkillEnabled(skillFile, enable) {
   await atomicWriteText(CODEX_CONFIG, text);
 }
 
+// ZCode 按原件绝对目录路径记 enable 开关（缺省 = 启用）；写键时保留条目里的其它字段
+// 与配置文件的其余段落。与 setCodexSkillEnabled 同构：先备份再原子落盘。
+async function setZcodeSkillEnabled(skillDir, enable) {
+  let cfg = {};
+  try {
+    cfg = JSON.parse(await fsp.readFile(ZCODE_CLI_CONFIG, 'utf8'));
+    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error('顶层必须是对象');
+  } catch (e) {
+    if (e.code !== 'ENOENT') throw new Error(`无法更新 ZCode config.json：${e.message}`);
+    cfg = {};
+  }
+  const key = path.resolve(skillDir);
+  const skills = cfg.skills && typeof cfg.skills === 'object' && !Array.isArray(cfg.skills) ? { ...cfg.skills } : {};
+  const current = skills[key] && typeof skills[key] === 'object' && !Array.isArray(skills[key]) ? skills[key] : {};
+  skills[key] = { ...current, enable };
+  cfg.skills = skills;
+  await backupSkillConfig(ZCODE_CLI_CONFIG);
+  await atomicWriteText(ZCODE_CLI_CONFIG, JSON.stringify(cfg, null, 2) + '\n');
+}
+
 // Skills 目录的移动/删除会改变下一次操作的校验依据；多窗口写入统一排队，避免交叉执行。
 // 队列只包最外层请求，批量内部直接调用未入队的 item helper，避免递归等待自身。
 let _skillsWriteChain = Promise.resolve();
@@ -3031,6 +3051,180 @@ async function skillTrash(dir, cwd = null) {
   const r = await skillTrashItem(v.item);
   if (r.ok) resetSkillsCaches();
   return r;
+}
+
+// ---------- 单一接入端点：POST /api/skills/link 四列分发（docs/16 §3 + ADR 0005）----------
+// Claude 建/删逐 skill 相对链 ../../.agents/skills/<name>；Codex 不建链、写 config.toml 的
+// [[skills.config]] canonical SKILL.md 路径选择器（重启生效）；ZCode 不建链、写
+// ~/.zcode/cli/config.json 按原件绝对路径的 enable 开关；WorkBuddy 拷入 skills / 移入同级
+// skills_disabled。图标状态只读各列现值（refresh v2），本端点只负责把现值改过去。
+const SKILL_LINK_AGENTS = Object.freeze(['claude', 'codex', 'zcode', 'workbuddy']);
+const CODEX_RESTART_NOTE = 'Codex 列接入经 ~/.codex/config.toml 调整——重启 Codex 后生效';
+
+function parseSkillLinkRequest(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: '请求体格式错误' };
+  if (typeof body.name !== 'string' || !body.name || body.name.includes('\0')
+    || /[/\\]/.test(body.name) || body.name.startsWith('.') || body.name.length > 128) {
+    return { ok: false, error: 'name 必须是不含路径分隔符的 Skill 名称' };
+  }
+  if (!SKILL_LINK_AGENTS.includes(body.agent)) return { ok: false, error: 'agent 必须是 claude/codex/zcode/workbuddy 之一' };
+  if (typeof body.on !== 'boolean') return { ok: false, error: 'on 必须是布尔值' };
+  return { ok: true, name: body.name, agent: body.agent, on: body.on };
+}
+
+// 目标位被同名实体占用：结构化返回交前端走收编/覆盖流程，端点本身零副作用（docs/16 §3）。
+function skillOccupied(targetPath) {
+  return { ok: false, conflict: { kind: 'occupied', path: targetPath }, error: `目标位置已被同名实体占用：${targetPath}` };
+}
+
+// Claude 列目标位现状：missing / linked（链指向本行原件仓条目）/ mislink（指进原件仓其它条目，
+// 可安全重建）/ occupied（真实目录、外部链、断链——内容或归属存疑，一律不自动动）。
+async function claudeLinkSlotState(linkPath, storeEntry) {
+  let lst;
+  try { lst = await fsp.lstat(linkPath); } catch (e) { if (e.code === 'ENOENT') return 'missing'; throw e; }
+  if (!lst.isSymbolicLink()) return 'occupied';
+  let hop;
+  try { hop = path.resolve(path.dirname(linkPath), await fsp.readlink(linkPath)); } catch { return 'occupied'; }
+  if (hop === path.resolve(storeEntry)) return 'linked';
+  return isPathInside(path.resolve(AGENTS_SKILLS), hop) ? 'mislink' : 'occupied';
+}
+
+async function skillLinkClaude(row, on) {
+  const linkPath = path.join(CLAUDE_SKILLS, row.name);
+  const storeEntry = path.join(AGENTS_SKILLS, row.name);
+  const state = await claudeLinkSlotState(linkPath, storeEntry);
+  if (on && state === 'linked') return { noop: true, path: linkPath };
+  if (!on && state === 'missing') return { noop: true };
+  if (state === 'occupied') return skillOccupied(linkPath);
+  if (!on) {
+    // linked / mislink 都是指进原件仓的 FanBox 式链，取消接入一律删链
+    await fsp.unlink(linkPath);
+    return {};
+  }
+  // 相对链与 skills.sh 安装器 / zcode 手写链同构；始终指向原件仓条目（仓库家族经仓转指）
+  await fsp.mkdir(CLAUDE_SKILLS, { recursive: true });
+  if (state === 'mislink') await fsp.unlink(linkPath); // 链指错了仓内其它条目：换指重建，链本身无内容可失
+  const target = path.relative(CLAUDE_SKILLS, storeEntry);
+  try {
+    await fsp.symlink(target, linkPath);
+  } catch (e) {
+    if (e.code === 'EEXIST' || e.code === 'ENOTEMPTY') return skillOccupied(linkPath);
+    throw e;
+  }
+  return { path: linkPath };
+}
+
+// Codex 原生扫描原件仓（缺省即启用）；扫描同时认原件仓条目与链条终点两条路径上的禁用记录，
+// 恢复接入时把两处的 enabled=false 一并翻正，保证与 refresh v2 的现值判定一致。
+async function skillLinkCodex(row, on) {
+  const selectorPaths = [...new Set([
+    path.resolve(AGENTS_SKILLS, row.name, 'SKILL.md'),
+    path.resolve(row.dir, 'SKILL.md'),
+  ])];
+  const disabledSet = await codexDisabledSkillFiles();
+  const disabled = selectorPaths.filter((p) => disabledSet.has(p));
+  if (on) {
+    if (!disabled.length) return { noop: true, note: CODEX_RESTART_NOTE, restartRequired: 'codex' };
+    for (const p of disabled) await setCodexSkillEnabled(p, true);
+    return { note: CODEX_RESTART_NOTE, restartRequired: 'codex' };
+  }
+  if (disabled.length) return { noop: true, note: CODEX_RESTART_NOTE, restartRequired: 'codex' };
+  // canonical 选择器 = 原件仓条目的 SKILL.md 绝对路径（Codex USER 主位置扫描的就是它）
+  await setCodexSkillEnabled(selectorPaths[0], false);
+  return { note: CODEX_RESTART_NOTE, restartRequired: 'codex' };
+}
+
+async function skillLinkZcode(row, on) {
+  const keys = [...new Set([path.resolve(AGENTS_SKILLS, row.name), path.resolve(row.dir)])];
+  const disabledSet = await zcodeDisabledSkillDirs();
+  const disabled = keys.filter((k) => disabledSet.has(k));
+  if (on) {
+    if (!disabled.length) return { noop: true };
+    for (const k of disabled) await setZcodeSkillEnabled(k, true);
+    return {};
+  }
+  if (disabled.length) return { noop: true };
+  await setZcodeSkillEnabled(keys[0], false);
+  return {};
+}
+
+// WorkBuddy 接入 = 从原件拷入（临时副本 + rename，不留半成品）；取消接入 = 整目录移入同级
+// skills_disabled。目标位已有内容不同拷贝属收编/覆盖流程的事，这里结构化冲突不静默覆盖。
+async function skillLinkWorkBuddyOn(row) {
+  const target = path.join(WORKBUDDY_SKILLS, row.name);
+  await fsp.mkdir(WORKBUDDY_SKILLS, { recursive: true });
+  let lst;
+  try { lst = await fsp.lstat(target); } catch (e) { if (e.code !== 'ENOENT') throw e; lst = null; }
+  if (lst) {
+    if (lst.isSymbolicLink() || !lst.isDirectory()) return skillOccupied(target);
+    const [copyHash, origHash] = await Promise.all([
+      skillTreeFingerprint(target).catch(() => null),
+      skillTreeFingerprint(row.dir).catch(() => null),
+    ]);
+    if (copyHash !== null && copyHash === origHash) return { noop: true }; // 拷贝与原件一致，已是接入态
+    return skillOccupied(target);
+  }
+  const staging = await fsp.mkdtemp(path.join(WORKBUDDY_SKILLS, '.fanbox-wblink-'));
+  try {
+    await copySkillTree(row.dir, staging);
+    await fsp.rename(staging, target);
+  } catch (e) {
+    await fsp.rm(staging, { recursive: true, force: true }).catch(() => {});
+    if (['EEXIST', 'ENOTEMPTY', 'EISDIR'].includes(e.code)) return skillOccupied(target);
+    throw e;
+  }
+  return {};
+}
+
+async function skillLinkWorkBuddyOff(name) {
+  const active = path.join(WORKBUDDY_SKILLS, name);
+  let lst;
+  try { lst = await fsp.lstat(active); } catch (e) { if (e.code !== 'ENOENT') throw e; return { noop: true }; }
+  if (lst.isSymbolicLink() || !lst.isDirectory()) return skillOccupied(active);
+  const disabledRoot = path.join(path.dirname(WORKBUDDY_SKILLS), 'skills_disabled');
+  await fsp.mkdir(disabledRoot, { recursive: true });
+  const dest = path.join(disabledRoot, name);
+  let destLst;
+  try { destLst = await fsp.lstat(dest); } catch (e) { if (e.code !== 'ENOENT') throw e; destLst = null; }
+  if (destLst) {
+    // 停用位被上一轮接入循环的旧拷贝占着：按覆盖接管惯例先送系统废纸篓（可恢复），
+    // 不让 disable→enable→disable 的常规循环卡死在残留上。
+    const trashed = await trashImportedSkill(dest);
+    if (!trashed.ok) return { ok: false, error: trashed.error || '停用位的旧拷贝移入废纸篓失败' };
+  }
+  try {
+    await fsp.rename(active, dest);
+  } catch (e) {
+    if (['EEXIST', 'ENOTEMPTY', 'EISDIR'].includes(e.code)) return skillOccupied(dest);
+    throw e;
+  }
+  return { path: dest };
+}
+
+async function skillLink(parsed) {
+  // 校验沿袭「只动扫描清单内的路径」：name 必须是最近一次 v2 扫描出的原件行；
+  // 项目级与插件不在列模型里（docs/16 §1），同样拒之门外。
+  const scan = await skillsDataV2({ force: true });
+  const row = (scan.items || []).find((it) => it.agents && it.origin !== 'project' && it.origin !== 'plugin'
+    && it.name === parsed.name);
+  if (!row) return { ok: false, status: 'invalid_name', error: '不在已扫描的原件清单里' };
+  // 建链前 stat 原件有效性
+  try {
+    if (!(await fsp.stat(row.dir)).isDirectory()) throw new Error('不是目录');
+  } catch {
+    return { ok: false, status: 'invalid_name', error: `原件不可读：${row.dir}` };
+  }
+  try {
+    let r;
+    if (parsed.agent === 'claude') r = await skillLinkClaude(row, parsed.on);
+    else if (parsed.agent === 'codex') r = await skillLinkCodex(row, parsed.on);
+    else if (parsed.agent === 'zcode') r = await skillLinkZcode(row, parsed.on);
+    else r = parsed.on ? await skillLinkWorkBuddyOn(row) : await skillLinkWorkBuddyOff(row.name);
+    if (r.ok === undefined) r.ok = true;
+    return { agent: parsed.agent, name: parsed.name, on: parsed.on, ...r };
+  } catch (e) {
+    return { ok: false, agent: parsed.agent, name: parsed.name, on: parsed.on, error: e.message };
+  }
 }
 
 function parseSkillImportRequest(body) {
@@ -4015,6 +4209,12 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 200, await skillsDataV2({ force: true, extraCwds }));
       }
       return sendJSON(res, 200, await skillsData({ force: true, extraCwds }));
+    }
+    if (p === '/api/skills/link' && req.method === 'POST') {
+      // 单一接入端点四列分发（docs/16 §3 + ADR 0005）；写入走串行队列，无半成品
+      const parsed = parseSkillLinkRequest(await readBody(req));
+      if (!parsed.ok) return sendJSON(res, 400, { ok: false, status: 'invalid_request', error: parsed.error });
+      return sendJSON(res, 200, await queueSkillsWrite(() => skillLink(parsed)));
     }
     if (p === '/api/skills/toggle' && req.method === 'POST') {
       const b = await readBody(req);

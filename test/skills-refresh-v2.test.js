@@ -16,6 +16,27 @@ const { spawn } = require('node:child_process');
 const REPO = path.join(__dirname, '..');
 const REPO_SKILLS = path.join(REPO, '.agents', 'skills');
 
+// 仓库家族原件在检出工作树里未必存在（机器本地的 .agents/skills 不入库）：
+// 缺失时就地补一个临时原件，结束只清掉自己创建的部分，不动机器已有的内容。
+async function ensureRepoFixture(name) {
+  const dir = path.join(REPO_SKILLS, name);
+  let existed = false;
+  try { await fs.stat(path.join(dir, 'SKILL.md')); existed = true; } catch { /* 需要现造 */ }
+  if (!existed) {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: repo family fixture\n---\nbody\n`, 'utf8');
+  }
+  return {
+    dir,
+    async cleanup() {
+      if (existed) return;
+      await fs.rm(dir, { recursive: true, force: true });
+      await fs.rmdir(REPO_SKILLS).catch(() => {});
+      await fs.rmdir(path.dirname(REPO_SKILLS)).catch(() => {});
+    },
+  };
+}
+
 async function canListen(port) {
   return new Promise((resolve) => {
     const server = net.createServer();
@@ -103,10 +124,12 @@ test('refresh v2 scans rows from the original store with four-column access valu
     const externalRoot = path.join(home, '.local', 'share', 'ego-tools');
 
     // 四种 origin 的行：store 真实目录 / repo 家族相对链 / 外部链 / 纯库存
+    const repoFixture = await ensureRepoFixture('wayfinder');
+    t.after(() => repoFixture.cleanup());
     await createSkill(path.join(store, 'alpha'));
     await createSkill(path.join(store, 'plain'));
     // repo 家族：原件留仓库，原件仓放链（绝对链；相对链风格由 Claude 列的 fixture 覆盖）
-    await fs.symlink(path.join(REPO_SKILLS, 'wayfinder'), path.join(store, 'wayfinder'));
+    await fs.symlink(repoFixture.dir, path.join(store, 'wayfinder'));
     await createSkill(path.join(externalRoot, 'ext-skill'));
     await fs.symlink(path.join('..', '..', '.local', 'share', 'ego-tools', 'ext-skill'), path.join(store, 'ext-skill'));
 
