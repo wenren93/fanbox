@@ -363,18 +363,21 @@ test('Discovery install accepts an empty Agent selection as pure stock', async (
   });
 });
 
-test('Same-source update reports affected connections and refreshes an active WorkBuddy copy', async (t) => {
+test('Same-source update reports affected connections, preserves every connection, and refreshes WorkBuddy', async (t) => {
   if (process.platform !== 'darwin') return t.skip('external installation is macOS-only');
   const fixture = await makeFixtureRepository(t);
+  const trash = await fs.mkdtemp(path.join(os.tmpdir(), 'fanbox-discovery-update-trash-'));
+  t.after(() => fs.rm(trash, { recursive: true, force: true }));
   const { request, home } = await startServer(t, {
     FANBOX_TEST_DISCOVERY_GIT_REPO: fixture.dir,
     FANBOX_TEST_DISCOVERY_ARCHIVE: fixture.archive,
+    FANBOX_TEST_SKILL_TRASH: trash,
   });
   const entry = { id: 'owner/repo/fixture-skill', name: 'fixture-skill', skillId: 'fixture-skill', source: 'owner/repo', installs: 1 };
   const first = await request('/api/skills/discovery/inspect', { entry });
   assert.equal((await request('/api/skills/discovery/install', {
     inspectionId: first.body.inspection.id,
-    agents: ['workbuddy'],
+    agents: ['claude', 'codex', 'workbuddy'],
     acknowledge: true,
   })).body.ok, true);
 
@@ -387,16 +390,65 @@ test('Same-source update reports affected connections and refreshes an active Wo
 
   const second = await request('/api/skills/discovery/inspect', { entry });
   assert.equal(second.body.inspection.update, true);
-  assert.equal(second.body.inspection.affectedConnections, 1);
+  assert.equal(second.body.inspection.affectedConnections, 3);
+  assert.deepEqual(second.body.inspection.connectedAgents, ['claude', 'codex', 'workbuddy']);
   const updated = await request('/api/skills/discovery/install', {
     inspectionId: second.body.inspection.id,
-    agents: ['workbuddy'],
+    // 更新不是重新选择接入范围；服务端必须忽略这个不同的选择。
+    agents: ['zcode'],
     acknowledge: true,
   });
   assert.equal(updated.body.ok, true, JSON.stringify(updated.body));
   assert.equal(updated.body.status, 'updated');
+  assert.match(updated.body.message, /现有接入保持不变.*即时生效.*废纸篓恢复/);
+  assert.deepEqual(updated.body.agents, ['claude', 'codex', 'workbuddy']);
+  assert.match(updated.body.recovery.name, new RegExp(`^fixture-skill-previous-${fixture.sha.slice(0, 12)}-\\d+$`));
   assert.equal(await fs.readFile(path.join(home, '.agents', 'skills', 'fixture-skill', 'references', 'note.txt'), 'utf8'), 'updated upstream');
   assert.equal(await fs.readFile(path.join(home, '.workbuddy', 'skills', 'fixture-skill', 'references', 'note.txt'), 'utf8'), 'updated upstream');
+  const refreshed = await request('/api/skills/refresh', { v: 2 });
+  const row = refreshed.body.items.find((item) => item.name === 'fixture-skill');
+  assert.deepEqual(Object.fromEntries(Object.entries(row.agents).map(([agent, state]) => [agent, state.on])), {
+    claude: true, codex: true, zcode: false, workbuddy: true,
+  });
+});
+
+test('Same-source update preserves a WorkBuddy copy edited ahead of the old original', async (t) => {
+  if (process.platform !== 'darwin') return t.skip('external installation is macOS-only');
+  const fixture = await makeFixtureRepository(t);
+  const trash = await fs.mkdtemp(path.join(os.tmpdir(), 'fanbox-discovery-wb-ahead-trash-'));
+  t.after(() => fs.rm(trash, { recursive: true, force: true }));
+  const { request, home } = await startServer(t, {
+    FANBOX_TEST_DISCOVERY_GIT_REPO: fixture.dir,
+    FANBOX_TEST_DISCOVERY_ARCHIVE: fixture.archive,
+    FANBOX_TEST_SKILL_TRASH: trash,
+  });
+  const entry = { id: 'owner/repo/fixture-skill', name: 'fixture-skill', skillId: 'fixture-skill', source: 'owner/repo', installs: 1 };
+  const first = await request('/api/skills/discovery/inspect', { entry });
+  assert.equal((await request('/api/skills/discovery/install', {
+    inspectionId: first.body.inspection.id, agents: ['workbuddy'], acknowledge: true,
+  })).body.ok, true);
+
+  const workbuddySkill = path.join(home, '.workbuddy', 'skills', 'fixture-skill', 'SKILL.md');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await fs.writeFile(workbuddySkill, '---\nname: fixture-skill\ndescription: WorkBuddy local edit\n---\nlocal ahead\n', 'utf8');
+
+  const note = path.join(fixture.dir, 'skills', 'fixture-skill', 'references', 'note.txt');
+  await fs.writeFile(note, 'second upstream version', 'utf8');
+  await execFileP('git', ['add', 'skills/fixture-skill/references/note.txt'], { cwd: fixture.dir });
+  await execFileP('git', ['-c', 'user.email=test@example.invalid', '-c', 'user.name=Fixture', 'commit', '-qm', 'update'], { cwd: fixture.dir });
+  const updateSha = (await execFileP('git', ['rev-parse', 'HEAD'], { cwd: fixture.dir })).stdout.trim();
+  await execFileP('git', ['archive', '--format=tar.gz', `--prefix=repo-${updateSha}/`, '-o', fixture.archive, updateSha], { cwd: fixture.dir });
+
+  const second = await request('/api/skills/discovery/inspect', { entry });
+  const updated = await request('/api/skills/discovery/install', {
+    inspectionId: second.body.inspection.id, agents: [], acknowledge: true,
+  });
+  assert.equal(updated.body.ok, true, JSON.stringify(updated.body));
+  assert.deepEqual(updated.body.agents, ['workbuddy']);
+  assert.equal(updated.body.workBuddyStatus, 'preserved_ahead');
+  assert.match(updated.body.message, /WorkBuddy 抢先编辑.*保留.*未刷新.*其余接入已即时生效/);
+  assert.match(await fs.readFile(workbuddySkill, 'utf8'), /WorkBuddy local edit/);
+  assert.equal(await fs.readFile(path.join(home, '.agents', 'skills', 'fixture-skill', 'references', 'note.txt'), 'utf8'), 'second upstream version');
 });
 
 test('Discovery install rolls back the original when a selected Agent connection is occupied', async (t) => {
@@ -681,6 +733,9 @@ test('Foreign-original takeover supports all, subset, and empty Agent selections
         acknowledge: true,
       });
       assert.equal(conflict.body.status, 'unknown_conflict');
+      assert.ok(conflict.body.diff, 'takeover confirmation should include a file diff summary');
+      assert.ok(conflict.body.diff.changed.includes('SKILL.md'));
+      assert.ok(conflict.body.diff.added.includes('references/note.txt'));
       const replaced = await request('/api/skills/discovery/install', {
         inspectionId: inspected.body.inspection.id,
         agents: scenario.agents,
@@ -689,6 +744,7 @@ test('Foreign-original takeover supports all, subset, and empty Agent selections
         expectedTargetHash: conflict.body.expectedTargetHash,
       });
       assert.equal(replaced.body.ok, true, JSON.stringify(replaced.body));
+      assert.match(replaced.body.recovery.name, /^fixture-skill-previous-foreign-[a-f0-9]{12}-\d+$/);
       const refreshed = await request('/api/skills/refresh', { v: 2 });
       const row = refreshed.body.items.find((item) => item.name === 'fixture-skill');
       const selected = new Set(scenario.agents);
@@ -828,9 +884,11 @@ test('Same-source reinstall detects local edits and requires a fresh explicit ov
     overwrite: true, expectedTargetHash: conflict.body.expectedTargetHash,
   });
   assert.equal(updated.body.ok, true, JSON.stringify(updated.body));
+  assert.match(updated.body.recovery.name, /^fixture-skill-previous-modified-[a-f0-9]{12}-\d+$/);
   await assert.rejects(fs.stat(path.join(target, 'local-note.txt')), { code: 'ENOENT' });
   const trashed = await fs.readdir(trash);
   assert.equal(trashed.length, 1);
+  assert.match(trashed[0], /^fixture-skill-previous-/);
   assert.equal(await fs.readFile(path.join(trash, trashed[0], 'local-note.txt'), 'utf8'), 'keep recoverable');
 });
 

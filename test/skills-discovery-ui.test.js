@@ -117,6 +117,20 @@ test('Same-source update confirmation reports the affected Agent connection coun
   assert.match(js, /影响.*现有接入/);
 });
 
+test('Same-source update shows current connections as read-only instead of reselecting them', () => {
+  const js = source();
+  assert.match(js, /d\.selectedTargetAgents = r\.inspection\.sameSource && Array\.isArray\(r\.inspection\.connectedAgents\)[\s\S]{0,180}\[\.\.\.r\.inspection\.connectedAgents\]/);
+  assert.match(js, /<fieldset class="sk-disc-targets sk-disc-segments"[^>]*\$\{i\.sameSource \? 'disabled' : ''\}>/);
+  assert.match(js, /i\.sameSource \? '现有接入 · 更新期间保持不动' : '接入到 · 不选则仅存入原件仓'/);
+});
+
+test('Foreign-original takeover confirmation presents the file difference summary', () => {
+  const js = source();
+  assert.match(js, /diff: r\.diff/);
+  assert.match(js, /conflict\.diff/);
+  assert.match(js, /新增.*删除.*修改/);
+});
+
 test('Discovery presents cached and failed states without treating them as empty results', () => {
   const js = source();
   assert.match(js, /cached|缓存/);

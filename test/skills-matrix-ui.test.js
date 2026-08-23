@@ -54,6 +54,14 @@ test('Rows render origin badge, four icons, hits, health and mtime', () => {
   assert.match(view, /<i class="sk-offtag">未接入<\/i>/);
 });
 
+test('Installed rows distinguish FanBox installs from foreign originals with a source chip', () => {
+  const { view } = skillsViewSource();
+  assert.match(view, /sourceBadge\(it\) \{/);
+  assert.match(view, /it\.provenance && it\.provenance\.label/);
+  assert.match(view, /it\.provenance\.kind === 'foreign'/);
+  assert.match(view, /\$\{this\.sourceBadge\(it\)\}/);
+});
+
 test('Icon clicks call the single link endpoint with busy state and cost toasts', () => {
   const { view } = skillsViewSource();
   assert.match(view, /async toggleLink\(it, agent\) \{/);
@@ -118,7 +126,7 @@ test('Row drawer exposes origin, per-column mechanism details, WB refresh, revea
   const { view } = skillsViewSource();
   assert.match(view, /rowDrawerHtml\(it\) \{/);
   assert.match(view, /<dt>原件路径<\/dt><dd class="mono">\$\{escapeHtml\(tilde\(it\.dir\)\)\}<\/dd>/);
-  assert.match(view, /<dt>来源<\/dt><dd>\$\{escapeHtml\(originText\)\}<\/dd>/);
+  assert.match(view, /<dt>来源<\/dt><dd>\$\{escapeHtml\(\(it\.provenance && it\.provenance\.label\) \|\| originText\)\}<\/dd>/);
   assert.match(view, /<dl class="sk-link-matrix">\$\{detailRows\}<\/dl>/);
   assert.match(view, /config\.toml 无禁用条目 = 默认启用（Codex 原生扫描原件仓）/);
   assert.match(view, /data-act="refresh-wb"/);
@@ -144,6 +152,16 @@ test('Broken links surface as a row-level warning with a reveal entry point', ()
   assert.match(view, /a\.kind === 'broken-link' \|\| a\.kind === 'dead-loop'\) && a\.agent !== 'store'\)/);
   assert.match(view, /data-act="reveal-anomaly" data-path="\$\{escapeHtml\(anomaly\.path\)\}">查看<\/button>/);
   assert.match(js, /const SKILL_HEALTH_SHORT = \{[\s\S]*?'broken-link': '断链',[\s\S]*?'wb-drift': 'WB拷贝落后',[\s\S]*?\};/);
+});
+
+test('Externally modified FanBox installs offer recheck and reinstall takeover, foreign originals do not', () => {
+  const { view } = skillsViewSource();
+  assert.match(view, /const externallyModified = health\.some\(\(x\) => x\.code === 'externally-modified'\);/);
+  assert.match(view, /externallyModified \? `<button data-act="recheck-source"/);
+  assert.match(view, /externallyModified && it\.provenance && it\.provenance\.updateable[\s\S]{0,180}data-act="reinstall-source"/);
+  assert.match(view, /async reinstallFromSource\(it\) \{/);
+  assert.match(view, /else if \(a === 'recheck-source'\) await this\.recheckSource\(it\);/);
+  assert.match(view, /else if \(a === 'reinstall-source'\) await this\.reinstallFromSource\(it\);/);
 });
 
 test('Stats read the v2 overview: stock count, health issues, anomalies and Claude column budget', () => {

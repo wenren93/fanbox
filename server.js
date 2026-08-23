@@ -2839,25 +2839,42 @@ async function skillsDataV2(opts = {}) {
       fsp.stat(path.join(fp, 'SKILL.md')).then((st) => st.mtimeMs, () => 0),
       fsp.stat(path.join(row.dir, 'SKILL.md')).then((st) => st.mtimeMs, () => 0),
     ]);
-    if (copyHash === null || (copyHash !== origHash && copyMtime <= origMtime)) {
+    row.agents.workbuddy.matchesOriginal = copyHash !== null && copyHash === origHash;
+    if (copyHash === null || (!row.agents.workbuddy.matchesOriginal && copyMtime <= origMtime)) {
       row.agents.workbuddy.drift = true;
       row.health.push({ level: 'warn', code: 'wb-drift', msg: 'WorkBuddy 拷贝落后于原件——可在详情中刷新拷贝' });
     }
   }
 
-  // 已被外部修改：skill-sources.json 记录指纹 vs 实际内容（docs/16 §6）
-  if (skillDiscovery) {
-    await Promise.all(rows.map(async (row) => {
-      const storeEntry = path.join(AGENTS_SKILLS, row.name);
-      const record = (await skillDiscovery.sourceRecord(storeEntry).catch(() => null))
-        || (await skillDiscovery.sourceRecord(row.dir).catch(() => null));
-      if (!record || !record.contentHash) return;
-      const actual = await skillTreeFingerprint(row.dir).catch(() => null);
-      if (actual && actual !== record.contentHash) {
-        row.health.push({ level: 'warn', code: 'externally-modified', msg: '内容与来源记录的指纹不符——疑似被外部工具修改' });
-      }
-    }));
-  }
+  // 来源 chip + 已被外部修改：来源记录存在才是 FanBox 安装件；仓内无记录实体
+  // 是迁移后的常态，统一标作「本机收编 / 外部装入」且不提供同源更新。
+  await Promise.all(rows.map(async (row) => {
+    if (row.origin === 'repo') {
+      row.provenance = { kind: 'repo', label: '仓库', updateable: false };
+      return;
+    }
+    if (row.origin === 'external') {
+      row.provenance = { kind: 'external-link', label: '外部引用', updateable: false };
+      return;
+    }
+    const storeEntry = path.join(AGENTS_SKILLS, row.name);
+    const record = skillDiscovery && ((await skillDiscovery.sourceRecord(storeEntry).catch(() => null))
+      || (await skillDiscovery.sourceRecord(row.dir).catch(() => null)));
+    if (!record) {
+      row.provenance = { kind: 'foreign', label: '本机收编 / 外部装入', updateable: false };
+      return;
+    }
+    row.provenance = {
+      kind: 'fanbox-install', label: 'FanBox 安装', updateable: true,
+      repository: record.repository, skillPath: record.skillPath, commit: record.commit,
+      sourceUrl: record.sourceUrl, discoveryEntryId: record.discoveryEntryId,
+    };
+    if (!record.contentHash) return;
+    const actual = await skillTreeFingerprint(row.dir).catch(() => null);
+    if (actual && actual !== record.contentHash) {
+      row.health.push({ level: 'warn', code: 'externally-modified', msg: '内容与来源记录的指纹不符——疑似被外部工具修改' });
+    }
+  }));
 
   for (const row of rows) {
     const storeEntry = path.join(AGENTS_SKILLS, row.name);
@@ -4236,6 +4253,7 @@ skillDiscovery = createSkillDiscovery({
   refreshSkills: () => skillsDataV2({ force: true }),
   applyConnections: setSkillConnections,
   restoreConnections: restoreSkillConnections,
+  diffSummary: skillDiffSummary,
   readConfig,
   updateConfig,
 });

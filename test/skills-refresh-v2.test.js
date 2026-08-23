@@ -178,6 +178,11 @@ test('refresh v2 scans rows from the original store with four-column access valu
     const alpha = byName.get('alpha');
     assert.ok(alpha, 'alpha row missing');
     assert.equal(alpha.origin, 'store');
+    assert.equal(alpha.provenance.kind, 'fanbox-install');
+    assert.equal(alpha.provenance.label, 'FanBox 安装');
+    assert.equal(alpha.provenance.updateable, true);
+    assert.equal(alpha.provenance.repository, 'https://github.com/example/example');
+    assert.equal(alpha.provenance.skillPath, 'alpha');
     assert.equal(alpha.dir, await fs.realpath(path.join(store, 'alpha')));
     assert.equal(alpha.agents.claude.on, true);
     assert.equal(alpha.agents.codex.on, false);
@@ -199,10 +204,12 @@ test('refresh v2 scans rows from the original store with four-column access valu
     const ext = byName.get('ext-skill');
     assert.ok(ext, 'ext-skill row missing');
     assert.equal(ext.origin, 'external');
+    assert.deepEqual(ext.provenance, { kind: 'external-link', label: '外部引用', updateable: false });
     assert.equal(ext.dir, await fs.realpath(path.join(externalRoot, 'ext-skill')));
 
     const plain = byName.get('plain');
     assert.ok(plain, 'plain row missing');
+    assert.deepEqual(plain.provenance, { kind: 'foreign', label: '本机收编 / 外部装入', updateable: false });
     assert.equal(plain.agents.codex.on, true);
     assert.equal(plain.agents.zcode.on, true);
     assert.equal(plain.agents.claude.on, false);
@@ -290,12 +297,14 @@ test('refresh v2 flags WorkBuddy copy drift once the original moves ahead', asyn
     let alpha = response.body.items.find((item) => item.name === 'alpha');
     assert.equal(alpha.agents.workbuddy.on, true);
     assert.equal(alpha.agents.workbuddy.drift, undefined);
+    assert.equal(alpha.agents.workbuddy.matchesOriginal, true);
 
     await fs.writeFile(path.join(alphaDir, 'SKILL.md'),
       '---\nname: alpha\ndescription: updated original\n---\nnew body\n', 'utf8');
     response = await post('/api/skills/refresh', { v: 2 });
     alpha = response.body.items.find((item) => item.name === 'alpha');
     assert.equal(alpha.agents.workbuddy.drift, true);
+    assert.equal(alpha.agents.workbuddy.matchesOriginal, false);
     assert.ok(alpha.health.some((h) => h.code === 'wb-drift'), 'wb-drift health code missing');
 
     // 拷贝反而更新（WB 抢先编辑）不算「落后」，留给迁移向导的漂移矩阵裁决
@@ -307,6 +316,7 @@ test('refresh v2 flags WorkBuddy copy drift once the original moves ahead', asyn
     response = await post('/api/skills/refresh', { v: 2 });
     alpha = response.body.items.find((item) => item.name === 'alpha');
     assert.equal(alpha.agents.workbuddy.drift, undefined, 'copy ahead of original must not be flagged as drift');
+    assert.equal(alpha.agents.workbuddy.matchesOriginal, false);
   });
 });
 
