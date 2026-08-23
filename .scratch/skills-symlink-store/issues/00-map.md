@@ -1,0 +1,42 @@
+# Wayfinder Map — Skills 正本 + 软链改造（wayfinder:map）
+
+## Destination
+
+Skills 透视改造为「正本 + 软链」模型：`~/.agents/skills` 为唯一正本仓，Claude / Codex / WorkBuddy / ZCode 四个 agent 目录以逐 skill 软链接接入；UI 每行一个 Skill、行内 agent 图标点选即建链/删链（链在即启用）；导入与发现页安装全面改软链，ADR 0001 相应改写，规格成文后交实施。
+
+## Notes
+
+- 已拍板的四个方向性决策（2026-08-23，与用户确认）：
+  1. 正本仓 = `~/.agents/skills`（skills.sh 约定目录，机器上已是事实中心）；`~/.agents` 本身不再作为第五列 agent。
+  2. 链接为唯一安装/导入方式，废止拷贝式导入 → **ADR 0001 需改写**。
+  3. agent 图标语义 = 软链在即启用；不写各 agent 官方启停配置（现有 skillOverrides / config.toml 启停体系在新模型下的去留见 02 号票）。
+  4. 首批 agent 列：Claude、Codex、WorkBuddy、ZCode（`~/.zcode/skills`）。
+- 参考交互：用户提供的截图（另一产品）——每行右侧一组 agent 图标，亮=启用、灰=禁用，点选切换；顶部按 agent 的筛选页签带计数。截图中的「从备份中恢复 / 从 ZIP 安装」等其余功能不采纳。
+- 机器现状勘察（2026-08-23，迁移票的事实输入）：
+  - `~/.claude/skills` 是**整目录软链** → `~/.agents/skills`（无法按 skill 启停，须拆为逐 skill 链接）。
+  - `~/.agents/skills`（40 项）混有真实目录与约 20 个**自引用死环软链**（如 `ask-matt -> /Users/one/.agents/skills/ask-matt`，目标实为仓库内 `.agents/skills/`）；另有指向外部的链（`ego-browser -> ~/.local/share/ego/ego-skills`）。
+  - `~/.codex/skills`（40 项）大量软链指向**第三家仓库 `~/.cc-switch/skills`**（cc-switch 工具），外加少量真实目录与外部链。
+  - `~/.workbuddy/skills`（60 项）几乎全是真实目录拷贝，与 `.agents` 大面积同名重复，且含仅此一份的独有 skill。
+  - `~/.zcode/skills` 已是手写相对链接（`../../.agents/skills/x`），且 ZCode 似乎**原生同时扫描** `~/.zcode/skills` 与 `~/.agents/skills`（同一 skill 会在会话中出现两次），ZCode 列语义待 01 号票澄清。
+- 后端事实：`server.js:2066` 起 Skills 透视扫描四根 + 插件 + 项目级；启停策略 claude-settings / codex-config / directory（`skills_disabled`）；扫描器已跟随软链并按 realpath 去重；导入 = 拷贝（`skillImport`），发现页安装 = skills.sh 固定版本解包 + 风险检查。前端 `public/app.js` `skillsView`（约 5034 行起，注意该文件含 `\x00` 分隔符，grep/部分工具会当二进制，用 awk/python/rg 读）。
+- 本地 tracker 约定：票 = `.scratch/skills-symlink-store/issues/NN-slug.md`，认领 = 在票上写 **Claimed by**；blocking 写在票头。每张票一个会话，一次只解一张。
+- 实施交接：地图走完后用 implement/tdd 技能执行，实施会话应先读本 map 与 07 号规格票。
+
+## Decisions so far
+
+（尚无已关票）
+
+## Not yet specified
+
+- 正本仓治理：第三方安装器（skills.sh CLI、cc-switch、手动 `git clone`）直接写 `~/.agents/skills` 与 FanBox 管理的并存规则——等 05 号票定了安装流程后再细化。
+- 链接风格细节（相对 vs 绝对路径、断链健康检查、整目录外部正本如 ego 的二级链语义）——等 02 号票定领域模型后收进 06。
+- 存量迁移的真实 HOME 验收标准（dogfood 式清单）——等 03 号票出方案后细化。
+- ZCode 列在「原生读正本仓」事实下的最终形态（去重？禁用机制？）——等 01 号票事实与 02 号票决策。
+
+## Out of scope
+
+- Windows 符号链接支持（macOS 优先；Windows 社区移植另行立项）。
+- 项目级 skills（`.claude/skills` 等）的链接化——保持现有扫描与展示。
+- Claude 插件 skills——插件体系自管，维持现状。
+- cc-switch 工具本身的整合或替代——只处理其软链在迁移中的去留。
+- 参考截图产品的其余功能（从 ZIP 安装、从备份恢复、备份体系等）。
