@@ -33,9 +33,11 @@ Skills 透视改造为「正本 + 软链」模型：`~/.agents/skills` 为唯一
 - [04 — Skill × Agent 图标矩阵的 UI 设计](https://github.com/wenren93/fanbox/issues/15)（本地: issues/04-skill-agent-matrix-ui.md）: 一行一正本+四列统一图标（机制藏 tooltip）；库存混排+chip 开关；agent 页签带计数替代 source 筛选、项目级/插件折叠区；行选择+整列批量；WB 列拷贝接入/skills_disabled+落后提示；低保真原型已出（design-demos/skills-symlink-矩阵UI.html）。
 
 - [05 — 导入与发现页安装改为建链](https://github.com/wenren93/fanbox/issues/16)（本地: issues/05-import-install-via-links.md）: 拷贝导入彻底退役、行内图标即全部分发；「导入」让位收编（共用风险检查）；安装默认全选四 agent、纯库存合法；同源更新=原子换位+影响面提示+trash 回滚；卸载两级（卸载=删正本+全接入，点图标=取消接入）。CONTEXT.md 增「纯库存」「残留」。
+
+- [08 — 正本仓的第三方写入并存规则](https://github.com/wenren93/fanbox/issues/19)（本地: issues/08-store-third-party-coexistence.md）: 外来正本（无来源身份：收编件/第三方装入/手动放入）同权管理接入与卸载、来源 chip 区分、无同源更新；同名冲突走覆盖接管流程、外部覆盖由健康检查发现；写互斥不加锁。CONTEXT.md 增「外来正本」。
 ## Not yet specified
 
-- 存量迁移的真实 HOME 验收标准（dogfood 式清单）——等 03 号票出方案后细化。
+（无——迁移验收标准已并入 07 号票范围；前沿仅剩 06 号票在解、07 号票待解锁。）
 
 ## Out of scope
 

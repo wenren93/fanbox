@@ -1,6 +1,6 @@
 # 08 — 正本仓的第三方写入并存规则
 
-**Type:** grilling · **Blocked by:** — · **Status:** open · **Claimed by:** —
+**Type:** grilling · **Blocked by:** — · **Status:** resolved（2026-08-23）· **Claimed by:** zcode-session（2026-08-23）
 
 **GitHub issue:** [#19](https://github.com/wenren93/fanbox/issues/19)（母票 [#11](https://github.com/wenren93/fanbox/issues/11)）
 
@@ -17,6 +17,15 @@ skills.sh CLI、cc-switch、手动 `git clone` 等第三方安装器会直接往
 
 产出：并存规则决策清单，供 07 号票规格引用。
 
-## Resolution
+## Resolution（2026-08-23，与用户对谈收敛，四项全按推荐拍板）
 
-（待解）
+背景事实：来源身份记录存于 `configDir/skill-sources.json`（`records.installations[绝对路径]`），现有安装冲突逻辑已有 `different_source_conflict` 拒绝；迁移方案（03 号票）本身就会向正本仓放入大量无记录实体（收编三件 + 37 个 WorkBuddy 独有件），**外来正本是迁移后的常态而非边缘情况**。
+
+1. **身份识别 = 同权呈现 + 来源 chip 区分**：外来正本（无 skill-sources.json 记录：收编件、skills.sh CLI / cc-switch / 手动放入）与 FanBox 安装的正本同样支持接入/取消接入/卸载；行内来源标「本机收编 / 外部装入」以示区分，同源更新入口不出现。
+2. **冲突规则 = 内容冲突覆盖流程，双向有出路**：FanBox 安装/收编遇正本仓同名外来目录 → 差异概要 → 用户确认后原子换位（旧目录进 trash），来源身份由 FanBox 记录接管（= 外来正本的「转正」路径）；反向（第三方覆盖 FanBox 装的正本）由健康检查标「已被外部修改」（记录指纹/commit 与实际不符），提供重新检查或重装接管。
+3. **维护边界 = 接入/卸载全量，同源更新仅限有来源身份者**：删本机内容是用户权利，卸载对外来正本照常提供；外来正本的更新路径 = 发现页装同源走覆盖接管流程，或交原安装器；收编件永久无同源更新（其来源是本机路径，非固定外部版本）。
+4. **写入互斥 = 不加锁**：queueSkillsWrite 串行 + 临时副本 + 原子换位保证 FanBox 自家操作安全；对第三方并发写不做互斥（锁文件/监听均不做），靠健康检查事后发现（指纹漂移、断链、死环）。
+
+**领域沉淀**：CONTEXT.md 新增「外来正本」词条。
+
+**对下游**：06 号票（#17）健康检查清单增加「已被外部修改」检测（记录指纹 vs 实际内容）；07 号票（#18）规格含外来正本一节；迷雾「迁移验收标准」并入 07 号票范围（03 已定快照 diff 机制，成文归规格）。
