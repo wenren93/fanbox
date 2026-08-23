@@ -1,7 +1,9 @@
 FROM node:22-bookworm
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
+# Install system dependencies（apt 走中科大镜像直连，绕过慢代理）
+RUN sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g' /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null || true
+RUN http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= apt-get update && \
+  http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= apt-get install -y \
   git \
   curl \
   jq \
@@ -36,19 +38,28 @@ WORKDIR /home/agent
 # Clone vision MCP server from GitHub
 RUN git clone --depth 1 https://github.com/wenren93/mimo-vision-mcp.git /home/agent/mimo-vision-mcp
 
+# 修复上游 config.ts 类型错误：as const 只读元组与类型谓词在新版 tsc 下不兼容，
+# 去掉 map 出来的元组上的 as const 即可（上游修复后可移除本补丁）。
+RUN cd /home/agent/mimo-vision-mcp && \
+  sed -i 's/process\.env\[key\]\] as const/process.env[key]]/' src/config.ts && \
+  ! grep -q 'as const)\.filter' src/config.ts
+
 # Pre-populate npm cache so sandbox `npm install` hits local cache instead of downloading
+# electron 二进制走 npmmirror 镜像直连，避免 postinstall 直连 GitHub Releases 龟速
+ENV ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
 USER root
 COPY package.json package-lock.json /tmp/preinstall/
 RUN chown -R ${AGENT_UID}:${AGENT_GID} /tmp/preinstall
 USER ${AGENT_UID}:${AGENT_GID}
-RUN cd /tmp/preinstall && npm install && rm -rf /tmp/preinstall
+RUN cd /tmp/preinstall && \
+  http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= npm install --registry=https://registry.npmmirror.com && rm -rf /tmp/preinstall
 
 # Install linux-arm64 sharp binaries as root (host copies are darwin-arm64)
 USER root
 RUN mkdir -p /home/agent/sharp-hack && \
     cd /home/agent/sharp-hack && \
     npm init -y >/dev/null 2>&1 && \
-    npm install @img/sharp-linux-arm64@0.34.5 @img/sharp-libvips-linux-arm64@1.2.4 2>/dev/null || echo "sharp install skipped"
+    http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= npm install --registry=https://registry.npmmirror.com @img/sharp-linux-arm64@0.34.5 @img/sharp-libvips-linux-arm64@1.2.4 2>/dev/null || echo "sharp install skipped"
 RUN chown -R ${AGENT_UID}:${AGENT_GID} /home/agent/sharp-hack /home/agent/mimo-vision-mcp
 
 # Create sharp preload script to fix platform binary resolution
@@ -58,7 +69,8 @@ RUN echo 'const Module=require("module"),orig=Module._resolveFilename;Module._re
 USER ${AGENT_UID}:${AGENT_GID}
 
 # Install dependencies and build the MCP server
-RUN cd /home/agent/mimo-vision-mcp && npm install && npm run build
+RUN cd /home/agent/mimo-vision-mcp && \
+  http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= npm install --registry=https://registry.npmmirror.com && npm run build
 
 ENV VISION_MCP_PATH="/home/agent/mimo-vision-mcp/dist/server.js"
 ENV VISION_ASSET_ROOT="/home/agent/mimo-vision-mcp/assets"
