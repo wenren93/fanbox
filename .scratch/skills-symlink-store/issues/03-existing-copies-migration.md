@@ -1,6 +1,6 @@
 # 03 — 存量拷贝与死环的一次性迁移方案
 
-**Type:** grilling · **Blocked by:** 01 · **Status:** open · **Claimed by:** —
+**Type:** grilling · **Blocked by:** 01 · **Status:** open · **Claimed by:** wenren93（2026-08-23）
 
 **GitHub issue:** [#14](https://github.com/wenren93/fanbox/issues/14)（母票 [#11](https://github.com/wenren93/fanbox/issues/11)）
 

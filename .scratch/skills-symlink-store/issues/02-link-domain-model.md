@@ -1,6 +1,6 @@
 # 02 — 链接模型的领域语言与 ADR 0001 改写
 
-**Type:** grilling · **Blocked by:** 01 · **Status:** open · **Claimed by:** —
+**Type:** grilling · **Blocked by:** 01 · **Status:** resolved · **Claimed by:** zcode-session（2026-08-23）
 
 **GitHub issue:** [#13](https://github.com/wenren93/fanbox/issues/13)（母票 [#11](https://github.com/wenren93/fanbox/issues/11)）
 
@@ -17,3 +17,16 @@
 5. **ADR 0001 改写要点**：从「独立副本、不建软链」改为「全局目标一律软链」；写清动机（单一事实源、一键启停、迁移成本）与新代价（正本损坏全 agent 受影响、Windows 不可用、第三方工具并存约束）。是否同时需要新 ADR 记录「图标=链存在」的启停语义。
 
 产出：CONTEXT.md 术语增删草案（随决策当场更新 CONTEXT.md）+ ADR 0001 改写要点。成文执行归 07 号票。
+
+## Resolution
+
+2026-08-23 与用户对谈收敛（四项均取推荐项）：
+
+1. **一行一 Skill**：核心对象 = 正本 + 各 Agent 接入状态；「导入」「Skill 安装项」「目标安装项」退役，新动作为「接入 / 取消接入」「收编」；「从未接入」与「取消接入」不做区分。
+2. **正本 = 链条最终指向的真实目录**：正本仓内真实目录与外部工具目录（ego、.cc-switch）都是正本；FanBox 只管接入与启停，卸载外部正本只取消接入、不碰外部内容。
+3. **各列接入机制（混合原生）**：Claude = 逐 skill **相对**软链（官方支持、按目标去重，与 skills.sh 同构）；Codex = 不建链，config.toml 启停（原生读正本仓，重启生效）；ZCode = 不建链，config.json enable 开关（避免双读重复）；WorkBuddy = 拷贝接入 + skills_disabled 目录（软链未证实）。
+4. **存量启停配置迁移时归一**：Claude 清理 skillOverrides 残留（实证无害但要干净）；Codex 按新模型重写 config；ZCode 首迁为不接入的 skill 批量写 enable:false，避免「不写 = 全启用」把 40 个 skill 全量入锁。
+
+- **CONTEXT.md 已当场重写**（正本/正本仓/接入/取消接入/收编等词条替换旧安装项族词条，卸载/覆盖/批量随新模型改义）。
+- **ADR 要点（成文归 07）**：ADR 0001 改写为「正本+接入，全局不再拷贝分发」；新增 ADR 0005「各 Agent 接入与启停机制」记录上表第 3 条与第 4 条的机制及依据（研究票 01 的事实）。
+- 「链在即启用」原假设修正为：仅 Claude 列成立；其余三列各有原生机制，UI 图标统一表达接入状态。
