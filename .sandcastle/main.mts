@@ -65,6 +65,9 @@ const MAX_ITERATIONS = 5;
 // 无 issue 时的睡眠时间（毫秒）
 const SLEEP_MS = 60_000;
 
+// implementer 错峰启动间隔（毫秒）——避免同秒并发建容器触发 podman API 抖动
+const IMPLEMENTER_STAGGER_MS = 10_000;
+
 // 所有 agent 都需要依赖；只有 planner 和 implementer 需要 vision MCP。
 const installHooks = {
   sandbox: {
@@ -205,22 +208,27 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
   // Phase 2: Execute
   // -------------------------------------------------------------------------
   const settled = await Promise.allSettled(
-    issues.map((issue) =>
-      sandcastle.run({
-        hooks: agentHooks,
-        copyToWorktree,
-        sandbox: podman(),
-        branchStrategy: { type: "branch", branch: issue.branch },
-        name: "implementer",
-        maxIterations: 100,
-        agent: sandcastle.claudeCode("stealth/ox-alpha"),
-        promptFile: "./.sandcastle/implement-prompt.md",
-        promptArgs: {
-          TASK_ID: issue.id,
-          ISSUE_TITLE: issue.title,
-          BRANCH: issue.branch,
-        },
-      }),
+    issues.map((issue, index) =>
+      (async () => {
+        if (index > 0) {
+          await sleep(index * IMPLEMENTER_STAGGER_MS);
+        }
+        return sandcastle.run({
+          hooks: agentHooks,
+          copyToWorktree,
+          sandbox: podman(),
+          branchStrategy: { type: "branch", branch: issue.branch },
+          name: "implementer",
+          maxIterations: 100,
+          agent: sandcastle.claudeCode("stealth/ox-alpha"),
+          promptFile: "./.sandcastle/implement-prompt.md",
+          promptArgs: {
+            TASK_ID: issue.id,
+            ISSUE_TITLE: issue.title,
+            BRANCH: issue.branch,
+          },
+        });
+      })(),
     ),
   );
 
