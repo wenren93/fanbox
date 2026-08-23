@@ -2839,7 +2839,8 @@ async function skillsDataV2(opts = {}) {
       fsp.stat(path.join(fp, 'SKILL.md')).then((st) => st.mtimeMs, () => 0),
       fsp.stat(path.join(row.dir, 'SKILL.md')).then((st) => st.mtimeMs, () => 0),
     ]);
-    if (copyHash === null || (copyHash !== origHash && copyMtime <= origMtime)) {
+    row.agents.workbuddy.matchesOriginal = copyHash !== null && copyHash === origHash;
+    if (copyHash === null || (!row.agents.workbuddy.matchesOriginal && copyMtime <= origMtime)) {
       row.agents.workbuddy.drift = true;
       row.health.push({ level: 'warn', code: 'wb-drift', msg: 'WorkBuddy 拷贝落后于原件——可在详情中刷新拷贝' });
     }

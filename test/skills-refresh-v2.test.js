@@ -297,12 +297,14 @@ test('refresh v2 flags WorkBuddy copy drift once the original moves ahead', asyn
     let alpha = response.body.items.find((item) => item.name === 'alpha');
     assert.equal(alpha.agents.workbuddy.on, true);
     assert.equal(alpha.agents.workbuddy.drift, undefined);
+    assert.equal(alpha.agents.workbuddy.matchesOriginal, true);
 
     await fs.writeFile(path.join(alphaDir, 'SKILL.md'),
       '---\nname: alpha\ndescription: updated original\n---\nnew body\n', 'utf8');
     response = await post('/api/skills/refresh', { v: 2 });
     alpha = response.body.items.find((item) => item.name === 'alpha');
     assert.equal(alpha.agents.workbuddy.drift, true);
+    assert.equal(alpha.agents.workbuddy.matchesOriginal, false);
     assert.ok(alpha.health.some((h) => h.code === 'wb-drift'), 'wb-drift health code missing');
 
     // 拷贝反而更新（WB 抢先编辑）不算「落后」，留给迁移向导的漂移矩阵裁决
@@ -314,6 +316,7 @@ test('refresh v2 flags WorkBuddy copy drift once the original moves ahead', asyn
     response = await post('/api/skills/refresh', { v: 2 });
     alpha = response.body.items.find((item) => item.name === 'alpha');
     assert.equal(alpha.agents.workbuddy.drift, undefined, 'copy ahead of original must not be flagged as drift');
+    assert.equal(alpha.agents.workbuddy.matchesOriginal, false);
   });
 });
 
