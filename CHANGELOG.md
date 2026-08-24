@@ -18,6 +18,9 @@
 - **一键启动新增 Codex 桌面应用**：在 Codex CLI 之外增加独立的「Codex 桌面应用」可选入口，放在 agent 列表最后并复用官方图标；自动检测 Mac 是否已安装，点击通过 `open -a Codex` 拉起 App
 - **接入 Sandcastle 本机 Codex 交互 runner**：新增 `npm run sandcastle:codex [-- "任务"]`，通过 `interactive()` 与 `noSandbox()` 在当前终端启动 Codex TUI；每次会话默认进入独立分支和 worktree，并在 README 明示 Sandcastle 隔离与 Codex 自身审批边界
 
+### Removed
+- **Skills 硬切换删除清单**（docs/16 §3）：替代接口全部就位后删净旧机制——退役逐项启停端点 `/api/skills/toggle`（连同 claude-settings / codex-config / directory 三策略代码，Claude 不再读写 settings.json 的 skillOverrides、Codex 不再经旧端点投影 config.toml）与拷贝式导入端点 `/api/skills/import`（连同 `SKILL_IMPORT_TARGETS`、扫描项上的 `importTargets` 目标列表和前端「导入到…」入口与目标选择器）。接入一律走单一 `/api/skills/link` 四列分发，外部内容进原件仓只剩发现页安装与收编两个门；WorkBuddy 的 `skills_disabled` 停用位照常工作，历史 `skills/_disabled` 目录保持只读识别并引导收编
+
 ## [2.13.0] - 2026-08-18
 
 ### Added

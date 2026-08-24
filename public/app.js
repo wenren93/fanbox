@@ -5454,23 +5454,8 @@ const skillsView = {
     if (it.residue) { toast('残留项缺少有效 SKILL.md，不可收编——可在文件区清理', true); return; }
     await this.runAnnex({ project: it.projectRoot || state.cwd, name: it.name });
   },
-  // 项目级/插件保持原形态：启停仍走 /api/skills/toggle（硬切换归后续票）
-  async toggleExtra(it) {
-    if (this.busy) return;
-    this.busy = true; this.render();
-    try {
-      const r = await apiPost('/api/skills/toggle', { dir: it.dir, enable: it.disabled, cwd: state.cwd });
-      if (r && r.ok) {
-        const verb = it.disabled ? '启用' : '停用';
-        toast(r.restartRequired === 'codex' ? `已${verb}；重启 Codex 后生效` : `已${verb} ${it.name}`);
-      } else toast('操作失败：' + ((r && r.error) || ''), true);
-    } catch (err) {
-      toast('操作失败：' + (err.message || '请求失败'), true);
-    } finally {
-      this.busy = false;
-      await this.reload();
-    }
-  },
+  // 硬切换后项目级/插件折叠区不再有逐项启停开关：项目级内容经「收编为原件」
+  // 进入四列矩阵管理，插件由插件体系自管（docs/16 §3、§4.3）。
   async trashExtra(it) {
     if (this.busy) return;
     const ok = await confirmDialog(`把「${it.name}」移到废纸篓？（系统废纸篓里随时可恢复）`);
@@ -6048,8 +6033,8 @@ const skillsView = {
       <div class="sk-last">${this.ago(it.last)}</div>
       ${it.residue
         ? '<div class="sk-last r">残留</div>'
-        : it.toggleSupported === false ? '<span class="sk-last r" title="Claude 插件 Skill 请通过插件管理启停">插件管理</span>'
-        : `<label class="sk-switch ${it.disabled ? '' : 'on'} ${this.busy ? 'locked' : ''}" data-act="toggle" title="${it.disabled ? '启用' : '停用'}（更新 ${it.source === 'plugin' ? '插件管理' : 'Agent 配置'}）"><i></i></label>`}
+        : it.origin === 'plugin' ? '<span class="sk-last r" title="Claude 插件 Skill 由插件体系自管，不参与四列接入">插件自管</span>'
+        : ''}
       <span class="sk-chev">▸</span>
     </div>
     ${this.open.has(it.dir) ? this.extraDetailHtml(it) : ''}`;
@@ -6153,11 +6138,10 @@ const skillsView = {
         return;
       }
       if (act) {
-        // 项目级/插件：保持原形态的启停与动作
+        // 项目级/插件：保持原形态的行内动作
         e.stopPropagation();
         const a = act.dataset.act;
-        if (a === 'toggle') await this.toggleExtra(it);
-        else if (a === 'invoke') invokeSkillInTerm(it.skillName || it.name);
+        if (a === 'invoke') invokeSkillInTerm(it.skillName || it.name);
         else if (a === 'annex') await this.annexItem(it);
         else if (a === 'reveal') navigate(dirOf(it.dir));
         else if (a === 'trash') await this.trashExtra(it);
