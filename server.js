@@ -4612,6 +4612,69 @@ async function migrateVisibility() {
   };
 }
 
+// §9.3 的“外部不动”不能只比原件仓外链的名字：同名链接背后的目录，或
+// cc-switch / WorkBuddy 自身内容被改写时也必须判失败。这里不跟随软链，按
+// 目录结构、链接原始目标与文件内容生成稳定指纹，避免外部死链/循环拖垮验收。
+async function migrateFilesystemFingerprint(root) {
+  let rootStat;
+  try { rootStat = await fsp.lstat(root); } catch (e) { if (e.code === 'ENOENT') return null; throw e; }
+  const hash = crypto.createHash('sha256');
+  const field = (value) => {
+    const data = Buffer.from(String(value));
+    hash.update(String(data.length)); hash.update(':'); hash.update(data);
+  };
+  const hashFile = (file) => new Promise((resolve, reject) => {
+    const stream = fs.createReadStream(file);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.once('end', resolve);
+    stream.once('error', reject);
+  });
+  const visit = async (current, relativePath, stat = null) => {
+    const lst = stat || await fsp.lstat(current);
+    const rel = relativePath.split(path.sep).join('/');
+    if (lst.isSymbolicLink()) {
+      hash.update('l'); field(rel); field(await fsp.readlink(current));
+      return;
+    }
+    if (lst.isDirectory()) {
+      hash.update('d'); field(rel);
+      const names = await fsp.readdir(current);
+      names.sort((a, b) => Buffer.from(a).compare(Buffer.from(b)));
+      for (const name of names) await visit(path.join(current, name), relativePath ? path.join(relativePath, name) : name);
+      return;
+    }
+    if (lst.isFile()) {
+      hash.update('f'); field(rel); field(lst.mode & 0o111); field(lst.size);
+      await hashFile(current);
+      return;
+    }
+    hash.update('s'); field(rel); field(lst.mode);
+  };
+  await visit(root, '', rootStat);
+  return hash.digest('hex');
+}
+
+async function migrateExternalSnapshot(scan) {
+  const targets = [
+    // cc-switch.db 与 logs/ 会被正在运行的 cc-switch 自主写入；迁移只消费且承诺
+    // 不改动的是 Skills 槽位和备份树，因此验收也限定在这两个稳定边界。
+    ['cc-switch-backups', CC_SWITCH_BACKUPS],
+    ['cc-switch-skills', path.join(HOME, '.cc-switch', 'skills')],
+    ['workbuddy', WORKBUDDY_SKILLS],
+  ];
+  for (const name of scan.facts.storeExternalLinks || []) {
+    const link = path.join(AGENTS_SKILLS, name);
+    const target = await fsp.realpath(link).catch(() => null);
+    if (target) targets.push([`store-external:${name}`, target]);
+  }
+  targets.sort(([a], [b]) => a.localeCompare(b));
+  const snapshot = {};
+  for (const [id, target] of targets) {
+    snapshot[id] = { path: target, fingerprint: await migrateFilesystemFingerprint(target) };
+  }
+  return snapshot;
+}
+
 function diffMigrateVisibility(before, after) {
   const agents = {};
   const violations = [];
@@ -4769,25 +4832,22 @@ async function migrateStoreRealToLink(name, undo, holds) {
   holds.push({ path: hold, originalPath: entry });
 }
 
-// 建/换指成仓库相对链；undo 精确还原先前链接形态（原本没有就连新链一起拆掉）
-async function migrateLinkStoreToRepo(name, undo) {
+// 建/换指成仓库相对链；被替换的旧链接先放暂存位，阶段成功后进废纸篓。
+async function migrateLinkStoreToRepo(name, undo, holds) {
   await fsp.mkdir(AGENTS_SKILLS, { recursive: true });
   const linkPath = path.join(AGENTS_SKILLS, name);
-  let prior = null;
-  try { prior = await fsp.readlink(linkPath); } catch (e) { if (e.code !== 'ENOENT' && e.code !== 'EINVAL') throw e; }
-  if (prior !== null) await fsp.unlink(linkPath);
+  const prior = await fsp.lstat(linkPath).catch((e) => { if (e.code === 'ENOENT') return null; throw e; });
+  if (prior) await migrateHoldForTrash(linkPath, AGENTS_SKILLS, undo, holds);
   await fsp.symlink(migrateRepoRelTarget(name, await migrateStoreRealRoot()), linkPath);
   undo.push(async () => {
     await fsp.unlink(linkPath).catch(() => {});
-    if (prior !== null) await fsp.symlink(prior, linkPath).catch(() => {});
   });
 }
 
-async function migrateUnlinkSymlink(fp, undo) {
-  let prior = null;
-  try { prior = await fsp.readlink(fp); } catch (e) { if (e.code !== 'EINVAL') throw e; }
-  await fsp.unlink(fp);
-  undo.push(async () => { if (prior !== null) await fsp.symlink(prior, fp).catch(() => {}); });
+async function migrateUnlinkSymlink(fp, undo, holds) {
+  const lst = await fsp.lstat(fp);
+  if (!lst.isSymbolicLink()) throw new Error(`迁移只允许按链接清理：${fp}`);
+  await migrateHoldForTrash(fp, path.dirname(fp), undo, holds);
 }
 
 // 实体挪进同级暂存位等阶段末尾统一 trash（undo 在 trash 前有效）
@@ -4851,6 +4911,8 @@ async function migrateExecute(plan) {
 
   let aborted = null;
   let before = null;
+  let externalBefore = null;
+  let externalAfter = null;
   let diffOut = null;
   let criteria = null;
   const reminders = [
@@ -4883,10 +4945,13 @@ async function migrateExecute(plan) {
   // Phase 0：拍迁移前四 Agent 可见性快照（无运行中会话的前置由向导会话层把关）
   await runPhase(0, '准备：拍迁移前可见性快照', async (record) => {
     before = await migrateVisibility();
+    externalBefore = await migrateExternalSnapshot(initialScan);
+    manifest.externalBefore = externalBefore;
     await persistMigrateSnapshot(before, 'before');
     record.actions.push({
       action: 'snapshot-before',
       visible: Object.fromEntries(Object.entries(before.agents).map(([a, v]) => [a, v.visible.length])),
+      externalFingerprints: Object.keys(externalBefore).length,
     });
   });
 
@@ -4899,6 +4964,7 @@ async function migrateExecute(plan) {
     for (const row of fresh.names) {
       const candOf = (source) => row.candidates.find((c) => c.source === source);
       for (const op of row.ops) {
+        if (op.phase !== 1) continue;
         if (op.action === 'write-repo' || op.action === 'recover-repo') {
           const src = candOf(op.from);
           if (!src) throw new Error(`${op.action}：${row.name} 缺少 ${op.from} 来源`);
@@ -4928,27 +4994,11 @@ async function migrateExecute(plan) {
           record.actions.push({ action: 'store-real-to-link', name: row.name });
           migrateTestFailure('swap');
         } else if (op.action === 'link-repo') {
-          await migrateLinkStoreToRepo(row.name, undo);
+          await migrateLinkStoreToRepo(row.name, undo, holds);
           record.actions.push({ action: 'link-repo', name: row.name });
         } else if (op.action === 'remove-dead-link') {
-          await migrateUnlinkSymlink(path.join(AGENTS_SKILLS, row.name), undo);
+          await migrateUnlinkSymlink(path.join(AGENTS_SKILLS, row.name), undo, holds);
           record.actions.push({ action: 'remove-dead-link', name: row.name });
-        } else if (op.action === 'trash-codex-real') {
-          const fp = path.join(CODEX_SKILLS, row.name);
-          const lst = await fsp.lstat(fp).catch(() => null);
-          if (!lst) { record.actions.push({ action: 'trash-codex-real-noop', name: row.name }); continue; }
-          await migrateHoldForTrash(fp, CODEX_SKILLS, undo, holds);
-          record.actions.push({ action: 'trash-codex-real', name: row.name });
-        } else if (op.action === 'unlink-codex-link') {
-          const fp = path.join(CODEX_SKILLS, row.name);
-          if (!(await fsp.lstat(fp).catch(() => null))) { record.actions.push({ action: 'unlink-codex-link-noop', name: row.name }); continue; }
-          await migrateUnlinkSymlink(fp, undo);
-          record.actions.push({ action: 'unlink-codex-link', name: row.name, kind: op.kind });
-        } else if (op.action === 'unlink-zcode-link') {
-          const fp = path.join(ZCODE_SKILLS, row.name);
-          if (!(await fsp.lstat(fp).catch(() => null))) { record.actions.push({ action: 'unlink-zcode-link-noop', name: row.name }); continue; }
-          await migrateUnlinkSymlink(fp, undo);
-          record.actions.push({ action: 'unlink-zcode-link', name: row.name });
         } else {
           throw new Error(`未知的迁移操作：${op.action}`);
         }
@@ -4961,6 +5011,7 @@ async function migrateExecute(plan) {
   await runPhase(2, 'Claude 拆整目录链为逐 skill 相对链', async (record, undo) => {
     if (!before) throw new Error('缺少迁移前快照');
     const desired = [...new Set(before.agents.claude.visible)].sort();
+    const holds = [];
     let lst = null;
     try { lst = await fsp.lstat(CLAUDE_SKILLS); } catch (e) { if (e.code !== 'ENOENT') throw e; }
     if (!lst) {
@@ -4975,46 +5026,44 @@ async function migrateExecute(plan) {
         record.actions.push({ action: 'claude-root-not-store-link', target: oldRawTarget, note: '非指向原件仓的整目录链不动' });
         return;
       }
-      // 一个连续动作：删整目录链 → 建真实目录 → 连建相对链（窗口毫秒级）
-      await fsp.unlink(CLAUDE_SKILLS);
+      // 一个连续动作：整目录链暂存 → 建真实目录 → 连建相对链（窗口毫秒级）。
+      // 阶段成功后旧整链进废纸篓；失败时 undo 会把它原位恢复。
+      await migrateHoldForTrash(CLAUDE_SKILLS, path.dirname(CLAUDE_SKILLS), undo, holds);
       await fsp.mkdir(CLAUDE_SKILLS, { recursive: true });
-      const created = [];
-      try {
-        for (const name of desired) {
-          try { if (!(await fsp.stat(path.join(AGENTS_SKILLS, name))).isDirectory()) continue; }
-          catch { continue; } // 迁移期已失效的名字不建链
-          const linkPath = path.join(CLAUDE_SKILLS, name);
-          await fsp.symlink(path.relative(CLAUDE_SKILLS, path.join(AGENTS_SKILLS, name)), linkPath);
-          created.push(linkPath);
-        }
-      } catch (e) {
-        for (const lp of created) await fsp.unlink(lp).catch(() => {});
-        await fsp.rm(CLAUDE_SKILLS, { recursive: true, force: true }).catch(() => {});
-        await fsp.symlink(oldRawTarget, CLAUDE_SKILLS).catch(() => {}); // 一步还原整目录链
-        throw e;
-      }
-      undo.push(async () => {
-        await fsp.rm(CLAUDE_SKILLS, { recursive: true, force: true }).catch(() => {});
-        await fsp.symlink(oldRawTarget, CLAUDE_SKILLS).catch(() => {});
-      });
-      record.actions.push({ action: 'split-whole-dir-link', relinked: created.length, previousTarget: oldRawTarget });
-    } else {
-      // 已是真实目录（重跑 / 手工迁过）：只补迁移前可见却缺的链，不动任何现存实体
-      let added = 0;
-      const createdTopUp = [];
+      undo.push(async () => { await fsp.rm(CLAUDE_SKILLS, { recursive: true, force: true }).catch(() => {}); });
+      let relinked = 0;
       for (const name of desired) {
-        if (await fsp.lstat(path.join(CLAUDE_SKILLS, name)).catch(() => null)) continue;
         try { if (!(await fsp.stat(path.join(AGENTS_SKILLS, name))).isDirectory()) continue; }
+        catch { continue; } // 迁移期已失效的名字不建链
+        await fsp.symlink(path.relative(CLAUDE_SKILLS, path.join(AGENTS_SKILLS, name)), path.join(CLAUDE_SKILLS, name));
+        relinked++;
+      }
+      record.actions.push({ action: 'split-whole-dir-link', relinked, previousTarget: oldRawTarget });
+    } else {
+      // 已是真实目录（重跑 / 手工迁过）：迁移前可见项必须统一成指向原件仓的
+      // 相对链；真实拷贝、绝对链和错指链都先放废纸篓，再建标准链。
+      let added = 0; let replaced = 0;
+      for (const name of desired) {
+        const storeEntry = path.join(AGENTS_SKILLS, name);
+        try { if (!(await fsp.stat(storeEntry)).isDirectory()) continue; }
         catch { continue; }
         const linkPath = path.join(CLAUDE_SKILLS, name);
-        await fsp.symlink(path.relative(CLAUDE_SKILLS, path.join(AGENTS_SKILLS, name)), linkPath);
-        createdTopUp.push(linkPath);
-        added++;
+        const expected = path.relative(CLAUDE_SKILLS, storeEntry);
+        const existing = await fsp.lstat(linkPath).catch(() => null);
+        if (existing && existing.isSymbolicLink()) {
+          const raw = await fsp.readlink(linkPath);
+          if (!path.isAbsolute(raw) && path.resolve(CLAUDE_SKILLS, raw) === path.resolve(storeEntry)) continue;
+        }
+        if (existing) {
+          await migrateHoldForTrash(linkPath, CLAUDE_SKILLS, undo, holds);
+          replaced++;
+        } else {
+          added++;
+        }
+        await fsp.symlink(expected, linkPath);
+        undo.push(async () => { await fsp.unlink(linkPath).catch(() => {}); });
       }
-      if (createdTopUp.length) {
-        undo.push(async () => { for (const lp of createdTopUp) await fsp.unlink(lp).catch(() => {}); });
-      }
-      record.actions.push({ action: added ? 'top-up-links' : 'claude-already-split', added });
+      record.actions.push({ action: added || replaced ? 'normalize-links' : 'claude-already-split', added, replaced });
     }
     migrateTestFailure('claude-split');
 
@@ -5032,6 +5081,7 @@ async function migrateExecute(plan) {
         record.actions.push({ action: 'clean-skill-overrides' });
       }
     }
+    await migrateFlushHolds(holds, record);
   });
 
   // Phase 3：Codex 清理 ~/.codex/skills 到零链终态（只留 .system；config.toml 不动）
@@ -5050,7 +5100,7 @@ async function migrateExecute(plan) {
       const lst = await fsp.lstat(fp).catch(() => null);
       if (!lst) continue;
       if (lst.isSymbolicLink()) {
-        await migrateUnlinkSymlink(fp, undo);
+        await migrateUnlinkSymlink(fp, undo, holds);
         record.actions.push({ action: 'unlink-codex-link', name: n.name });
       } else {
         await migrateHoldForTrash(fp, CODEX_SKILLS, undo, holds);
@@ -5063,13 +5113,14 @@ async function migrateExecute(plan) {
   // Phase 4：ZCode 删手写双读链 + 首迁按迁移前可见性批量写 config.json enable
   await runPhase(4, 'ZCode 删双链 + 按迁移前可见性批量写 enable', async (record, undo) => {
     if (!before) throw new Error('缺少迁移前快照');
+    const holds = [];
     let entries;
     try { entries = await fsp.readdir(ZCODE_SKILLS, { withFileTypes: true }); } catch (e) { if (e.code === 'ENOENT') entries = []; else throw e; }
     for (const n of entries) {
       if (n.name.startsWith('.')) continue;
       const fp = path.join(ZCODE_SKILLS, n.name);
       if (n.isSymbolicLink()) {
-        await migrateUnlinkSymlink(fp, undo);
+        await migrateUnlinkSymlink(fp, undo, holds);
         record.actions.push({ action: 'unlink-zcode-link', name: n.name });
       } else {
         record.actions.push({ action: 'zcode-real-dir-left', name: n.name, note: '真实目录不在迁移范围，保持原样' });
@@ -5100,19 +5151,25 @@ async function migrateExecute(plan) {
       else await atomicWriteText(ZCODE_CLI_CONFIG, cfgText).catch(() => {});
     });
     record.actions.push({ action: 'batch-write-enable', written: finalRows.length });
+    await migrateFlushHolds(holds, record);
   });
 
   // Phase 5：重拍快照 diff + §9 终态验收
   await runPhase(5, '验收报告：前后可见性 diff + 终态检查', async (record) => {
+    if (process.env.NODE_ENV === 'test' && process.env.FANBOX_TEST_MIGRATE_EXTERNAL_CHANGE) {
+      const testFile = path.resolve(process.env.FANBOX_TEST_MIGRATE_EXTERNAL_CHANGE);
+      if (!isPathInside(path.resolve(HOME), testFile)) throw new Error('测试外部变更路径必须位于 HOME');
+      await fsp.appendFile(testFile, '\ntest external change\n');
+    }
     const after = await migrateVisibility();
     await persistMigrateSnapshot(after, 'after');
     diffOut = before ? diffMigrateVisibility(before, after) : null;
     if (diffOut) await atomicWriteText(path.join(MIGRATION_DIR, 'diff.json'), JSON.stringify(diffOut, null, 2) + '\n').catch(() => {});
 
     const finalScan = await migrateScan();
-    const extBefore = new Set(initialScan.facts.storeExternalLinks);
-    const extAfter = new Set(finalScan.facts.storeExternalLinks);
-    const externalsUntouched = extBefore.size === extAfter.size && [...extBefore].every((n) => extAfter.has(n));
+    externalAfter = await migrateExternalSnapshot(finalScan);
+    manifest.externalAfter = externalAfter;
+    const externalsUntouched = JSON.stringify(externalBefore) === JSON.stringify(externalAfter);
 
     const codexLeftovers = (await fsp.readdir(CODEX_SKILLS, { withFileTypes: true }).catch(() => []))
       .filter((n) => n.name !== '.system').length;
@@ -5137,7 +5194,21 @@ async function migrateExecute(plan) {
 
     const claudeLst = await fsp.lstat(CLAUDE_SKILLS).catch(() => null);
     const claudeRootSplit = !!claudeLst && claudeLst.isDirectory() && !claudeLst.isSymbolicLink();
+    let claudeLinksValid = claudeRootSplit;
+    if (claudeLinksValid && before) {
+      for (const name of before.agents.claude.visible) {
+        const linkPath = path.join(CLAUDE_SKILLS, name);
+        const linkStat = await fsp.lstat(linkPath).catch(() => null);
+        if (!linkStat || !linkStat.isSymbolicLink()) { claudeLinksValid = false; break; }
+        const raw = await fsp.readlink(linkPath);
+        if (path.isAbsolute(raw)
+          || path.resolve(CLAUDE_SKILLS, raw) !== path.resolve(path.join(AGENTS_SKILLS, name))) {
+          claudeLinksValid = false; break;
+        }
+      }
+    }
     const overridesClean = Object.keys(await claudeSkillOverrides()).length === 0;
+    const recoverable = !manifest.phases.some((phase) => (phase.actions || []).some((action) => action.action === 'trash-failed'));
 
     criteria = {
       visibilityInvariant: !!diffOut && diffOut.passed,
@@ -5145,7 +5216,8 @@ async function migrateExecute(plan) {
       externalsUntouched,
       codexTerminal: codexLeftovers === 0,
       zcodeTerminal: zcodeNoLinks && zcodeEnableMatches,
-      claudeTerminal: claudeRootSplit && overridesClean,
+      claudeTerminal: claudeLinksValid && overridesClean,
+      recoverable,
     };
     criteria.allOk = Object.values(criteria).every(Boolean);
     record.actions.push({

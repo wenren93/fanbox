@@ -64,12 +64,13 @@ async function stopChild(child) {
 async function withServer(t, { env = {}, fn }) {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'fanbox-skills-migrate-home-'));
   const port = await freePortPair();
+  const extraEnv = typeof env === 'function' ? env(home) : env;
   const child = spawn(process.execPath, ['server.js'], {
     cwd: REPO,
     env: {
       ...process.env, HOME: home, FANBOX_PORT: String(port), FANBOX_NO_OPEN: '1',
       NODE_ENV: 'test', FANBOX_TEST_SKILL_TRASH: path.join(home, '.fanbox-test-trash'),
-      ...env,
+      ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -404,10 +405,10 @@ test('migrate/execute 全流程：拆链 / 收编 / 清理 / ZCode 批量写 ena
       assert.deepEqual((await fs.readdir(homeRoot('.codex', 'skills'))).sort(), ['.system']);
       await assert.rejects(() => fs.stat(homeRoot('.codex', 'config.toml')), { code: 'ENOENT' });
 
-      // trash 可恢复：store 旧 teach、仓库旧 fam、codex 真实目录都进了测试废纸篓
+      // trash 可恢复：内容与被替换/移除的链接全部进测试废纸篓
       const trashDir = homeRoot('.fanbox-test-trash');
       const trashed = await fs.readdir(trashDir);
-      assert.equal(trashed.length, 4, `expected 4 recoverable items in trash, got ${trashed.length}`);
+      assert.equal(trashed.length, 8, `expected 8 recoverable items in trash, got ${trashed.length}`);
 
       // —— ZCode：双链已删；enable 按迁移前可见性批量写入；无关段落保留
       assert.deepEqual(await fs.readdir(homeRoot('.zcode', 'skills')), []);
@@ -429,6 +430,17 @@ test('migrate/execute 全流程：拆链 / 收编 / 清理 / ZCode 批量写 ena
       const manifest = JSON.parse(await readText(path.join(migDir, manifests[0])));
       assert.deepEqual(manifest.plan, { winners: {} });
       assert.ok(manifest.phases.some((p) => p.trashed && p.trashed.length >= 3), 'trash destinations recorded in manifest');
+      const trashedOriginals = manifest.phases.flatMap((phase) => phase.trashed || []).map((item) => item.originalPath);
+      for (const original of [
+        homeRoot('.agents', 'skills', `${P}fam`),
+        homeRoot('.claude', 'skills'),
+        homeRoot('.codex', 'skills', `${P}deadlink`),
+        homeRoot('.zcode', 'skills', `${P}teach`),
+      ]) assert.ok(trashedOriginals.includes(original), `removed link must be recoverable: ${original}`);
+      assert.equal(manifest.phases.find((p) => p.phase === 1).trashed.some((item) => item.originalPath.includes('.codex/skills')), false,
+        'Codex cleanup belongs to Phase 3, not Phase 1');
+      assert.equal(manifest.phases.find((p) => p.phase === 4).trashed.some((item) => item.originalPath === homeRoot('.zcode', 'skills', `${P}teach`)), true,
+        'ZCode link cleanup belongs to Phase 4');
       const diff = exec.body.diff;
       assert.deepEqual(diff.agents.claude, { added: [], removed: [] }, 'claude visibility strictly unchanged');
       assert.deepEqual(diff.agents.workbuddy, { added: [], removed: [] }, 'workbuddy visibility strictly unchanged');
@@ -440,6 +452,7 @@ test('migrate/execute 全流程：拆链 / 收编 / 清理 / ZCode 批量写 ena
       assert.equal(exec.body.criteria.claudeTerminal, true);
       assert.equal(exec.body.criteria.storeHealthy, true);
       assert.equal(exec.body.criteria.externalsUntouched, true);
+      assert.equal(exec.body.criteria.recoverable, true);
       assert.equal(exec.body.passedAllCriteria, true);
       assert.ok(exec.body.reminders.some((r) => /git|提交/.test(r)), 'report reminds about git commit');
 
@@ -449,6 +462,75 @@ test('migrate/execute 全流程：拆链 / 收编 / 清理 / ZCode 批量写 ena
       assert.equal((await fs.readdir(homeRoot('.codex', 'skills'))).sort().join(','), '.system');
       assert.equal(await fs.readlink(path.join(claudeRoot, `${P}teach`)), path.join('..', '..', '.agents', 'skills', `${P}teach`));
     }});
+  });
+});
+
+test('migrate/execute 已拆分的 Claude 目录会把真实拷贝与绝对链归一成相对原件链', async (t) => {
+  await withServer(t, { fn: async ({ home, post }) => {
+    const store = path.join(home, '.agents', 'skills');
+    const claude = path.join(home, '.claude', 'skills');
+    await createSkill(path.join(store, `${P}copy`), 'store copy');
+    await createSkill(path.join(store, `${P}absolute`), 'store absolute');
+    await createSkill(path.join(claude, `${P}copy`), 'claude copy');
+    await fs.symlink(path.join(store, `${P}absolute`), path.join(claude, `${P}absolute`));
+
+    const exec = await post('/api/skills/migrate/execute', { plan: { winners: {} } });
+    assert.equal(exec.body.ok, true, JSON.stringify(exec.body));
+    for (const name of [`${P}copy`, `${P}absolute`]) {
+      const link = path.join(claude, name);
+      assert.equal((await fs.lstat(link)).isSymbolicLink(), true);
+      const raw = await fs.readlink(link);
+      assert.equal(path.isAbsolute(raw), false, `${name} must use a relative link`);
+      assert.equal(path.resolve(claude, raw), path.join(store, name));
+    }
+    assert.equal(exec.body.criteria.claudeTerminal, true);
+    const manifest = JSON.parse(await readText(exec.body.manifestPath));
+    const phase2Trash = manifest.phases.find((phase) => phase.phase === 2).trashed.map((item) => item.originalPath);
+    assert.ok(phase2Trash.includes(path.join(claude, `${P}copy`)));
+    assert.ok(phase2Trash.includes(path.join(claude, `${P}absolute`)));
+  }});
+});
+
+test('migrate/execute 外部目录内容变化时验收不得假报“外部不动”', async (t) => {
+  let workbuddySkill;
+  await withServer(t, {
+    env: (home) => {
+      workbuddySkill = path.join(home, '.workbuddy', 'skills', `${P}external-change`, 'SKILL.md');
+      return { FANBOX_TEST_MIGRATE_EXTERNAL_CHANGE: workbuddySkill };
+    },
+    fn: async ({ home, post }) => {
+      await createSkill(path.dirname(workbuddySkill), 'must stay unchanged');
+      const exec = await post('/api/skills/migrate/execute', { plan: { winners: {} } });
+      assert.equal(exec.body.ok, true, JSON.stringify(exec.body));
+      assert.equal(exec.body.criteria.externalsUntouched, false);
+      assert.equal(exec.body.passedAllCriteria, false);
+      const manifest = JSON.parse(await readText(exec.body.manifestPath));
+      assert.notDeepEqual(manifest.externalBefore, manifest.externalAfter);
+      assert.match(await readText(workbuddySkill), /test external change/);
+      assert.ok(await fs.stat(path.join(home, '.agents', 'skills', `${P}external-change`, 'SKILL.md')));
+    },
+  });
+});
+
+test('migrate/execute 忽略 cc-switch 运行时数据库噪声，只核验 Skills 与备份目录', async (t) => {
+  let runtimeDb;
+  await withServer(t, {
+    env: (home) => {
+      runtimeDb = path.join(home, '.cc-switch', 'cc-switch.db');
+      return { FANBOX_TEST_MIGRATE_EXTERNAL_CHANGE: runtimeDb };
+    },
+    fn: async ({ post }) => {
+      await fs.mkdir(path.dirname(runtimeDb), { recursive: true });
+      await fs.writeFile(runtimeDb, 'live database');
+      const exec = await post('/api/skills/migrate/execute', { plan: { winners: {} } });
+      assert.equal(exec.body.ok, true, JSON.stringify(exec.body));
+      assert.equal(exec.body.criteria.externalsUntouched, true,
+        'cc-switch live DB/log writes are unrelated to migration-owned Skills data');
+      const manifest = JSON.parse(await readText(exec.body.manifestPath));
+      assert.equal(manifest.externalBefore['cc-switch'], undefined);
+      assert.ok(manifest.externalBefore['cc-switch-backups']);
+      assert.ok(manifest.externalBefore['cc-switch-skills']);
+    },
   });
 });
 

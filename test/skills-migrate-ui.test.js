@@ -62,6 +62,7 @@ test('Report presents phases, visibility diff and every docs §9 acceptance item
     'ZCode 终态', 'Claude 终态', '可回滚', '提醒项',
   ]) assert.match(view, new RegExp(label));
   assert.match(view, /report\.manifestPath/);
+  assert.match(view, /c\.recoverable && Boolean\(report\.manifestPath\)/);
   assert.match(view, /review 并提交仓库改动/);
 });
 

@@ -5546,13 +5546,6 @@ const skillsView = {
     if (m.step === 'error') current = 3;
     return `<ol class="sk-mig-steps" aria-label="迁移进度">${labels.map((label, i) => `<li class="${i < current ? 'done' : i === current ? 'current' : ''}"><i>${i < current ? '✓' : i + 1}</i><span>${label}</span></li>`).join('')}</ol>`;
   },
-  resetMigration() {
-    this.migration = {
-      step: 'idle', scan: null, winners: {}, locked: false,
-      sessionConfirmed: false, executeConfirmed: false,
-      report: null, error: '', manifestPath: '',
-    };
-  },
   async startMigration() {
     const m = this.migration;
     if (m.step === 'scanning' || m.step === 'running') return;
@@ -5666,7 +5659,7 @@ const skillsView = {
       ['Codex 终态', c.codexTerminal, '~/.codex/skills 只剩 .system'],
       ['ZCode 终态', c.zcodeTerminal, '零残留链，enable 集合与迁移前一致'],
       ['Claude 终态', c.claudeTerminal, '整目录链已拆，逐 Skill 链生效，skillOverrides 已清'],
-      ['可回滚', Boolean(report.manifestPath), report.manifestPath || '未返回 manifest'],
+      ['可回滚', c.recoverable && Boolean(report.manifestPath), report.manifestPath || '未返回 manifest'],
       ['提醒项', Boolean((report.reminders || []).length), 'review 并提交仓库改动'],
     ];
   },
