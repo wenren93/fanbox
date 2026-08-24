@@ -107,8 +107,8 @@ test('Project and plugin skills live in a bottom collapse keeping their legacy f
   assert.match(view, /项目级（\$\{proj\}）与插件（\$\{plug\}）— 不参与全局矩阵，保持原列表形态/);
   assert.match(view, /extraRowHtml\(it\) \{/);
   assert.match(view, /\$\{this\.srcTag\(it\)\}/);
-  assert.match(view, /data-act="toggle" title="/);
-  assert.match(view, /apiPost\('\/api\/skills\/toggle',\s*\{\s*dir: it\.dir, enable: it\.disabled, cwd: state\.cwd \}\)/);
+  // issue 27 硬切换：折叠区不再有逐项启停开关——项目级经收编进矩阵，插件由插件体系自管
+  assert.doesNotMatch(view, /data-act="toggle"|toggleExtra|sk-switch/);
   // issue 24：项目级行详情的收编走新契约（project + name 两阶段预检流），插件不给按钮
   assert.match(view, /\$\{it\.origin !== 'plugin' && !it\.residue \? `<button data-act="annex"/);
   assert.match(view, /await this\.runAnnex\(\{ project: it\.projectRoot \|\| state\.cwd, name: it\.name \}\);/);

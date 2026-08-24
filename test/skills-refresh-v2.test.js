@@ -387,12 +387,5 @@ test('refresh keeps answering the v1 shape for old callers', async (t) => {
     assert.equal(legacy.body.v, undefined);
     assert.equal(legacy.body.counts, undefined);
     assert.ok(legacy.body.items.every((item) => 'source' in item));
-
-    // 旧启停接口在 v2 存在的情况下照常可用（硬切换归后续票）
-    const claudeDir = path.join(home, '.claude', 'skills', 'alpha');
-    await createSkill(claudeDir);
-    const toggle = await post('/api/skills/toggle', { dir: claudeDir, enable: false });
-    assert.equal(toggle.body.ok, true);
-    assert.equal(JSON.parse(await fs.readFile(path.join(home, '.claude', 'settings.json'), 'utf8')).skillOverrides.alpha, 'off');
   });
 });
