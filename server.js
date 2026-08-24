@@ -4258,6 +4258,880 @@ skillDiscovery = createSkillDiscovery({
   updateConfig,
 });
 
+// ---------- 一次性迁移：migrate 族三端点（issue 28 · docs/16 §7–§9）----------
+// scan = 四仓（claude/agents/codex/workbuddy 根）+ 仓库家族 + cc-switch 备份的漂移矩阵，
+// 最新 mtime 默认胜出、逐行可改判（plan.winners 锁定）；snapshot = 迁移前后四 Agent 可见性
+// 快照，after 自动 diff before；execute = 按 §8 Phase 0–5 执行：原件仓只增 / Claude 拆整
+// 目录链 / Codex 清理零链 / ZCode 删双链 + 按迁移前可见性批量写 enable / 验收报告。
+// 全程删除经 trashPath，manifest 与快照落 CONFIG_DIR/migration/；每阶段带逆序 undo 日志，
+// 失败只回滚当前阶段并跳过其余阶段（manifest 记录现场供后续处理）。
+const CC_SWITCH_BACKUPS = path.join(HOME, '.cc-switch', 'skill-backups');
+const MIGRATION_DIR = path.join(CONFIG_DIR, 'migration');
+const MIGRATE_SOURCES = Object.freeze(['repo', 'store', 'workbuddy', 'claude', 'codex', 'ccswitch']);
+// mtime 打平时的胜出优先序：越靠前越是「正牌家」（仓库家族 > 原件仓 > 拷贝 > 备份）。
+// 与合法来源集合当前一致，从它派生，避免两份清单漂移。
+const MIGRATE_SOURCE_PRIORITY = MIGRATE_SOURCES;
+// scan 返回值与 manifest 共用的位置清单
+const MIGRATE_ROOTS = Object.freeze({
+  store: AGENTS_SKILLS, claude: CLAUDE_SKILLS, codex: CODEX_SKILLS, zcode: ZCODE_SKILLS,
+  workbuddy: WORKBUDDY_SKILLS, repo: REPO_SKILLS, ccswitchBackups: CC_SWITCH_BACKUPS,
+});
+
+function isValidSkillName(name) {
+  return typeof name === 'string' && !!name && !name.includes('\0')
+    && !/[/\\]/.test(name) && !name.startsWith('.') && name.length <= 128;
+}
+
+function migrateTestFailure(stage) {
+  if (process.env.NODE_ENV === 'test' && process.env.FANBOX_TEST_MIGRATE_FAIL === stage) {
+    throw new Error(`测试注入：${stage}`);
+  }
+}
+
+// 目录下的有效条目（真实目录才算候选；点目录/归档/停用位一律绕开）
+async function listSkillRealDirs(root) {
+  let names;
+  try { names = await fsp.readdir(root, { withFileTypes: true }); } catch { return []; }
+  const out = [];
+  for (const n of names) {
+    if (n.name.startsWith('.') || n.name === '_archive' || n.name === '_backups' || n.name === '_disabled') continue;
+    let lst;
+    try { lst = await fsp.lstat(path.join(root, n.name)); } catch { continue; }
+    if (lst.isDirectory()) out.push({ name: n.name, dir: path.join(root, n.name) });
+  }
+  return out;
+}
+
+// 候选条目指纹 + SKILL.md mtime；拿不到内容指纹（外指软链等不安全形态）的候选拿掉
+async function migrateCandidate(source, dir) {
+  const [hash, mtime] = await Promise.all([
+    skillTreeFingerprint(dir).catch(() => null),
+    fsp.stat(path.join(dir, 'SKILL.md')).then((st) => st.mtimeMs, () => 0),
+  ]);
+  return hash === null ? null : { source, dir, hash, mtime };
+}
+
+// 原件仓单条目形态：real / dead-loop / broken-link / alias-link / repo-link / external-link / absent
+async function classifyStoreEntry(name) {
+  const fp = path.join(AGENTS_SKILLS, name);
+  let lst;
+  try { lst = await fsp.lstat(fp); } catch (e) { return e.code === 'ENOENT' ? 'absent' : null; }
+  if (lst.isDirectory()) return 'real';
+  if (!lst.isSymbolicLink()) return null;
+  let real;
+  try { real = await fsp.realpath(fp); }
+  catch (e) { return e.code === 'ELOOP' ? 'dead-loop' : 'broken-link'; }
+  const storeRoot = path.resolve(AGENTS_SKILLS);
+  const repoRoot = path.resolve(REPO_SKILLS);
+  if (path.resolve(real) === storeRoot) return 'dead-loop'; // 吞掉整个仓的变体死环
+  if (isPathInside(storeRoot, path.resolve(real))) return 'alias-link'; // 仓内互指的多余别名
+  if (isPathInside(repoRoot, path.resolve(real))) return 'repo-link';
+  return 'external-link';
+}
+
+// 漂移矩阵：全名并集逐行给候选、默认胜出（可被 winners 改判）与分阶段 ops。
+// winners 只影响依赖「谁胜出」的 ops（刷新/写仓/收编来源），结构性换指清理与胜出无关。
+async function migrateScan(winners = {}) {
+  const facts = {
+    claudeWholeDirLink: null,
+    claudeOverridesResidue: Object.keys(await claudeSkillOverrides()).length,
+    repoFamilies: [],
+    storeDeadLoops: [], storeBrokenLinks: [], storeAliasLinks: [], storeExternalLinks: [],
+    codexBrokenLinks: [], codexStoreLinks: [], codexExternalLinks: [],
+    zcodeLinks: [], zcodeRealDirs: [],
+  };
+
+  // 原件仓条目逐一分类
+  let storeNames = [];
+  try {
+    storeNames = (await fsp.readdir(AGENTS_SKILLS, { withFileTypes: true }))
+      .filter((n) => !n.name.startsWith('.') && n.name !== '_archive' && n.name !== '_backups')
+      .map((n) => n.name);
+  } catch { /* 还没有原件仓 */ }
+  const storeKind = new Map();
+  for (const name of storeNames) {
+    const kind = await classifyStoreEntry(name);
+    if (!kind) continue;
+    storeKind.set(name, kind);
+    if (kind === 'dead-loop') facts.storeDeadLoops.push(name);
+    else if (kind === 'broken-link') facts.storeBrokenLinks.push(name);
+    else if (kind === 'alias-link') facts.storeAliasLinks.push(name);
+    else if (kind === 'external-link') facts.storeExternalLinks.push(name);
+  }
+
+  const repoDirs = await listSkillRealDirs(REPO_SKILLS);
+  facts.repoFamilies = repoDirs.map((d) => d.name);
+  const repoHas = new Set(facts.repoFamilies);
+
+  // claude 根：整目录链只记事实（内容就是原件仓）；真实目录里的拷贝算独立候选
+  let claudeDirs = [];
+  try {
+    const lst = await fsp.lstat(CLAUDE_SKILLS);
+    if (lst.isSymbolicLink()) {
+      try { facts.claudeWholeDirLink = path.resolve(path.dirname(CLAUDE_SKILLS), await fsp.readlink(CLAUDE_SKILLS)); } catch { /* */ }
+    } else if (lst.isDirectory()) {
+      claudeDirs = await listSkillRealDirs(CLAUDE_SKILLS);
+    }
+  } catch { /* 没装 claude */ }
+
+  // codex 根：真实目录是候选；一切软链都进迁移清单（终态零链，docs/16 §7）
+  const codexDirs = [];
+  const codexLinks = new Map(); // name -> broken | store | external
+  {
+    let names;
+    try { names = await fsp.readdir(CODEX_SKILLS, { withFileTypes: true }); } catch { names = []; }
+    for (const n of names) {
+      if (n.name.startsWith('.') || n.name === '_archive' || n.name === '_backups') continue;
+      const fp = path.join(CODEX_SKILLS, n.name);
+      let lst;
+      try { lst = await fsp.lstat(fp); } catch { continue; }
+      if (lst.isDirectory()) { codexDirs.push({ name: n.name, dir: fp }); continue; }
+      if (!lst.isSymbolicLink()) continue;
+      let real;
+      try { real = path.resolve(await fsp.realpath(fp)); }
+      catch { codexLinks.set(n.name, 'broken'); facts.codexBrokenLinks.push(n.name); continue; }
+      if (isPathInside(path.resolve(AGENTS_SKILLS), real) || isPathInside(path.resolve(REPO_SKILLS), real)) {
+        codexLinks.set(n.name, 'store'); facts.codexStoreLinks.push(n.name);
+        continue;
+      }
+      codexLinks.set(n.name, 'external'); facts.codexExternalLinks.push(n.name);
+    }
+  }
+
+  // zcode 根：手写双读链进迁移清单；真实目录不在迁移范围、点名即可
+  const zcodeLinkTargets = new Map();
+  {
+    let names;
+    try { names = await fsp.readdir(ZCODE_SKILLS, { withFileTypes: true }); } catch { names = []; }
+    for (const n of names) {
+      if (n.name.startsWith('.')) continue;
+      if (n.isSymbolicLink()) {
+        try { zcodeLinkTargets.set(n.name, await fsp.readlink(path.join(ZCODE_SKILLS, n.name))); } catch { /* */ }
+      } else {
+        const lst = await fsp.lstat(path.join(ZCODE_SKILLS, n.name)).catch(() => null);
+        if (lst && lst.isDirectory()) facts.zcodeRealDirs.push(n.name);
+      }
+    }
+  }
+
+  const wbDirs = await listSkillRealDirs(WORKBUDDY_SKILLS);
+  const ccDirs = await listSkillRealDirs(CC_SWITCH_BACKUPS);
+
+  // 候选按名归堆；同一来源最多一条（每根一个同名槽位）
+  facts.zcodeLinks = [...zcodeLinkTargets.keys()].sort();
+  const byName = new Map();
+  const addCandidates = async (dirs, source) => {
+    for (const d of dirs) {
+      const row = byName.get(d.name) || { candidates: [], errors: [] };
+      byName.set(d.name, row);
+      const cand = await migrateCandidate(source, d.dir);
+      if (cand) row.candidates.push(cand);
+      else row.errors.push(source);
+    }
+  };
+  await addCandidates(repoDirs, 'repo');
+  await addCandidates(storeNames.filter((n) => storeKind.get(n) === 'real').map((n) => ({ name: n, dir: path.join(AGENTS_SKILLS, n) })), 'store');
+  await addCandidates(wbDirs, 'workbuddy');
+  await addCandidates(claudeDirs, 'claude');
+  await addCandidates(codexDirs, 'codex');
+  await addCandidates(ccDirs, 'ccswitch');
+
+  const prio = (source) => MIGRATE_SOURCE_PRIORITY.indexOf(source);
+  const allNames = [...new Set([
+    ...byName.keys(), ...storeKind.keys(), ...codexLinks.keys(), ...zcodeLinkTargets.keys(),
+  ])].sort();
+
+  const names = allNames.map((name) => {
+    const entry = byName.get(name) || { candidates: [], errors: [] };
+    const candidates = entry.candidates.slice().sort((a, b) => b.mtime - a.mtime || prio(a.source) - prio(b.source));
+    // 默认胜出 = 最新 mtime（打平按正牌家优先）；改判锁定则用指定来源
+    let winner = candidates[0] || null;
+    const forced = winners[name];
+    if (forced) {
+      const found = candidates.find((c) => c.source === forced);
+      if (found) winner = found;
+      else winner = Object.assign({}, winner || {}, { overrideMissing: forced });
+    }
+    const hashes = new Set(candidates.map((c) => c.hash));
+    const identical = candidates.length >= 2 && hashes.size === 1;
+    const storeState = storeKind.get(name) || 'absent';
+    const inRepoFamily = repoHas.has(name);
+    const storeHash = (candidates.find((c) => c.source === 'store') || {}).hash || null;
+    const repoHash = (candidates.find((c) => c.source === 'repo') || {}).hash || null;
+
+    const ops = [];
+    if (storeState === 'real') {
+      if (inRepoFamily) {
+        if (winner && !winner.overrideMissing && repoHash !== null && winner.hash !== repoHash) {
+          ops.push({ action: 'write-repo', phase: 1, from: winner.source });
+        }
+        ops.push({ action: 'store-real-to-link', phase: 1 });
+      } else if (winner && !winner.overrideMissing && storeHash !== null && winner.hash !== storeHash) {
+        ops.push({ action: 'refresh-store', phase: 1, from: winner.source });
+      }
+    } else if (storeState === 'dead-loop' || storeState === 'broken-link') {
+      if (inRepoFamily) {
+        if (winner && !winner.overrideMissing && repoHash !== null && winner.hash !== repoHash) {
+          ops.push({ action: 'write-repo', phase: 1, from: winner.source });
+        }
+        ops.push({ action: 'link-repo', phase: 1 });
+      } else if (winner && !winner.overrideMissing) {
+        // 死名恢复：WorkBuddy 活拷贝优先、cc-switch 备份次之（docs/16 §8），
+        // 都没有才落到 mtime 胜出版；恢复进仓库再建链
+        const recoverFrom = candidates.some((c) => c.source === 'workbuddy') ? 'workbuddy'
+          : candidates.some((c) => c.source === 'ccswitch') ? 'ccswitch' : winner.source;
+        ops.push({ action: 'recover-repo', phase: 1, from: recoverFrom });
+        ops.push({ action: 'link-repo', phase: 1 });
+      } else {
+        ops.push({ action: 'remove-dead-link', phase: 1 });
+      }
+    } else if (storeState === 'alias-link') {
+      ops.push({ action: 'remove-dead-link', phase: 1 });
+    } else if (storeState === 'repo-link') {
+      if (winner && !winner.overrideMissing && repoHash !== null && winner.hash !== repoHash) {
+        ops.push({ action: 'write-repo', phase: 1, from: winner.source });
+      }
+    } else if (storeState === 'absent') {
+      if (inRepoFamily) ops.push({ action: 'link-repo', phase: 1 });
+      else if (winner && !winner.overrideMissing) ops.push({ action: 'adopt-store', phase: 1, from: winner.source });
+    }
+    // 各列清理 ops（终态零链；外来原件绝不删内容，只动 agent 目录里的链）
+    if (codexDirs.some((d) => d.name === name)) ops.push({ action: 'trash-codex-real', phase: 3 });
+    if (codexLinks.has(name)) ops.push({ action: 'unlink-codex-link', phase: 3, kind: codexLinks.get(name) });
+    if (zcodeLinkTargets.has(name)) ops.push({ action: 'unlink-zcode-link', phase: 4 });
+
+    const row = {
+      name,
+      candidates,
+      identical,
+      winner: winner ? { source: winner.source, dir: winner.dir, mtime: winner.mtime } : null,
+      defaultWinner: candidates[0] ? candidates[0].source : null,
+      ops,
+    };
+    if ((entry.errors || []).length) row.candidateErrors = entry.errors.slice();
+    if (winner && winner.overrideMissing) row.overrideMissing = winner.overrideMissing;
+    return row;
+  });
+
+  return {
+    ok: true,
+    at: Date.now(),
+    roots: MIGRATE_ROOTS,
+    facts,
+    names,
+  };
+}
+
+// 对 agent「可见」= 名字解析成一个可读目录（断链/死环对 agent 不可用）
+async function resolvableDirNames(root) {
+  let names;
+  try { names = await fsp.readdir(root, { withFileTypes: true }); } catch { return []; }
+  const out = [];
+  for (const n of names) {
+    if (n.name.startsWith('.') || n.name === '_archive' || n.name === '_backups' || n.name === '_disabled' || n.name === '.system') continue;
+    try { if ((await fsp.stat(path.join(root, n.name))).isDirectory()) out.push(n.name); } catch { /* 断链/死环不可见 */ }
+  }
+  return out.sort();
+}
+
+// 四 Agent 可见性现值（docs/16 §9 快照口径）。Codex/ZCode 按各自原生双读 +
+// config 禁用扣除；WorkBuddy 只数 skills/（skills_disabled 不算可见）。
+async function migrateVisibility() {
+  let claude = { mode: 'absent', visible: [] };
+  try {
+    const lst = await fsp.lstat(CLAUDE_SKILLS);
+    if (lst.isSymbolicLink()) claude = { mode: 'whole-dir-link', visible: await resolvableDirNames(await fsp.realpath(CLAUDE_SKILLS).catch(() => CLAUDE_SKILLS)) };
+    else if (lst.isDirectory()) claude = { mode: 'directory', visible: await resolvableDirNames(CLAUDE_SKILLS) };
+  } catch { /* 根本没装 */ }
+
+  const codexDisabled = await codexDisabledSkillFiles();
+  const codexDisabledNames = new Set();
+  for (const p of codexDisabled) {
+    const dir = path.dirname(path.resolve(p));
+    for (const root of [CODEX_SKILLS, AGENTS_SKILLS]) {
+      if (isPathInside(path.resolve(root), dir)) codexDisabledNames.add(path.relative(path.resolve(root), dir));
+    }
+  }
+  const codexVisible = [...new Set([...(await resolvableDirNames(CODEX_SKILLS)), ...(await resolvableDirNames(AGENTS_SKILLS))])]
+    .filter((n) => !codexDisabledNames.has(n)).sort();
+
+  const workbuddyVisible = await resolvableDirNames(WORKBUDDY_SKILLS);
+
+  const zcodeDisabled = await zcodeDisabledSkillDirs();
+  const zcodeDisabledNames = new Set();
+  for (const p of zcodeDisabled) {
+    for (const root of [ZCODE_SKILLS, AGENTS_SKILLS]) {
+      if (isPathInside(path.resolve(root), path.resolve(p))) zcodeDisabledNames.add(path.relative(path.resolve(root), path.resolve(p)));
+    }
+  }
+  const zcodeVisible = [...new Set([...(await resolvableDirNames(ZCODE_SKILLS)), ...(await resolvableDirNames(AGENTS_SKILLS))])]
+    .filter((n) => !zcodeDisabledNames.has(n)).sort();
+
+  return {
+    at: Date.now(),
+    agents: {
+      claude,
+      codex: { visible: codexVisible },
+      workbuddy: { visible: workbuddyVisible },
+      zcode: { visible: zcodeVisible },
+    },
+  };
+}
+
+function diffMigrateVisibility(before, after) {
+  const agents = {};
+  const violations = [];
+  for (const agent of ['claude', 'codex', 'workbuddy', 'zcode']) {
+    const b = new Set(before.agents[agent].visible);
+    const a = new Set(after.agents[agent].visible);
+    const added = [...a].filter((n) => !b.has(n)).sort();
+    const removed = [...b].filter((n) => !a.has(n)).sort();
+    agents[agent] = { added, removed };
+    if ((agent === 'claude' || agent === 'workbuddy') && (added.length || removed.length)) {
+      violations.push(`${agent} 可见集合必须严格不变（新增 ${added.length} 个、消失 ${removed.length} 个）`);
+    } else if (removed.length) {
+      violations.push(`${agent} 可见集合不允许消失（消失 ${removed.length} 个）`);
+    }
+  }
+  return { beforeAt: before.at, afterAt: after.at, agents, violations, passed: violations.length === 0 };
+}
+
+async function persistMigrateSnapshot(snapshot, phase) {
+  await fsp.mkdir(MIGRATION_DIR, { recursive: true });
+  const file = path.join(MIGRATION_DIR, `snapshot-${phase}.json`);
+  await atomicWriteText(file, JSON.stringify(snapshot, null, 2) + '\n');
+  return file;
+}
+
+async function migrateSnapshot(phase) {
+  if (phase === 'before') {
+    const snapshot = await migrateVisibility();
+    const file = await persistMigrateSnapshot(snapshot, 'before');
+    return { ok: true, phase, snapshot, path: file };
+  }
+  let before;
+  try { before = JSON.parse(await fsp.readFile(path.join(MIGRATION_DIR, 'snapshot-before.json'), 'utf8')); }
+  catch {
+    return { ok: false, status: 'no_before_snapshot', error: '还没有迁移前快照——先以 phase:"before" 拍一次' };
+  }
+  const snapshot = await migrateVisibility();
+  const file = await persistMigrateSnapshot(snapshot, 'after');
+  const diff = diffMigrateVisibility(before, snapshot);
+  await atomicWriteText(path.join(MIGRATION_DIR, 'diff.json'), JSON.stringify(diff, null, 2) + '\n').catch(() => {});
+  return { ok: true, phase, snapshot, diff, path: file };
+}
+
+// ---- execute 的落盘原语：全部带逆序 undo；暂存位统一在阶段成功末尾进废纸篓 ----
+
+// 仓内条目 → 仓库家族的相对链目标。必须按原件仓的物理路径（realpath）算：
+// macOS 上 HOME 可能在 /var→/private/var 这类符号链下，逻辑路径数出来的
+// 「..」层数内核解析时会对不上，链会变成断链。
+function migrateRepoRelTarget(name, storeReal) {
+  return path.relative(storeReal, path.join(REPO_SKILLS, name));
+}
+
+async function migrateStoreRealRoot() {
+  try { return await fsp.realpath(AGENTS_SKILLS); } catch { return path.resolve(AGENTS_SKILLS); }
+}
+
+async function migrateStageCopyInto(parentRoot, prefix, sourceDir) {
+  await fsp.mkdir(parentRoot, { recursive: true });
+  const stage = await fsp.mkdtemp(path.join(parentRoot, prefix));
+  try {
+    await copySkillTree(sourceDir, stage);
+    return stage;
+  } catch (e) {
+    await fsp.rm(stage, { recursive: true, force: true }).catch(() => {});
+    throw e;
+  }
+}
+
+// 胜出版内容写进仓库家族（git 提交留给用户）。旧内容挪暂存位记入 holds；内容已一致时跳过。
+async function migrateWriteRepoFamily(name, sourceDir, undo, holds) {
+  const target = path.join(REPO_SKILLS, name);
+  let existing = null;
+  try { existing = await fsp.lstat(target); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  if (existing && !existing.isDirectory()) throw new Error(`仓库目标位被非目录占用：${target}`);
+  if (existing && await skillTreeFingerprint(target) === await skillTreeFingerprint(sourceDir)) return false;
+  const stage = await migrateStageCopyInto(REPO_SKILLS, '.fanbox-mig-repo-', sourceDir);
+  let hold = null;
+  if (existing) {
+    hold = await fsp.mkdtemp(path.join(REPO_SKILLS, '.fanbox-mig-old-'));
+    await fsp.rmdir(hold);
+    await fsp.rename(target, hold);
+  }
+  try {
+    await fsp.rename(stage, target);
+  } catch (e) {
+    if (hold) await fsp.rename(hold, target).catch(() => {});
+    await fsp.rm(stage, { recursive: true, force: true }).catch(() => {});
+    throw e;
+  }
+  undo.push(async () => {
+    await fsp.rm(target, { recursive: true, force: true }).catch(() => {});
+    if (hold) await fsp.rename(hold, target).catch(() => {});
+  });
+  if (hold) holds.push({ path: hold, originalPath: target });
+  return true;
+}
+
+// 收编：来源内容首次放入原件仓（目标位必须空）。
+// 注意：一次性迁移不跑 docs/14 的风险检查管线——迁移对象全是本机既有内容
+// （各 agent 目录拷贝 / cc-switch 备份），非外部装入；对外内容的静态检查
+// 仍由发现页安装与收编端点把关。
+async function migrateAdoptIntoStore(name, sourceDir, undo) {
+  const target = path.join(AGENTS_SKILLS, name);
+  let existing = null;
+  try { existing = await fsp.lstat(target); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  if (existing) throw new Error(`原件仓已有同名条目：${target}`);
+  const stage = await migrateStageCopyInto(AGENTS_SKILLS, '.fanbox-mig-adopt-', sourceDir);
+  try {
+    await fsp.rename(stage, target);
+  } catch (e) {
+    await fsp.rm(stage, { recursive: true, force: true }).catch(() => {});
+    throw e;
+  }
+  undo.push(async () => { await fsp.rm(target, { recursive: true, force: true }).catch(() => {}); });
+}
+
+// 刷新：胜出版原子换位覆盖在位原件；旧原件暂存位进 holds（成功后进废纸篓）
+async function migrateRefreshStoreEntry(name, sourceDir, undo, holds) {
+  const target = path.join(AGENTS_SKILLS, name);
+  const hold = await fsp.mkdtemp(path.join(AGENTS_SKILLS, '.fanbox-mig-old-'));
+  await fsp.rmdir(hold);
+  await fsp.rename(target, hold);
+  let stage = null;
+  try {
+    stage = await migrateStageCopyInto(AGENTS_SKILLS, '.fanbox-mig-new-', sourceDir);
+    await fsp.rename(stage, target);
+  } catch (e) {
+    if (stage) await fsp.rm(stage, { recursive: true, force: true }).catch(() => {});
+    await fsp.rename(hold, target).catch(() => {});
+    throw e;
+  }
+  undo.push(async () => {
+    await fsp.rm(target, { recursive: true, force: true }).catch(() => {});
+    await fsp.rename(hold, target).catch(() => {});
+  });
+  holds.push({ path: hold, originalPath: target });
+}
+
+// 仓内真实目录换成仓库相对链（仓库家族终态表示）；旧目录暂存位进 holds
+async function migrateStoreRealToLink(name, undo, holds) {
+  const entry = path.join(AGENTS_SKILLS, name);
+  const hold = await fsp.mkdtemp(path.join(AGENTS_SKILLS, '.fanbox-mig-old-'));
+  await fsp.rmdir(hold);
+  await fsp.rename(entry, hold);
+  try {
+    await fsp.symlink(migrateRepoRelTarget(name, await migrateStoreRealRoot()), entry);
+  } catch (e) {
+    await fsp.rename(hold, entry).catch(() => {});
+    throw e;
+  }
+  undo.push(async () => {
+    await fsp.unlink(entry).catch(() => {});
+    await fsp.rename(hold, entry).catch(() => {});
+  });
+  holds.push({ path: hold, originalPath: entry });
+}
+
+// 建/换指成仓库相对链；undo 精确还原先前链接形态（原本没有就连新链一起拆掉）
+async function migrateLinkStoreToRepo(name, undo) {
+  await fsp.mkdir(AGENTS_SKILLS, { recursive: true });
+  const linkPath = path.join(AGENTS_SKILLS, name);
+  let prior = null;
+  try { prior = await fsp.readlink(linkPath); } catch (e) { if (e.code !== 'ENOENT' && e.code !== 'EINVAL') throw e; }
+  if (prior !== null) await fsp.unlink(linkPath);
+  await fsp.symlink(migrateRepoRelTarget(name, await migrateStoreRealRoot()), linkPath);
+  undo.push(async () => {
+    await fsp.unlink(linkPath).catch(() => {});
+    if (prior !== null) await fsp.symlink(prior, linkPath).catch(() => {});
+  });
+}
+
+async function migrateUnlinkSymlink(fp, undo) {
+  let prior = null;
+  try { prior = await fsp.readlink(fp); } catch (e) { if (e.code !== 'EINVAL') throw e; }
+  await fsp.unlink(fp);
+  undo.push(async () => { if (prior !== null) await fsp.symlink(prior, fp).catch(() => {}); });
+}
+
+// 实体挪进同级暂存位等阶段末尾统一 trash（undo 在 trash 前有效）
+async function migrateHoldForTrash(fp, siblingRoot, undo, holds) {
+  const hold = await fsp.mkdtemp(path.join(siblingRoot, '.fanbox-mig-hold-'));
+  await fsp.rmdir(hold);
+  await fsp.rename(fp, hold);
+  undo.push(async () => { await fsp.rename(hold, fp).catch(() => {}); });
+  holds.push({ path: hold, originalPath: fp });
+}
+
+async function migrateFlushHolds(holds, record) {
+  for (const h of holds) {
+    const trashed = await trashImportedSkill(h.path);
+    if (trashed.ok) {
+      record.trashed.push({ originalPath: h.originalPath, destination: trashed.destination || null });
+    } else {
+      record.actions.push({ action: 'trash-failed', path: h.path, error: trashed.error });
+    }
+  }
+}
+
+function parseMigrateExecuteRequest(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: '请求体格式错误' };
+  const plan = body.plan;
+  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return { ok: false, error: 'plan 必须是对象' };
+  let winners = {};
+  if (plan.winners !== undefined) {
+    if (!plan.winners || typeof plan.winners !== 'object' || Array.isArray(plan.winners)) return { ok: false, error: 'plan.winners 必须是对象' };
+    winners = plan.winners;
+    for (const [name, source] of Object.entries(winners)) {
+      if (!isValidSkillName(name)) return { ok: false, error: `winners 键不是合法 Skill 名称：${name}` };
+      if (!MIGRATE_SOURCES.includes(source)) return { ok: false, error: `winners.${name} 的来源必须是 ${MIGRATE_SOURCES.join('/')} 之一` };
+    }
+  }
+  return { ok: true, plan: { winners: { ...winners } } };
+}
+
+async function migrateExecute(plan) {
+  const overrides = plan.winners || {};
+
+  // 改判校验先于任何落盘：矩阵里对不上的改判直接结构化拒绝（不留半份 manifest）
+  const initialScan = await migrateScan();
+  for (const [name, source] of Object.entries(overrides)) {
+    const row = initialScan.names.find((r) => r.name === name);
+    if (!row) return { ok: false, status: 'unknown_name', error: `改判行不在扫描矩阵里：${name}` };
+    if (!row.candidates.some((c) => c.source === source)) {
+      return { ok: false, status: 'unknown_candidate', error: `改判无效：${name} 没有 ${source} 来源的候选` };
+    }
+  }
+
+  await fsp.mkdir(MIGRATION_DIR, { recursive: true });
+  const manifest = {
+    startedAt: Date.now(),
+    plan,
+    roots: MIGRATE_ROOTS,
+    phases: [],
+  };
+  const manifestFile = path.join(MIGRATION_DIR, `manifest-${manifest.startedAt}-${crypto.randomBytes(3).toString('hex')}.json`);
+  const persistManifest = () => atomicWriteText(manifestFile, JSON.stringify(manifest, null, 2) + '\n');
+
+  let aborted = null;
+  let before = null;
+  let diffOut = null;
+  let criteria = null;
+  const reminders = [
+    '请 review 并提交仓库改动——胜出版内容与死名恢复件已写入仓库但未 commit',
+    'Codex 列配置需重启 Codex 生效',
+  ];
+
+  const runPhase = async (idx, title, fn) => {
+    const record = { phase: idx, title, status: 'done', actions: [], trashed: [] };
+    if (aborted) {
+      record.status = 'skipped';
+      manifest.phases.push(record);
+      return record;
+    }
+    const undo = [];
+    manifest.phases.push(record);
+    try {
+      await fn(record, undo);
+    } catch (e) {
+      record.status = 'failed';
+      record.error = e.message;
+      for (const u of undo.reverse()) { try { await u(); } catch { /* 尽力还原 */ } }
+      record.actions.push({ action: 'phase-rolled-back' });
+      aborted = { phase: idx, error: e.message };
+    }
+    await persistManifest();
+    return record;
+  };
+
+  // Phase 0：拍迁移前四 Agent 可见性快照（无运行中会话的前置由向导会话层把关）
+  await runPhase(0, '准备：拍迁移前可见性快照', async (record) => {
+    before = await migrateVisibility();
+    await persistMigrateSnapshot(before, 'before');
+    record.actions.push({
+      action: 'snapshot-before',
+      visible: Object.fromEntries(Object.entries(before.agents).map(([a, v]) => [a, v.visible.length])),
+    });
+  });
+
+  // Phase 1：原件仓只增 + 胜出版写仓库 + 死环换指（行间独立，任一行失败整段逆序回滚）
+  await runPhase(1, '原件仓只增 + 仓库写入 + 死环换指', async (record, undo) => {
+    const fresh = await migrateScan(overrides);
+    const stale = fresh.names.find((r) => r.overrideMissing);
+    if (stale) throw new Error(`改判失效：${stale.name} 已无 ${stale.overrideMissing} 来源候选，请重新扫描后再执行`);
+    const holds = [];
+    for (const row of fresh.names) {
+      const candOf = (source) => row.candidates.find((c) => c.source === source);
+      for (const op of row.ops) {
+        if (op.action === 'write-repo' || op.action === 'recover-repo') {
+          const src = candOf(op.from);
+          if (!src) throw new Error(`${op.action}：${row.name} 缺少 ${op.from} 来源`);
+          const wrote = await migrateWriteRepoFamily(row.name, src.dir, undo, holds);
+          record.actions.push({ action: op.action, name: row.name, from: op.from, wrote });
+          migrateTestFailure('repo');
+        } else if (op.action === 'adopt-store') {
+          const src = candOf(op.from);
+          if (!src) throw new Error(`adopt-store：${row.name} 缺少 ${op.from} 来源`);
+          await migrateAdoptIntoStore(row.name, src.dir, undo);
+          record.actions.push({ action: 'adopt-store', name: row.name, from: op.from });
+          migrateTestFailure('adopt');
+        } else if (op.action === 'refresh-store') {
+          const src = candOf(op.from);
+          const entryPath = path.join(AGENTS_SKILLS, row.name);
+          // 执行时再核对一次：扫描之后被动过就不盖
+          if (!src || !(await fsp.stat(entryPath).catch(() => null))
+            || (await skillTreeFingerprint(entryPath) === await skillTreeFingerprint(src.dir))) {
+            record.actions.push({ action: 'refresh-store-noop', name: row.name });
+            continue;
+          }
+          await migrateRefreshStoreEntry(row.name, src.dir, undo, holds);
+          record.actions.push({ action: 'refresh-store', name: row.name, from: op.from });
+          migrateTestFailure('swap');
+        } else if (op.action === 'store-real-to-link') {
+          await migrateStoreRealToLink(row.name, undo, holds);
+          record.actions.push({ action: 'store-real-to-link', name: row.name });
+          migrateTestFailure('swap');
+        } else if (op.action === 'link-repo') {
+          await migrateLinkStoreToRepo(row.name, undo);
+          record.actions.push({ action: 'link-repo', name: row.name });
+        } else if (op.action === 'remove-dead-link') {
+          await migrateUnlinkSymlink(path.join(AGENTS_SKILLS, row.name), undo);
+          record.actions.push({ action: 'remove-dead-link', name: row.name });
+        } else if (op.action === 'trash-codex-real') {
+          const fp = path.join(CODEX_SKILLS, row.name);
+          const lst = await fsp.lstat(fp).catch(() => null);
+          if (!lst) { record.actions.push({ action: 'trash-codex-real-noop', name: row.name }); continue; }
+          await migrateHoldForTrash(fp, CODEX_SKILLS, undo, holds);
+          record.actions.push({ action: 'trash-codex-real', name: row.name });
+        } else if (op.action === 'unlink-codex-link') {
+          const fp = path.join(CODEX_SKILLS, row.name);
+          if (!(await fsp.lstat(fp).catch(() => null))) { record.actions.push({ action: 'unlink-codex-link-noop', name: row.name }); continue; }
+          await migrateUnlinkSymlink(fp, undo);
+          record.actions.push({ action: 'unlink-codex-link', name: row.name, kind: op.kind });
+        } else if (op.action === 'unlink-zcode-link') {
+          const fp = path.join(ZCODE_SKILLS, row.name);
+          if (!(await fsp.lstat(fp).catch(() => null))) { record.actions.push({ action: 'unlink-zcode-link-noop', name: row.name }); continue; }
+          await migrateUnlinkSymlink(fp, undo);
+          record.actions.push({ action: 'unlink-zcode-link', name: row.name });
+        } else {
+          throw new Error(`未知的迁移操作：${op.action}`);
+        }
+      }
+    }
+    await migrateFlushHolds(holds, record);
+  });
+
+  // Phase 2：Claude 拆整目录链 → 真实目录 + 逐 skill 相对链（连续动作）；顺带清 skillOverrides 残留
+  await runPhase(2, 'Claude 拆整目录链为逐 skill 相对链', async (record, undo) => {
+    if (!before) throw new Error('缺少迁移前快照');
+    const desired = [...new Set(before.agents.claude.visible)].sort();
+    let lst = null;
+    try { lst = await fsp.lstat(CLAUDE_SKILLS); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    if (!lst) {
+      record.actions.push({ action: 'claude-root-absent' });
+      return;
+    }
+    if (lst.isSymbolicLink()) {
+      const oldRawTarget = await fsp.readlink(CLAUDE_SKILLS);
+      const hop = path.resolve(path.dirname(CLAUDE_SKILLS), oldRawTarget);
+      const storeRoot = path.resolve(AGENTS_SKILLS);
+      if (hop !== storeRoot && !isPathInside(storeRoot, hop)) {
+        record.actions.push({ action: 'claude-root-not-store-link', target: oldRawTarget, note: '非指向原件仓的整目录链不动' });
+        return;
+      }
+      // 一个连续动作：删整目录链 → 建真实目录 → 连建相对链（窗口毫秒级）
+      await fsp.unlink(CLAUDE_SKILLS);
+      await fsp.mkdir(CLAUDE_SKILLS, { recursive: true });
+      const created = [];
+      try {
+        for (const name of desired) {
+          try { if (!(await fsp.stat(path.join(AGENTS_SKILLS, name))).isDirectory()) continue; }
+          catch { continue; } // 迁移期已失效的名字不建链
+          const linkPath = path.join(CLAUDE_SKILLS, name);
+          await fsp.symlink(path.relative(CLAUDE_SKILLS, path.join(AGENTS_SKILLS, name)), linkPath);
+          created.push(linkPath);
+        }
+      } catch (e) {
+        for (const lp of created) await fsp.unlink(lp).catch(() => {});
+        await fsp.rm(CLAUDE_SKILLS, { recursive: true, force: true }).catch(() => {});
+        await fsp.symlink(oldRawTarget, CLAUDE_SKILLS).catch(() => {}); // 一步还原整目录链
+        throw e;
+      }
+      undo.push(async () => {
+        await fsp.rm(CLAUDE_SKILLS, { recursive: true, force: true }).catch(() => {});
+        await fsp.symlink(oldRawTarget, CLAUDE_SKILLS).catch(() => {});
+      });
+      record.actions.push({ action: 'split-whole-dir-link', relinked: created.length, previousTarget: oldRawTarget });
+    } else {
+      // 已是真实目录（重跑 / 手工迁过）：只补迁移前可见却缺的链，不动任何现存实体
+      let added = 0;
+      const createdTopUp = [];
+      for (const name of desired) {
+        if (await fsp.lstat(path.join(CLAUDE_SKILLS, name)).catch(() => null)) continue;
+        try { if (!(await fsp.stat(path.join(AGENTS_SKILLS, name))).isDirectory()) continue; }
+        catch { continue; }
+        const linkPath = path.join(CLAUDE_SKILLS, name);
+        await fsp.symlink(path.relative(CLAUDE_SKILLS, path.join(AGENTS_SKILLS, name)), linkPath);
+        createdTopUp.push(linkPath);
+        added++;
+      }
+      if (createdTopUp.length) {
+        undo.push(async () => { for (const lp of createdTopUp) await fsp.unlink(lp).catch(() => {}); });
+      }
+      record.actions.push({ action: added ? 'top-up-links' : 'claude-already-split', added });
+    }
+    migrateTestFailure('claude-split');
+
+    // 存量启停配置归一（ADR 0005）：settings.json 的 skillOverrides 残留整体清掉
+    const settingsText = await fsp.readFile(CLAUDE_SETTINGS, 'utf8').catch(() => null);
+    if (settingsText !== null) {
+      let settings;
+      try { settings = JSON.parse(settingsText); } catch { settings = null; }
+      if (settings && typeof settings === 'object' && !Array.isArray(settings) && settings.skillOverrides !== undefined) {
+        await backupSkillConfig(CLAUDE_SETTINGS).catch(() => {});
+        const next = { ...settings };
+        delete next.skillOverrides;
+        await atomicWriteText(CLAUDE_SETTINGS, JSON.stringify(next, null, 2) + '\n');
+        undo.push(async () => { await atomicWriteText(CLAUDE_SETTINGS, settingsText).catch(() => {}); });
+        record.actions.push({ action: 'clean-skill-overrides' });
+      }
+    }
+  });
+
+  // Phase 3：Codex 清理 ~/.codex/skills 到零链终态（只留 .system；config.toml 不动）
+  await runPhase(3, 'Codex 清理 ~/.codex/skills 至零链终态', async (record, undo) => {
+    let entries;
+    try { entries = await fsp.readdir(CODEX_SKILLS, { withFileTypes: true }); }
+    catch (e) {
+      if (e.code === 'ENOENT') { record.actions.push({ action: 'codex-skills-absent' }); return; }
+      throw e;
+    }
+    const holds = [];
+    for (const n of entries) {
+      if (n.name === '.system' || n.name.startsWith('.')) continue;
+      const fp = path.join(CODEX_SKILLS, n.name);
+      const lst = await fsp.lstat(fp).catch(() => null);
+      if (!lst) continue;
+      if (lst.isSymbolicLink()) {
+        await migrateUnlinkSymlink(fp, undo);
+        record.actions.push({ action: 'unlink-codex-link', name: n.name });
+      } else {
+        await migrateHoldForTrash(fp, CODEX_SKILLS, undo, holds);
+        record.actions.push({ action: 'trash-codex-entry', name: n.name, kind: lst.isDirectory() ? 'dir' : 'file' });
+      }
+    }
+    await migrateFlushHolds(holds, record);
+  });
+
+  // Phase 4：ZCode 删手写双读链 + 首迁按迁移前可见性批量写 config.json enable
+  await runPhase(4, 'ZCode 删双链 + 按迁移前可见性批量写 enable', async (record, undo) => {
+    if (!before) throw new Error('缺少迁移前快照');
+    let entries;
+    try { entries = await fsp.readdir(ZCODE_SKILLS, { withFileTypes: true }); } catch (e) { if (e.code === 'ENOENT') entries = []; else throw e; }
+    for (const n of entries) {
+      if (n.name.startsWith('.')) continue;
+      const fp = path.join(ZCODE_SKILLS, n.name);
+      if (n.isSymbolicLink()) {
+        await migrateUnlinkSymlink(fp, undo);
+        record.actions.push({ action: 'unlink-zcode-link', name: n.name });
+      } else {
+        record.actions.push({ action: 'zcode-real-dir-left', name: n.name, note: '真实目录不在迁移范围，保持原样' });
+      }
+    }
+    migrateTestFailure('zcode-unlink');
+
+    // 原可见者 enable:true、其余 enable:false——避免「不写 = 全启用」把全部原件意外入锁（ADR 0005）
+    const finalRows = matrixRowsFromScan(await skillsDataV2({ force: true }));
+    const previouslyVisible = new Set(before.agents.zcode.visible);
+    const cfgText = await fsp.readFile(ZCODE_CLI_CONFIG, 'utf8').catch(() => null);
+    let cfg = {};
+    if (cfgText !== null) {
+      cfg = JSON.parse(cfgText);
+      if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error('ZCode config.json 顶层必须是对象');
+    }
+    const skills = cfg.skills && typeof cfg.skills === 'object' && !Array.isArray(cfg.skills) ? { ...cfg.skills } : {};
+    for (const row of finalRows) {
+      const key = path.resolve(path.join(AGENTS_SKILLS, row.name));
+      const current = skills[key] && typeof skills[key] === 'object' && !Array.isArray(skills[key]) ? skills[key] : {};
+      skills[key] = { ...current, enable: previouslyVisible.has(row.name) };
+    }
+    if (cfgText !== null) await backupSkillConfig(ZCODE_CLI_CONFIG).catch(() => {});
+    cfg.skills = skills;
+    await atomicWriteText(ZCODE_CLI_CONFIG, JSON.stringify(cfg, null, 2) + '\n');
+    undo.push(async () => {
+      if (cfgText === null) await fsp.rm(ZCODE_CLI_CONFIG, { force: true }).catch(() => {});
+      else await atomicWriteText(ZCODE_CLI_CONFIG, cfgText).catch(() => {});
+    });
+    record.actions.push({ action: 'batch-write-enable', written: finalRows.length });
+  });
+
+  // Phase 5：重拍快照 diff + §9 终态验收
+  await runPhase(5, '验收报告：前后可见性 diff + 终态检查', async (record) => {
+    const after = await migrateVisibility();
+    await persistMigrateSnapshot(after, 'after');
+    diffOut = before ? diffMigrateVisibility(before, after) : null;
+    if (diffOut) await atomicWriteText(path.join(MIGRATION_DIR, 'diff.json'), JSON.stringify(diffOut, null, 2) + '\n').catch(() => {});
+
+    const finalScan = await migrateScan();
+    const extBefore = new Set(initialScan.facts.storeExternalLinks);
+    const extAfter = new Set(finalScan.facts.storeExternalLinks);
+    const externalsUntouched = extBefore.size === extAfter.size && [...extBefore].every((n) => extAfter.has(n));
+
+    const codexLeftovers = (await fsp.readdir(CODEX_SKILLS, { withFileTypes: true }).catch(() => []))
+      .filter((n) => n.name !== '.system').length;
+
+    const zEntries = await fsp.readdir(ZCODE_SKILLS, { withFileTypes: true }).catch(() => []);
+    const zcodeNoLinks = !zEntries.some((n) => n.isSymbolicLink());
+    // enable 集合逐一核对（§9.5）：凡迁移后仍在原件仓的行，开关都必须等于迁移前可见性。
+    // 只清理掉已消失的实体（死链等）——它们没有键，缺省启用会误报。
+    let zcodeEnableMatches = true;
+    if (before) {
+      const cfg = JSON.parse(await fsp.readFile(ZCODE_CLI_CONFIG, 'utf8').catch(() => '{}')) || {};
+      const prevVisible = new Set(before.agents.zcode.visible);
+      for (const row of finalScan.names) {
+        const kind = await classifyStoreEntry(row.name);
+        if (kind !== 'real' && kind !== 'repo-link' && kind !== 'external-link') continue;
+        const key = path.resolve(path.join(AGENTS_SKILLS, row.name));
+        const entry = cfg.skills && cfg.skills[key];
+        const enabled = entry && typeof entry === 'object' ? entry.enable !== false : true;
+        if (enabled !== prevVisible.has(row.name)) { zcodeEnableMatches = false; break; }
+      }
+    }
+
+    const claudeLst = await fsp.lstat(CLAUDE_SKILLS).catch(() => null);
+    const claudeRootSplit = !!claudeLst && claudeLst.isDirectory() && !claudeLst.isSymbolicLink();
+    const overridesClean = Object.keys(await claudeSkillOverrides()).length === 0;
+
+    criteria = {
+      visibilityInvariant: !!diffOut && diffOut.passed,
+      storeHealthy: finalScan.facts.storeDeadLoops.length === 0 && finalScan.facts.storeBrokenLinks.length === 0,
+      externalsUntouched,
+      codexTerminal: codexLeftovers === 0,
+      zcodeTerminal: zcodeNoLinks && zcodeEnableMatches,
+      claudeTerminal: claudeRootSplit && overridesClean,
+    };
+    criteria.allOk = Object.values(criteria).every(Boolean);
+    record.actions.push({
+      action: 'acceptance-report',
+      diffPassed: diffOut ? diffOut.passed : null,
+      criteria,
+    });
+  });
+
+  return {
+    ok: !aborted,
+    ...(aborted ? { status: 'phase_failed', error: `${aborted.error}（阶段 ${aborted.phase} 失败，已回滚该阶段）` } : {}),
+    manifestPath: manifestFile,
+    phases: manifest.phases,
+    diff: diffOut,
+    criteria,
+    passedAllCriteria: !!criteria && criteria.allOk,
+    reminders,
+  };
+}
+
 // ---------- 内置 skill 一键安装（设置面板）----------
 // 随 app 分发的 skill（skills/<id>/）拷进 ~/.claude/skills/<id>/，终端里的 claude 就学会翻箱的配套玩法。
 // asar 包里 fs 照常可读（Electron 补丁过的 fs），开发目录直接跑也一样。
@@ -4789,6 +5663,24 @@ const server = http.createServer(async (req, res) => {
       const parsed = parseSkillAnnexRequest(await readBody(req));
       if (!parsed.ok) return sendJSON(res, 400, { ok: false, status: 'invalid_request', error: parsed.error });
       return sendJSON(res, 200, await queueSkillsWrite(() => skillAnnex(parsed)));
+    }
+    if (p === '/api/skills/migrate/scan' && req.method === 'POST') {
+      // 漂移矩阵只读；改判锁定在 plan.winners，执行时才落盘
+      return sendJSON(res, 200, await migrateScan());
+    }
+    if (p === '/api/skills/migrate/snapshot' && req.method === 'POST') {
+      const b = await readBody(req);
+      const phase = b && b.phase;
+      if (phase !== 'before' && phase !== 'after') {
+        return sendJSON(res, 400, { ok: false, status: 'invalid_request', error: 'phase 必须是 before 或 after' });
+      }
+      return sendJSON(res, 200, await migrateSnapshot(phase));
+    }
+    if (p === '/api/skills/migrate/execute' && req.method === 'POST') {
+      // 按 §8 Phase 0–5 执行；写入走串行队列，阶段失败逆序回滚本阶段
+      const parsed = parseMigrateExecuteRequest(await readBody(req));
+      if (!parsed.ok) return sendJSON(res, 400, { ok: false, status: 'invalid_request', error: parsed.error });
+      return sendJSON(res, 200, await queueSkillsWrite(() => migrateExecute(parsed.plan)));
     }
     if (p === '/api/agent-usage') {
       return sendJSON(res, 200, await agentUsage());
