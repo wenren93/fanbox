@@ -4302,6 +4302,40 @@ async function listSkillRealDirs(root) {
   return out;
 }
 
+// cc-switch 的 skill-backups 不是普通 Skill 根目录：每次备份是一层时间戳包装，
+// 真正内容在 <backup>/skill/，原名在 meta.json.skill.name。一个 Skill 可能有多份
+// 历史备份，只取 backupCreatedAt 最新者；同时兼容测试/旧版本的直接 Skill 目录形态。
+async function listCcSwitchBackupSkills(root) {
+  let entries;
+  try { entries = await fsp.readdir(root, { withFileTypes: true }); } catch { return []; }
+  const latest = new Map();
+  for (const entry of entries) {
+    if (entry.name.startsWith('.') || !entry.isDirectory()) continue;
+    const wrapper = path.join(root, entry.name);
+    let name = entry.name;
+    let dir = wrapper;
+    let rank = 0;
+    try {
+      const meta = JSON.parse(await fsp.readFile(path.join(wrapper, 'meta.json'), 'utf8'));
+      const wrappedDir = path.join(wrapper, 'skill');
+      const wrappedStat = await fsp.stat(path.join(wrappedDir, 'SKILL.md'));
+      if (!wrappedStat.isFile()) continue;
+      name = meta && meta.skill && (meta.skill.name || meta.skill.directory);
+      dir = wrappedDir;
+      rank = Number(meta.backupCreatedAt || (meta.skill && meta.skill.updatedAt) || wrappedStat.mtimeMs || 0);
+    } catch {
+      // 旧形态 / 测试夹具：根层本身就是 Skill；无根层 SKILL.md 的未知包装直接忽略。
+      const directStat = await fsp.stat(path.join(wrapper, 'SKILL.md')).catch(() => null);
+      if (!directStat || !directStat.isFile()) continue;
+      rank = directStat.mtimeMs;
+    }
+    if (!isValidSkillName(name)) continue;
+    const prior = latest.get(name);
+    if (!prior || rank > prior.rank) latest.set(name, { name, dir, rank });
+  }
+  return [...latest.values()].map(({ name, dir }) => ({ name, dir }));
+}
+
 // 候选条目指纹 + SKILL.md mtime；拿不到内容指纹（外指软链等不安全形态）的候选拿掉
 async function migrateCandidate(source, dir) {
   const [hash, mtime] = await Promise.all([
@@ -4415,7 +4449,7 @@ async function migrateScan(winners = {}) {
   }
 
   const wbDirs = await listSkillRealDirs(WORKBUDDY_SKILLS);
-  const ccDirs = await listSkillRealDirs(CC_SWITCH_BACKUPS);
+  const ccDirs = await listCcSwitchBackupSkills(CC_SWITCH_BACKUPS);
 
   // 候选按名归堆；同一来源最多一条（每根一个同名槽位）
   facts.zcodeLinks = [...zcodeLinkTargets.keys()].sort();
@@ -5010,7 +5044,8 @@ async function migrateExecute(plan) {
     }
     const holds = [];
     for (const n of entries) {
-      if (n.name === '.system' || n.name.startsWith('.')) continue;
+      // §9.4 的终态是严格「只留 .system」；.DS_Store 等隐藏残留同样经 trash 清走。
+      if (n.name === '.system') continue;
       const fp = path.join(CODEX_SKILLS, n.name);
       const lst = await fsp.lstat(fp).catch(() => null);
       if (!lst) continue;

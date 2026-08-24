@@ -230,6 +230,33 @@ test('migrate/scan 输出四仓 + cc-switch 备份的漂移矩阵、默认胜出
   });
 });
 
+test('migrate 识别 cc-switch 包装备份里的真实 Skill 名称与 skill/ 内容', async (t) => {
+  await withServer(t, { fn: async ({ home, post }) => {
+    const backupName = `20260817_171301_${P}wrapped`;
+    const backupRoot = path.join(home, '.cc-switch', 'skill-backups', backupName);
+    const skillRoot = path.join(backupRoot, 'skill');
+    await createSkill(skillRoot, 'cc-switch wrapped backup');
+    await fs.writeFile(path.join(backupRoot, 'meta.json'), JSON.stringify({
+      skill: { name: `${P}wrapped`, directory: `${P}wrapped` },
+      backupCreatedAt: 1786986781,
+      sourcePath: path.join(home, '.agents', 'skills', `${P}wrapped`),
+    }, null, 2));
+
+    const scan = await post('/api/skills/migrate/scan');
+    assert.equal(scan.status, 200);
+    const row = scan.body.names.find((item) => item.name === `${P}wrapped`);
+    assert.ok(row, 'wrapper meta skill.name should become the matrix row name');
+    assert.equal(scan.body.names.some((item) => item.name === backupName), false, 'timestamp wrapper is not a Skill row');
+    assert.equal(row.winner.source, 'ccswitch');
+    assert.equal(row.winner.dir, skillRoot);
+
+    const exec = await post('/api/skills/migrate/execute', { plan: { winners: { [`${P}wrapped`]: 'ccswitch' } } });
+    assert.equal(exec.status, 200);
+    assert.equal(exec.body.ok, true, JSON.stringify(exec.body));
+    assert.match(await readText(path.join(home, '.agents', 'skills', `${P}wrapped`, 'SKILL.md')), /cc-switch wrapped backup/);
+  }});
+});
+
 test('migrate/snapshot 前后快照与结构化 diff（Claude/WB 不变式、Codex/ZCode 只许新增）', async (t) => {
   await withServer(t, { fn: async ({ home, post }) => {
     const store = path.join(home, '.agents', 'skills');
@@ -316,10 +343,12 @@ test('migrate/execute 全流程：拆链 / 收编 / 清理 / ZCode 批量写 ena
       await fs.writeFile(homeRoot('.claude', 'settings.json'),
         JSON.stringify({ model: 'keep-me', skillOverrides: { [`${P}teach`]: 'off', [`${P}ext`]: 'off' } }, null, 2) + '\n', 'utf8');
 
-      // codex：一个真实目录（本名单唯一来源）、一条死链、必须存活的 .system
+      // codex：一个真实目录（本名单唯一来源）、一条死链、必须存活的 .system；
+      // Finder 产生的 .DS_Store 也必须清走，终态严格只留 .system。
       await createSkill(homeRoot('.codex', 'skills', `${P}cx`), 'codex real v1');
       await fs.symlink(path.join(home, '.cc-switch', 'skills', `${P}dead`), homeRoot('.codex', 'skills', `${P}deadlink`));
       await fs.mkdir(homeRoot('.codex', 'skills', '.system'), { recursive: true });
+      await fs.writeFile(homeRoot('.codex', 'skills', '.DS_Store'), 'finder metadata');
 
       // workbuddy：teach 最新版（矩阵刷新 store 用）、独有件、fam 的最新版（写仓库用）
       await createSkill(path.join(homeRoot('.workbuddy', 'skills'), `${P}teach`), 'workbuddy v2');
@@ -378,7 +407,7 @@ test('migrate/execute 全流程：拆链 / 收编 / 清理 / ZCode 批量写 ena
       // trash 可恢复：store 旧 teach、仓库旧 fam、codex 真实目录都进了测试废纸篓
       const trashDir = homeRoot('.fanbox-test-trash');
       const trashed = await fs.readdir(trashDir);
-      assert.equal(trashed.length, 3, `expected 3 recoverable items in trash, got ${trashed.length}`);
+      assert.equal(trashed.length, 4, `expected 4 recoverable items in trash, got ${trashed.length}`);
 
       // —— ZCode：双链已删；enable 按迁移前可见性批量写入；无关段落保留
       assert.deepEqual(await fs.readdir(homeRoot('.zcode', 'skills')), []);

@@ -5094,6 +5094,13 @@ const skillsView = {
     riskAcknowledged: false,
     installationPrerequisite: { ok: true },
   },
+  // 一次性迁移向导（issue 29 · docs/16 §8–§9）。锁定后 winners 不再随 UI 改动；
+  // 失败保留同一 plan 与 manifest 路径，服务端已回滚失败阶段，可安全重试。
+  migration: {
+    step: 'idle', scan: null, winners: {}, locked: false,
+    sessionConfirmed: false, executeConfirmed: false,
+    report: null, error: '', manifestPath: '',
+  },
   async show() {
     state.skillsMode = true; state.recentMode = false; state.cursor = -1;
     this.activeTab = 'installed';
@@ -5508,24 +5515,240 @@ const skillsView = {
     } catch { /* 默认目标是便利设置，读取失败不影响发现或安装 */ }
   },
   switchTab(tab) {
-    if (!['installed', 'discovery'].includes(tab) || tab === this.activeTab) return;
+    if (!['installed', 'discovery', 'migration'].includes(tab) || tab === this.activeTab) return;
     this.activeTab = tab;
+    if (tab === 'migration' && this.migration.step === 'idle') { this.startMigration(); return; }
     this.render();
   },
   render() {
     if (this.activeTab === 'discovery') { this.renderDiscovery(); return; }
+    if (this.activeTab === 'migration') { this.renderMigration(); return; }
     this.renderInstalled();
   },
   tabsHtml() {
     return `<nav class="sk-tabs" aria-label="Skills 视图">
       <button class="sk-tab ${this.activeTab === 'installed' ? 'on' : ''}" data-sk-tab="installed" aria-selected="${this.activeTab === 'installed'}">已安装</button>
       <button class="sk-tab ${this.activeTab === 'discovery' ? 'on' : ''}" data-sk-tab="discovery" aria-selected="${this.activeTab === 'discovery'}">发现</button>
+      <button class="sk-tab ${this.activeTab === 'migration' ? 'on' : ''}" data-sk-tab="migration" aria-selected="${this.activeTab === 'migration'}">迁移向导</button>
     </nav>`;
   },
   bindTabs(area) {
     area.querySelectorAll('[data-sk-tab]').forEach((button) => {
       button.onclick = () => this.switchTab(button.dataset.skTab);
     });
+  },
+  migrationStepsHtml() {
+    const m = this.migration;
+    const order = ['scanning', 'matrix', 'confirm', 'running', 'report'];
+    const labels = ['扫描现状', '漂移改判', '确认执行', '批量迁移', '验收报告'];
+    let current = order.indexOf(m.step);
+    if (m.step === 'idle') current = 0;
+    if (m.step === 'error') current = 3;
+    return `<ol class="sk-mig-steps" aria-label="迁移进度">${labels.map((label, i) => `<li class="${i < current ? 'done' : i === current ? 'current' : ''}"><i>${i < current ? '✓' : i + 1}</i><span>${label}</span></li>`).join('')}</ol>`;
+  },
+  resetMigration() {
+    this.migration = {
+      step: 'idle', scan: null, winners: {}, locked: false,
+      sessionConfirmed: false, executeConfirmed: false,
+      report: null, error: '', manifestPath: '',
+    };
+  },
+  async startMigration() {
+    const m = this.migration;
+    if (m.step === 'scanning' || m.step === 'running') return;
+    m.step = 'scanning'; m.scan = null; m.report = null; m.error = '';
+    m.locked = false; m.sessionConfirmed = false; m.executeConfirmed = false;
+    this.render();
+    try {
+      const r = await apiPost('/api/skills/migrate/scan');
+      if (!r || r.ok === false) throw new Error((r && r.error) || '扫描失败');
+      m.scan = r;
+      m.winners = Object.fromEntries((r.names || []).filter((row) => row.winner && row.winner.source).map((row) => [row.name, row.winner.source]));
+      m.step = 'matrix';
+    } catch (err) {
+      m.step = 'error'; m.error = err.message || '扫描失败';
+    }
+    if (state.skillsMode && this.activeTab === 'migration') this.render();
+  },
+  setMigrationWinner(name, source) {
+    const m = this.migration;
+    if (m.locked || m.step !== 'matrix') return;
+    const row = (m.scan && m.scan.names || []).find((item) => item.name === name);
+    if (!row || !(row.candidates || []).some((candidate) => candidate.source === source)) return;
+    this.migration.winners[name] = source;
+  },
+  lockMigrationPlan() {
+    const m = this.migration;
+    if (!m.scan || m.step !== 'matrix') return;
+    const unresolved = (m.scan.names || []).find((row) => row.candidates.length && !m.winners[row.name]);
+    if (unresolved) { toast(`请先选择「${unresolved.name}」的胜出版本`, true); return; }
+    m.locked = true;
+    m.step = 'confirm';
+    this.render();
+  },
+  unlockMigrationPlan() {
+    const m = this.migration;
+    if (m.step !== 'confirm') return;
+    m.locked = false; m.step = 'matrix';
+    m.sessionConfirmed = false; m.executeConfirmed = false;
+    this.render();
+  },
+  migrationSourceLabel(source) {
+    return ({ repo: 'FanBox 仓库', store: '原件仓', workbuddy: 'WorkBuddy', claude: 'Claude', codex: 'Codex', ccswitch: 'cc-switch 备份' })[source] || source;
+  },
+  migrationOpLabel(op) {
+    return ({
+      'write-repo': '胜出版写入仓库', 'recover-repo': '恢复死名到仓库',
+      'adopt-store': '收编进原件仓', 'refresh-store': '刷新原件',
+      'store-real-to-link': '原件改为仓库链', 'link-repo': '建立仓库链',
+      'remove-dead-link': '移除死链', 'trash-codex-real': 'Codex 旧目录进废纸篓',
+      'unlink-codex-link': '移除 Codex 链', 'unlink-zcode-link': '移除 ZCode 双读链',
+    })[op.action] || op.action;
+  },
+  migrationRowHtml(row) {
+    const m = this.migration;
+    const selected = m.winners[row.name] || '';
+    const candidates = row.candidates || [];
+    const ops = row.ops || [];
+    return `<div class="sk-mig-row ${row.identical ? 'identical' : candidates.length > 1 ? 'drift' : ''}">
+      <div class="sk-mig-name"><b>${escapeHtml(row.name)}</b><span>${row.identical ? '候选内容一致' : candidates.length > 1 ? `${candidates.length} 份内容漂移` : candidates.length ? '单一候选' : '仅清理结构异常'}</span></div>
+      <div class="sk-mig-candidates">${candidates.length ? candidates.map((candidate) => `<label title="${escapeHtml(candidate.dir)}"><input type="radio" name="mig-${escapeHtml(row.name)}" data-mig-winner="${escapeHtml(row.name)}" value="${escapeHtml(candidate.source)}" ${selected === candidate.source ? 'checked' : ''} ${m.locked ? 'disabled' : ''}><span><b>${escapeHtml(this.migrationSourceLabel(candidate.source))}</b><code>${escapeHtml((candidate.hash || '').slice(0, 8))}</code><small>${this.ago(candidate.mtime)}</small></span></label>`).join('') : '<span class="sk-mig-none">无可用内容候选</span>'}</div>
+      <div class="sk-mig-ops">${ops.length ? ops.map((op) => `<span>${escapeHtml(this.migrationOpLabel(op))}</span>`).join('') : '<span class="noop">无需写入</span>'}</div>
+    </div>`;
+  },
+  migrationFactsHtml(facts) {
+    if (!facts) return '';
+    const cards = [
+      ['原件仓死环', (facts.storeDeadLoops || []).length],
+      ['原件仓断链', (facts.storeBrokenLinks || []).length],
+      ['外部链接（只标注）', (facts.storeExternalLinks || []).length],
+      ['Codex 待清理链', (facts.codexBrokenLinks || []).length + (facts.codexStoreLinks || []).length + (facts.codexExternalLinks || []).length],
+      ['ZCode 双读链', (facts.zcodeLinks || []).length],
+      ['Claude 整目录链', facts.claudeWholeDirLink ? 1 : 0],
+    ];
+    return `<div class="sk-mig-facts">${cards.map(([label, value]) => `<div><b>${value}</b><span>${label}</span></div>`).join('')}</div>`;
+  },
+  migrationMatrixHtml() {
+    const m = this.migration;
+    const scan = m.scan || { names: [], facts: {} };
+    const drift = (scan.names || []).filter((row) => (row.candidates || []).length > 1 && !row.identical).length;
+    return `<section class="sk-mig-card">
+      <div class="sk-mig-head"><div><p class="eyebrow">扫描完成 · ${new Date(scan.at || Date.now()).toLocaleString()}</p><h2>逐行确认胜出版本</h2><p>默认选择最新 mtime；内容漂移的行可改判。锁定后才进入执行确认。</p></div><button class="ghost-btn" data-mig-act="rescan">重新扫描</button></div>
+      ${this.migrationFactsHtml(scan.facts)}
+      <div class="sk-mig-note ${drift ? 'warn' : ''}"><b>${drift}</b> 行存在内容漂移；外部链接只识别标注，不会改动外部内容。</div>
+      <div class="sk-mig-matrix"><div class="sk-mig-row head"><span>Skill</span><span>候选版本 · 胜出判定</span><span>计划动作</span></div>${(scan.names || []).map((row) => this.migrationRowHtml(row)).join('')}</div>
+      <div class="sk-mig-actions"><span>${(scan.names || []).length} 行已扫描 · plan 锁定后仍可返回修改</span><button class="primary" data-mig-act="lock">锁定方案并继续</button></div>
+    </section>`;
+  },
+  migrationConfirmHtml() {
+    const m = this.migration;
+    const changed = (m.scan.names || []).filter((row) => row.defaultWinner && m.winners[row.name] !== row.defaultWinner);
+    const actions = (m.scan.names || []).reduce((sum, row) => sum + (row.ops || []).length, 0);
+    return `<section class="sk-mig-card sk-mig-confirm">
+      <div class="sk-mig-head"><div><p class="eyebrow">方案已锁定</p><h2>最后确认后执行一次性迁移</h2><p>将运行 Phase 0–5；每阶段失败会按逆操作回滚，manifest 与前后快照写入 FanBox 配置目录。</p></div><span class="sk-mig-lock">● 已锁定</span></div>
+      <div class="sk-mig-confirm-grid"><div><b>${(m.scan.names || []).length}</b><span>扫描行</span></div><div><b>${changed.length}</b><span>人工改判</span></div><div><b>${actions}</b><span>计划动作</span></div></div>
+      ${changed.length ? `<details class="sk-mig-overrides"><summary>查看 ${changed.length} 项人工改判</summary>${changed.map((row) => `<div><code>${escapeHtml(row.name)}</code><span>${escapeHtml(this.migrationSourceLabel(row.defaultWinner))} → <b>${escapeHtml(this.migrationSourceLabel(m.winners[row.name]))}</b></span></div>`).join('')}</details>` : ''}
+      <div class="sk-mig-warning"><b>执行前请停下 Agent 会话</b><p>迁移会拆 Claude 整目录链、清理 Codex/ZCode 旧链并写启停配置。正在运行的会话可能继续持有旧发现结果。</p></div>
+      <label class="sk-mig-ack"><input type="checkbox" id="sk-mig-session-ack" ${m.sessionConfirmed ? 'checked' : ''}><span>我确认没有正在运行的 Claude 或 Codex 会话</span></label>
+      <label class="sk-mig-ack"><input type="checkbox" id="sk-mig-execute-ack" ${m.executeConfirmed ? 'checked' : ''}><span>我已复核漂移判定，确认执行；所有删除都经系统废纸篓，可恢复</span></label>
+      <div class="sk-mig-actions"><button class="ghost-btn" data-mig-act="unlock">返回改判</button><button class="primary" data-mig-act="execute" ${m.sessionConfirmed && m.executeConfirmed ? '' : 'disabled'}>开始批量迁移</button></div>
+    </section>`;
+  },
+  migrationRunningHtml() {
+    return `<section class="sk-mig-card sk-mig-running" role="status" aria-live="polite"><div class="sk-mig-runmark"><i></i><span>Phase 0–5</span></div><h2>正在批量迁移与自动验收</h2><p>请保持 FanBox 开启。服务端会逐阶段写 manifest；若阶段失败，将先回滚该阶段再返回报告。</p><div class="sk-mig-runbar"><i></i></div></section>`;
+  },
+  migrationCriterionRows(report) {
+    const c = report.criteria || {};
+    return [
+      ['可见性不变式', c.visibilityInvariant, 'Claude / WorkBuddy 严格不变；Codex / ZCode 只增不减'],
+      ['原件仓健康', c.storeHealthy, '无死环、无断链；外部链允许保留标注'],
+      ['外部不动', c.externalsUntouched, 'ego / cc-switch / WorkBuddy 外部内容未被迁移破坏'],
+      ['Codex 终态', c.codexTerminal, '~/.codex/skills 只剩 .system'],
+      ['ZCode 终态', c.zcodeTerminal, '零残留链，enable 集合与迁移前一致'],
+      ['Claude 终态', c.claudeTerminal, '整目录链已拆，逐 Skill 链生效，skillOverrides 已清'],
+      ['可回滚', Boolean(report.manifestPath), report.manifestPath || '未返回 manifest'],
+      ['提醒项', Boolean((report.reminders || []).length), 'review 并提交仓库改动'],
+    ];
+  },
+  migrationReportHtml(report) {
+    const phases = report.phases || [];
+    const diff = report.diff && report.diff.agents || {};
+    const passed = report.ok !== false && report.passedAllCriteria;
+    const criteria = this.migrationCriterionRows(report);
+    return `<section class="sk-mig-report">
+      <div class="sk-mig-result ${passed ? 'pass' : 'fail'}"><span>${passed ? '✓' : '!'}</span><div><p class="eyebrow">验收报告</p><h2>${passed ? '迁移完成，八项验收通过' : '迁移未完成，请按 manifest 处理后重试'}</h2><p>${escapeHtml(report.error || (passed ? '前后可见性与终态检查均符合 docs/16 §9。' : '报告中有未通过项目。'))}</p></div></div>
+      <div class="sk-mig-report-grid"><section><h3>分阶段报告</h3>${phases.map((phase) => `<div class="sk-mig-phase ${phase.status}"><i>${phase.status === 'done' ? '✓' : phase.status === 'failed' ? '!' : '—'}</i><div><b>Phase ${phase.phase} · ${escapeHtml(phase.title)}</b><span>${phase.status === 'done' ? `${(phase.actions || []).length} 项动作 · ${(phase.trashed || []).length} 项可从废纸篓恢复` : escapeHtml(phase.error || '因前序失败跳过')}</span></div></div>`).join('')}</section>
+      <section><h3>§9 八项验收</h3>${criteria.map(([label, ok, detail]) => `<div class="sk-mig-criterion ${ok ? 'pass' : 'fail'}"><i>${ok ? '✓' : '!'}</i><div><b>${label}</b><span>${escapeHtml(detail)}</span></div></div>`).join('')}</section></div>
+      <section class="sk-mig-diff"><h3>可见性 diff</h3>${Object.keys(diff).length ? SKILL_MATRIX_COLUMNS.map((column) => { const item = diff[column.id] || { added: [], removed: [] }; return `<div><b>${column.label}</b><span class="add">+ ${(item.added || []).length}${item.added && item.added.length ? ` · ${escapeHtml(item.added.join('、'))}` : ''}</span><span class="remove">− ${(item.removed || []).length}${item.removed && item.removed.length ? ` · ${escapeHtml(item.removed.join('、'))}` : ''}</span></div>`; }).join('') : '<p>本次执行未产生可见性 diff。</p>'}</section>
+      <div class="sk-mig-manifest"><div><b>回滚 manifest</b><code>${escapeHtml(report.manifestPath || '未生成')}</code></div><button class="ghost-btn" data-mig-act="reveal-manifest" ${report.manifestPath ? '' : 'disabled'}>在文件区显示</button></div>
+      <div class="sk-mig-reminders"><b>收尾提醒</b>${(report.reminders || ['请 review 并提交仓库改动']).map((item) => `<p>• ${escapeHtml(item)}</p>`).join('')}</div>
+      <div class="sk-mig-actions"><button class="ghost-btn" data-mig-act="rescan">重新扫描终态</button>${passed ? '' : '<button class="primary" data-mig-act="retry">按同一锁定方案重试</button>'}</div>
+    </section>`;
+  },
+  migrationErrorHtml() {
+    const m = this.migration;
+    return `<section class="sk-mig-card sk-mig-error"><span>!</span><h2>迁移向导暂时中断</h2><p>${escapeHtml(m.error || '请求中断。服务端如已开始执行，会持续写 manifest。')}</p>${m.manifestPath ? `<code>${escapeHtml(m.manifestPath)}</code>` : ''}<div class="sk-mig-actions"><button class="ghost-btn" data-mig-act="rescan">重新扫描</button>${m.locked ? '<button class="primary" data-mig-act="retry">按同一锁定方案重试</button>' : ''}</div></section>`;
+  },
+  renderMigration() {
+    const m = this.migration;
+    let body;
+    if (m.step === 'scanning' || m.step === 'idle') body = '<section class="sk-mig-card sk-mig-scanning" role="status"><i></i><h2>正在扫描四仓与 cc-switch 备份…</h2><p>这是只读操作，不会修改 HOME。</p></section>';
+    else if (m.step === 'matrix') body = this.migrationMatrixHtml();
+    else if (m.step === 'confirm') body = this.migrationConfirmHtml();
+    else if (m.step === 'running') body = this.migrationRunningHtml();
+    else if (m.step === 'report') body = this.migrationReportHtml(m.report || {});
+    else body = this.migrationErrorHtml();
+    const area = $('#file-area');
+    area.innerHTML = `<div class="sk-wrap sk-mig-wrap">${this.tabsHtml()}${this.migrationStepsHtml()}${body}</div>`;
+    this.bindMigration(area);
+  },
+  bindMigration(area) {
+    this.bindTabs(area);
+    area.querySelectorAll('[data-mig-winner]').forEach((input) => { input.onchange = () => this.setMigrationWinner(input.dataset.migWinner, input.value); });
+    const sessionAck = area.querySelector('#sk-mig-session-ack');
+    const executeAck = area.querySelector('#sk-mig-execute-ack');
+    const syncAcks = () => {
+      this.migration.sessionConfirmed = Boolean(sessionAck && sessionAck.checked);
+      this.migration.executeConfirmed = Boolean(executeAck && executeAck.checked);
+      const execute = area.querySelector('[data-mig-act=execute]');
+      if (execute) execute.disabled = !(this.migration.sessionConfirmed && this.migration.executeConfirmed);
+    };
+    if (sessionAck) sessionAck.onchange = syncAcks;
+    if (executeAck) executeAck.onchange = syncAcks;
+    area.querySelectorAll('[data-mig-act]').forEach((button) => {
+      button.onclick = async () => {
+        const action = button.dataset.migAct;
+        if (action === 'rescan') await this.startMigration();
+        else if (action === 'lock') this.lockMigrationPlan();
+        else if (action === 'unlock') this.unlockMigrationPlan();
+        else if (action === 'execute') await this.executeMigration();
+        else if (action === 'retry') await this.retryMigration();
+        else if (action === 'reveal-manifest' && this.migration.manifestPath) navigate(dirOf(this.migration.manifestPath));
+      };
+    });
+  },
+  async executeMigration() {
+    const m = this.migration;
+    if (!m.locked || !m.sessionConfirmed || !m.executeConfirmed || m.step === 'running') return;
+    m.step = 'running'; m.error = ''; this.render();
+    try {
+      const r = await apiPost('/api/skills/migrate/execute', { plan: { winners: { ...m.winners } } });
+      m.report = r || { ok: false, error: '服务端没有返回报告' };
+      m.manifestPath = r.manifestPath || m.manifestPath;
+      if (m.report && !m.report.manifestPath && m.manifestPath) m.report.manifestPath = m.manifestPath;
+      m.step = 'report';
+      await this.reload();
+    } catch (err) {
+      m.step = 'error'; m.error = err.message || '请求中断';
+    }
+    if (state.skillsMode && this.activeTab === 'migration') this.render();
+  },
+  async retryMigration() {
+    const m = this.migration;
+    if (!m.locked || m.step === 'running') return;
+    // manifest 记录上一轮现场；服务端已回滚失败阶段，按同一锁定方案重新执行即可。
+    m.sessionConfirmed = true; m.executeConfirmed = true;
+    await this.executeMigration();
   },
   discoveryAge(ms) {
     const minutes = Math.max(0, Math.floor(Number(ms || 0) / 60000));
