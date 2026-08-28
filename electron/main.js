@@ -5,16 +5,18 @@
  * 复用零依赖后端 server.js（文件能力），叠加 node-pty 内嵌终端，
  * 让 TUI coding agent（Claude Code / Codex / Aider…）在界面里直接跑起来。
  */
-const { app, BrowserWindow, ipcMain, shell, nativeImage, Menu, clipboard, dialog, net, session } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, nativeImage, Menu, clipboard, dialog, net, session, utilityProcess } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const { activeTerminalCount } = require('./terminal-activity');
 
-// 复用现有后端：require 即 listen 127.0.0.1:PORT，不自动开浏览器
+// 复用现有后端 server.js，但它跑在自己的进程里（见 startBackendServer）。
+// 从前是 require 进主进程的，于是文件服务、目录扫描、缩略图子进程和 node-pty 抢同一个
+// 事件循环——主进程一忙，「拖个文件进终端」这种只需写几十字节的操作也得排在几百次
+// statSync 和一片 sips 后面，实测能等十几秒。拆开后主进程只剩窗口 + pty + IPC。
 process.env.FANBOX_NO_OPEN = '1';
 const PORT = Number(process.env.FANBOX_PORT) || 4567;
-require('../server.js');
 
 // node-pty 是原生模块，需 electron-rebuild 编译过；未就绪时终端能力降级但 app 仍可用
 let pty = null;
@@ -34,6 +36,43 @@ const AGENT_TOKEN = process.env.FANBOX_AGENT_TOKEN || crypto.randomBytes(24).toS
 const termBufs = new Map();    // id -> 去 ANSI 滚动缓冲（~200KB），/api/agent/read 的数据源
 const termLastOut = new Map(); // id -> 最近输出时间戳，wait 的 idle 判定
 const termWaiters = new Map(); // id -> Set<fn(text)>，wait 的增量输出订阅
+
+// ---------- 后端子进程 ----------
+// server.js 跑在 utilityProcess 里（入口 server-child.js）。agent 能力（pty 都活在
+// 主进程）通过消息桥回去：子进程发 {type:'agent:call', id, method, args}，这里查
+// agentImpl（定义在 agent 各方法之后）真执行，再按 id 回 {type:'agent:reply'}。
+let backendProc = null;
+let backendRestarts = 0;
+function startBackendServer() {
+  backendProc = utilityProcess.fork(path.join(__dirname, 'server-child.js'), [], {
+    serviceName: 'fanbox-server',
+    stdio: 'inherit', // 后端日志照旧进 app 的终端输出
+    env: { ...process.env, FANBOX_NO_OPEN: '1', FANBOX_PORT: String(PORT), FANBOX_AGENT_TOKEN: AGENT_TOKEN },
+  });
+  const child = backendProc;
+  // 活过 5 秒 = 这次启动是成功的，重启计数清零；否则偶发崩溃隔几天攒满 5 次会误判「起不来」
+  const settled = setTimeout(() => { backendRestarts = 0; }, 5000);
+  child.on('message', async (m) => {
+    if (!m || m.type !== 'agent:call') return;
+    let result;
+    try { result = await agentImpl[m.method](...(m.args || [])); }
+    catch (e) { result = { ok: false, error: String((e && e.message) || e) }; }
+    try { child.postMessage({ type: 'agent:reply', id: m.id, result }); } catch { /* 子进程已死，回包作废 */ }
+  });
+  child.on('exit', (code) => {
+    clearTimeout(settled);
+    if (backendProc === child) backendProc = null;
+    if (isQuitting || code === 0) return;
+    if (backendRestarts++ < 5) { setTimeout(startBackendServer, 300 * backendRestarts); return; }
+    // 连拉 5 次都活不成，最常见是端口被占（另一个 FanBox / 裸跑的 node server.js）。
+    // server 还在主进程里的年代，这种情况是整个 app 直接退出——结局保持一致，但把原因说出来
+    dialog.showMessageBoxSync({
+      type: 'error', message: 'FanBox 后端启动失败',
+      detail: `端口 ${PORT} 可能已被占用（另一个 FanBox 或 node server.js）。\n关掉占用者再启动，或换端口：FANBOX_PORT=8080。`,
+    });
+    isQuitting = true; app.quit();
+  });
+}
 
 // ---------- 窗口尺寸/位置记忆 ----------
 const stateFile = () => path.join(app.getPath('userData'), 'window-state.json');
@@ -115,6 +154,8 @@ app.whenReady().then(() => {
     try { app.dock.setIcon(nativeImage.createFromPath(path.join(__dirname, '..', 'build', 'icon.png'))); } catch { /* */ }
   }
   app.setName('FanBox');
+  startBackendServer(); // utilityProcess 只能在 ready 之后 fork；窗口加载自带重试，等它起
+
   // 后端跑在 localhost，访问它永不该走代理。个别环境（clash 强制系统代理、企业 PAC 把 loopback 也代理）
   // 会把本地请求拦成 502 → 整个界面白屏。给 loopback 显式加旁路；其余（如查更新走 GitHub）仍按系统代理，互不影响。
   session.defaultSession.setProxy({ mode: 'system', proxyBypassRules: 'localhost;127.0.0.1;[::1]' }).catch(() => { /* 设置失败就退回默认行为，不影响启动 */ });
@@ -538,7 +579,10 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 // 退出兜底：无论怎么退（⌘Q、崩溃前的正常退出），都恢复系统休眠，绝不留禁休眠的烂摊子
-app.on('will-quit', () => { if (process.platform === 'darwin') trySetDisableSleep(false); });
+app.on('will-quit', () => {
+  if (process.platform === 'darwin') trySetDisableSleep(false);
+  try { if (backendProc) backendProc.kill(); } catch { /* 已死 */ }
+});
 
 // ---------- 终端录制（黑匣子）：把 PTY 字节流旁路成 asciinema v2 .cast ----------
 // 设计铁律：录制器是一根哑管子——只异步旁路字节，全程 try/catch，写失败就静默自废，
@@ -867,7 +911,8 @@ function agentKill(id) {
   try { p.kill(); agentTouch(id, 'kill'); return { ok: true }; }
   catch (e) { return { ok: false, error: String(e && e.message || e) }; }
 }
-global.__fanboxAgent = { token: AGENT_TOKEN, list: agentList, read: agentRead, send: agentSend, create: agentCreate, wait: agentWait, kill: agentKill };
+// server.js 在子进程里经 RPC 桥调这组能力（见 startBackendServer）；token 走 fork env
+const agentImpl = { list: agentList, read: agentRead, send: agentSend, create: agentCreate, wait: agentWait, kill: agentKill };
 
 // ---------- 录制文件管理 IPC ----------
 // 列表：读每个 .cast 的头行拿元信息 + 文件大小/时长（末事件时间），按新→旧。失败的文件跳过不报错。
@@ -1113,6 +1158,41 @@ ipcMain.handle('power:setWechat', async (e, { on } = {}) => {
 // 多目录监听：浏览目录 + 每个终端会话所在的项目目录。一下午开多个项目跑 agent 时，
 // 不在前台的项目也能感知变更。前端发来期望监听集，这里做增量 diff（关掉多余、补上新增）。
 const watchers = new Map(); // dir -> FSWatcher
+// 噪声过滤在这一侧做：node_modules / 构建目录的 FSEvents 风暴从前是每个事件
+// 一次同步 statSync + 一次 IPC，全部白付（过滤器写在渲染层，站在 IPC 的错误一侧）。
+// 现在噪声在源头丢弃；规则与 public/app.js 的 isNoisyChange 保持一致（那边还守着
+// recordChange 等语义层，这边挡量），改一处记得同步另一处。
+const WATCH_IGNORE = new Set(['.git', 'node_modules', '.next', 'dist', 'build', '.cache', '.venv', 'venv', '__pycache__', '.DS_Store', 'target', '.turbo', '.expo', 'Library', 'Caches', '.Trash', 'CloudStorage', '.cocoapods', 'DerivedData']);
+function watchNoisy(filename) {
+  const segs = String(filename).split('/');
+  if (segs.some((s) => WATCH_IGNORE.has(s) || s.startsWith('.'))) return true;
+  const name = segs[segs.length - 1];
+  return !name || name.endsWith('~') || name.endsWith('.swp')
+    || /\.(tmp|part|crdownload|lock)(\.|$)|-(journal|shm|wal)$/i.test(name);
+}
+// 事件不再一条一条跨 IPC：进 100ms 窗口合并，stat 过滤也在窗口结算时异步做，
+// 然后一条 fs:changed-batch 带整批过去（preload 展开成单条回调，渲染层无感）
+let watchPending = [];
+let watchTimer = null;
+async function flushWatch() {
+  watchTimer = null;
+  const batch = watchPending;
+  watchPending = [];
+  // FSEvents 连「文件只是被读了一下」（atime/元数据更新）都报：agent cat/Read 个文件、
+  // Spotlight 扫一遍都会触发。mtime/ctime 都不新鲜 = 内容根本没动过，丢弃；
+  // stat 失败 = 刚被删，是真变更，照常转发
+  const now = Date.now();
+  const keep = await Promise.all(batch.map(async (m) => {
+    if (!m.filename) return m;
+    try {
+      const st = await fs.promises.stat(path.join(m.dir, m.filename));
+      if (now - st.mtimeMs > 3000 && now - st.ctimeMs > 3000) return null;
+    } catch { /* 已删除/无权限：当真变更转发 */ }
+    return m;
+  }));
+  const out = keep.filter(Boolean);
+  if (out.length && win && !win.isDestroyed()) win.webContents.send('fs:changed-batch', out);
+}
 function startWatch(dir) {
   if (watchers.has(dir) || !dir || !fs.existsSync(dir)) return;
   try {
@@ -1121,17 +1201,9 @@ function startWatch(dir) {
     const w = fs.watch(dir, { persistent: false, recursive }, (evt, filename) => {
       if (!win || win.isDestroyed()) return;
       const name = filename ? filename.toString() : null;
-      // FSEvents 连「文件只是被读了一下」（atime/元数据更新）都报：agent cat/Read 个文件、
-      // Spotlight 扫一遍都会触发。mtime/ctime 都不新鲜 = 内容根本没动过，丢弃；
-      // stat 失败 = 刚被删，是真变更，照常转发
-      if (name) {
-        try {
-          const st = fs.statSync(path.join(dir, name));
-          const now = Date.now();
-          if (now - st.mtimeMs > 3000 && now - st.ctimeMs > 3000) return;
-        } catch { /* 已删除/无权限：当真变更转发 */ }
-      }
-      win.webContents.send('fs:changed', { dir, filename: name });
+      if (name && watchNoisy(name)) return;
+      watchPending.push({ dir, filename: name });
+      if (!watchTimer) watchTimer = setTimeout(flushWatch, 100);
     });
     watchers.set(dir, w);
   } catch { /* 无权限等，跳过该目录 */ }

@@ -1512,8 +1512,23 @@ async function serveStatic(req, res, urlPath) {
 const THUMB_IMG_EXT = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tif', 'heic', 'heif', 'avif']);
 const ALPHA_IMG_EXT = new Set(['png', 'gif', 'webp', 'avif']); // 可能带透明通道：缩略图必须出 png，jpeg 会把透明拍成白底
 const thumbInflight = new Map(); // cacheFile -> Promise，去重并发生成
+// 外部转码器并发闸：从前每个缩略图 miss 都直接 fork 一个 sips，打开上百项的目录
+// = 上百个进程同时起，CPU 被打满、别的活全排队。闸设在 run() 上，
+// sips / qlmanage / HEIC 转码走的是同一条队。
+let runActive = 0;
+const runQueue = [];
+const RUN_MAX = 4;
 function run(cmd, args) {
-  return new Promise((resolve, reject) => execFile(cmd, args, { timeout: 15000 }, (e) => (e ? reject(e) : resolve())));
+  return new Promise((resolve, reject) => {
+    const job = () => execFile(cmd, args, { timeout: 15000 }, (e) => {
+      runActive--;
+      const next = runQueue.shift();
+      if (next) { runActive++; next(); }
+      e ? reject(e) : resolve();
+    });
+    if (runActive < RUN_MAX) { runActive++; job(); }
+    else runQueue.push(job);
+  });
 }
 // 图片走 sips 缩放（快）；视频/PDF/其它走 qlmanage QuickLook 抽帧
 async function generateThumb(src, e, size, cacheFile, isImg) {
@@ -1632,7 +1647,9 @@ async function proxyImage(res, url) {
   }
 }
 
-async function serveThumb(req, res, p, size) {
+// ver：调用方带的内容版本号（文件 mtime）。带了 = 这个 URL 的内容永不再变，发长缓存；
+// 没带 = 发协商缓存，靠 ETag 走 304，改过的图立刻能看见新的（md 里引用的图拿不到 mtime，走这条）
+async function serveThumb(req, res, p, size, ver) {
   let src;
   try { src = resolvePath(p); } catch { res.writeHead(400); res.end('bad path'); return; }
   let st;
@@ -1644,8 +1661,16 @@ async function serveThumb(req, res, p, size) {
   const jpegOut = isImg && !ALPHA_IMG_EXT.has(e);
   const cacheFile = path.join(THUMB_DIR, key + (jpegOut ? '.jpg' : '.png'));
   const type = jpegOut ? 'image/jpeg' : 'image/png';
+  // key 已经把「源文件路径 + mtime + 目标宽度」全揉进去了，拿它当 ETag 天然精确
+  const etag = '"' + key + '"';
+  const cacheCtl = ver ? 'max-age=604800' : 'no-cache';
+  if (req.headers['if-none-match'] === etag) { // 内容没变，不回体（本机 304 约 1ms）
+    res.writeHead(304, { ETag: etag, 'Cache-Control': cacheCtl });
+    res.end();
+    return;
+  }
   const sendCache = () => {
-    res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'max-age=604800' });
+    res.writeHead(200, { 'Content-Type': type, 'Cache-Control': cacheCtl, ETag: etag });
     const rs = fs.createReadStream(cacheFile);
     rs.on('error', () => { try { res.destroy(); } catch { /* */ } }); // 读缓存中途出错别让未捕获 error 打挂进程
     rs.pipe(res);
@@ -5554,7 +5579,7 @@ const server = http.createServer(async (req, res) => {
       return serveRaw(req, res, fsPath);
     }
     if (p === '/api/thumb') {
-      return serveThumb(req, res, qp.get('path'), parseInt(qp.get('w') || '240', 10));
+      return serveThumb(req, res, qp.get('path'), parseInt(qp.get('w') || '240', 10), qp.get('v'));
     }
     if (p === '/api/img-proxy') {
       return proxyImage(res, qp.get('url'));
@@ -5807,7 +5832,9 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { favorites: cfg.favorites || [], recentOpened: cfg.recentOpened || [] });
     }
 
-    // ---------- Agent 控制接口：桌面 app 专属（能力由 electron/main.js 注入 global.__fanboxAgent）----------
+    // ---------- Agent 控制接口：桌面 app 专属 ----------
+    // global.__fanboxAgent 由 electron/server-child.js 注入，是 RPC 代理（真实现在主进程，
+    // pty 都活在那边），所以每个方法都可能回 Promise——一律 await，裸对象 await 是 no-op。
     // token 只注入翻箱自开终端的环境变量、不落盘：只有跑在翻箱终端里的 agent 拿得到门票。见 docs/12。
     if (p.startsWith('/api/agent/')) {
       const A = global.__fanboxAgent;
@@ -5822,11 +5849,11 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 200, await cronAction(p.slice('/api/agent/cron/'.length), b));
       }
       if (p === '/api/agent/terminals') return sendJSON(res, 200, await A.list());
-      if (p === '/api/agent/read') return sendJSON(res, 200, A.read(qp.get('id'), parseInt(qp.get('lines') || '0', 10)));
-      if (p === '/api/agent/send' && req.method === 'POST') { const b = await readBody(req); return sendJSON(res, 200, A.send(b.id, b.text, b)); }
+      if (p === '/api/agent/read') return sendJSON(res, 200, await A.read(qp.get('id'), parseInt(qp.get('lines') || '0', 10)));
+      if (p === '/api/agent/send' && req.method === 'POST') { const b = await readBody(req); return sendJSON(res, 200, await A.send(b.id, b.text, b)); }
       if (p === '/api/agent/create' && req.method === 'POST') { return sendJSON(res, 200, await A.create(await readBody(req))); }
       if (p === '/api/agent/wait' && req.method === 'POST') { const b = await readBody(req); return sendJSON(res, 200, await A.wait(b.id, b)); }
-      if (p === '/api/agent/kill' && req.method === 'POST') { const b = await readBody(req); return sendJSON(res, 200, A.kill(b.id)); }
+      if (p === '/api/agent/kill' && req.method === 'POST') { const b = await readBody(req); return sendJSON(res, 200, await A.kill(b.id)); }
       return sendJSON(res, 404, { ok: false, error: 'unknown agent endpoint' });
     }
 

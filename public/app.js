@@ -454,13 +454,36 @@ function favBtn(e) {
   const on = isFav(e.path);
   return `<span class="fav-btn ${on ? 'on' : ''}" title="收藏">${svgWrap(SVG.star, 'currentColor', 15, on)}</span>`;
 }
+// 本机图片的「显示用 URL」：唯一的出口，谁要在屏幕上画一张本地图都从这里拿。
+// 存储层（markdown 里的路径、state.entries[].path）永远是干净的绝对路径，只有渲染的
+// 这一刻才映射成 URL。这条边界一破，编辑器就会为了显示一个 600px 的框去解码 4032px 的
+// 原图（一张手机照片 = 48MB 位图），十张就能把渲染进程拖死。
+// mtime 给了就带上版本号，服务端按「内容不会再变」发长缓存；给不了（md 里引用的图，
+// 拿不到条目元数据）就不带，服务端改发协商缓存——改过的图下一眼就是新的，别让 7 天
+// 强缓存把刚打完马赛克的图锁成旧的
+function thumbUrl(abs, w, mtime) {
+  return `/api/thumb?path=${encodeURIComponent(abs)}&w=${Math.round(w)}${mtime ? `&v=${mtime}` : ''}`;
+}
+// 能安全走缩略图的扩展名。gif 不能——服务端 sips 会把它转成 png，动图当场变成第一帧；
+// svg 也不进——本来就是矢量、体积小，光栅化只会更糊更大
+const DISPLAY_THUMB_EXT = new Set(['jpg', 'jpeg', 'png', 'webp', 'bmp', 'tiff', 'tif', 'heic', 'heif', 'avif']);
+function canThumb(p) {
+  const b = baseOf(String(p || ''));
+  return b.includes('.') && DISPLAY_THUMB_EXT.has((b.split('.').pop() || '').toLowerCase());
+}
+// 文档类图片的显示宽度：按预览区实宽 × 像素密度取图，跟着分栏拖动走。1600 是服务端上限
+function displayImgWidth() {
+  const host = $('#preview-body');
+  const css = (host && host.clientWidth) || 900;
+  return Math.min(1600, Math.max(480, Math.round(css * (window.devicePixelRatio || 1))));
+}
 function thumbHtml(e) {
   // 关键性能修复：用缩略图端点（sips/qlmanage 缓存小图），不再把原图/原视频整文件拉进来解码
   if (e.kind === 'image' || e.kind === 'video') {
     const w = state.gridSize === 'lg' ? 320 : (state.gridSize === 'sm' ? 160 : 240);
     const fb = e.kind === 'video' ? 'window.__svgVideo' : 'window.__svgImg';
     // 照片按原比例呈现（object-fit:contain）+ 柔和投影，像散落的照片；缩略图失败回退强色字形
-    const img = `<img class="thumb" loading="lazy" decoding="async" src="/api/thumb?path=${encodeURIComponent(e.path)}&w=${w}&v=${e.mtime || 0}" alt="" onerror="this.closest('.thumb-wrap').replaceWith(Object.assign(document.createElement('span'),{className:'svg-icon',innerHTML:${fb}}))">`;
+    const img = `<img class="thumb" loading="lazy" decoding="async" src="${thumbUrl(e.path, w, e.mtime)}" alt="" onerror="this.closest('.thumb-wrap').replaceWith(Object.assign(document.createElement('span'),{className:'svg-icon',innerHTML:${fb}}))">`;
     const play = e.kind === 'video' ? '<span class="play-badge"><svg viewBox="0 0 24 24" width="40%" height="40%"><path d="M8 5.5l11 6.5-11 6.5z" fill="#fff"/></svg></span>' : '';
     return `<span class="thumb-wrap${e.kind === 'video' ? ' is-video' : ''}">${img}${play}</span>`;
   }
@@ -497,7 +520,7 @@ function listRow(e, i) {
   if (chgR) { el.dataset.changed = chgR.count > 1 ? '改·' + chgR.count : '改'; el.style.setProperty('--heat', Math.min(1, 0.4 + chgR.count * 0.12).toFixed(2)); if (chgR.files.size) el.title = '刚变更：\n' + [...chgR.files].join('\n'); }
   // 最近修改是跨目录列表，名称后缀显示来源目录，方便区分同名文件
   const dirHint = state.recentMode ? ` <span class="row-dir">· ${escapeHtml(tilde(e.dir || dirOf(e.path)))}</span>` : '';
-  el.innerHTML = `<div class="icon">${(e.kind === 'image' || e.kind === 'video') ? `<img class="thumb-sm" loading="lazy" decoding="async" src="/api/thumb?path=${encodeURIComponent(e.path)}&w=96&v=${e.mtime || 0}" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'svg-icon',innerHTML:this.dataset.fb||''}))" data-fb='${escapeHtml(iconSvg(e, 18))}'>` : `<span class="svg-icon">${iconSvg(e, 18)}</span>`}</div>
+  el.innerHTML = `<div class="icon">${(e.kind === 'image' || e.kind === 'video') ? `<img class="thumb-sm" loading="lazy" decoding="async" src="${thumbUrl(e.path, 96, e.mtime)}" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'svg-icon',innerHTML:this.dataset.fb||''}))" data-fb='${escapeHtml(iconSvg(e, 18))}'>` : `<span class="svg-icon">${iconSvg(e, 18)}</span>`}</div>
     <div class="fname">${escapeHtml(e.name)}${projBadge(e)}${dirHint}</div>
     <div class="meta">${fmtTime(e.mtime)}</div>
     <div class="meta">${e.isDir ? '' : fmtSize(e.size)}</div>
@@ -694,12 +717,14 @@ function mdReadBody(md, srcPath) {
   const div = document.createElement('div');
   div.className = 'md-body';
   div.innerHTML = window.marked ? window.marked.parse(md || '') : escapeHtml(md || '');
-  fixLocalImages(div, srcPath);
+  fixLocalImages(div, srcPath, displayImgWidth()); // 三个调用点都是「给人看」，一律走缩略图；导出走 typeset 那条，不经这里
   if (window.hljs && !window.__noHljs) div.querySelectorAll('pre code').forEach((b) => { try { window.hljs.highlightElement(b); } catch { /* */ } });
   return div;
 }
-// 把 md 里指向本机文件的图片换成 /api/raw；外链 http(s)/data/blob 不动
-function fixLocalImages(root, srcPath) {
+// 把 md 里指向本机文件的图片接到本机端点；外链 http(s)/data/blob 不动。
+// dispW 给了就按那个宽度走缩略图（屏幕上看的场合：阅读态、跟随、编辑器兜底）；
+// 不给就出原图（排版导出、复制到公众号——那些是要发出去的成品，不能拿缩略图糊弄）。
+function fixLocalImages(root, srcPath, dispW) {
   if (!srcPath) return;
   const base = dirOf(srcPath);
   root.querySelectorAll('img').forEach((im) => {
@@ -708,7 +733,7 @@ function fixLocalImages(root, srcPath) {
     let rel = raw.split('#')[0].split('?')[0];
     try { rel = decodeURIComponent(rel); } catch { /* 本来就没编码 */ }
     const abs = rel.startsWith('/') ? rel : normPath(base + '/' + rel);
-    im.setAttribute('src', '/api/raw?path=' + encodeURIComponent(abs));
+    im.setAttribute('src', dispW && canThumb(abs) ? thumbUrl(abs, dispW) : '/api/raw?path=' + encodeURIComponent(abs));
   });
 }
 // 折掉路径里的 ./ 和 ../，让相对图片路径能拼成真实绝对路径
@@ -1418,6 +1443,15 @@ async function mdEditor(e, data, mode = 'rich') {
   // fanboxDrop.saveInto 上，别再造一套。返回绝对路径，写进 markdown 就是真文件，不是 blob:
   async function saveEditorImage(fileOrBlob, suggestedName) {
     if (!window.fanboxDrop) throw new Error('该环境不支持图片写盘');
+    // Finder 拖进来的图本来就有真实路径，让主进程直接 copyFileSync（APFS 上基本是 COW 克隆）。
+    // 走下面 arrayBuffer 那条要把整个文件读进渲染进程堆、再结构化克隆一份跨 IPC、再写盘——
+    // 一张 12MB 的截图白走两趟全量内存拷贝。只有真拿不到路径的（剪贴板位图、blob:）才落到那条
+    const src = window.fanboxDrop.pathForFile ? window.fanboxDrop.pathForFile(fileOrBlob) : '';
+    if (src) {
+      const r = await window.fanboxDrop.copyInto(src, imgDir);
+      if (!r || !r.ok) throw new Error((r && r.error) || '图片写盘失败');
+      return r.path;
+    }
     let name = suggestedName;
     if (!name || !/\.[a-z0-9]+$/i.test(name)) {
       const ext = ((fileOrBlob.type ? fileOrBlob.type.split('/')[1] : '') || 'png').toLowerCase().replace('jpeg', 'jpg');
@@ -7496,12 +7530,27 @@ async function init() {
   bindSidebarResizer();
   bindSelectionToTerminal();
   enableTooltips();
-  // md 里直接引用本地文件路径的图片，按页面 URL 解析必 404：加载失败时解析成
-  // 绝对路径走 /fs/ 镜像端点兜底显示。文档源码保持干净的文件路径，预览和 Crepe 里都能看图
+  // md 里直接引用本地文件路径的图片，按页面 URL 解析必 404：加载失败时解析成绝对路径兜底显示。
+  // 文档源码保持干净的文件路径，预览和 Crepe 里都能看图。
+  // 兜底目标是缩略图端点，不是 /fs/ 原图——富文本编辑器里每一张图都走这条兜底，
+  // 而 Crepe 的 image-block 是组件化 NodeView，重排/改属性会把整个 DOM 换掉，
+  // fsStage 标记随之消失、这条兜底会反复重跑。指向原图 = 每次都重新解码一张全尺寸位图
+  // （一张手机照片 48MB），指向缩略图 = 同一个 URL 命中浏览器缓存，几乎零成本。
+  // 能安全缩的才缩：gif 缩了会变静态，svg 是矢量，这两类仍走 /fs/ 原图
   $('#preview-body').addEventListener('error', (ev) => {
     const img = ev.target;
-    if (!(img instanceof HTMLImageElement) || img.dataset.fsTried) return;
+    if (!(img instanceof HTMLImageElement)) return;
+    const stage = img.dataset.fsStage || '';
+    if (stage === 'fs') return; // 原图这一跳都失败了，没有下一手，让它裂着
     const src = decodeURI(img.getAttribute('src') || '');
+    // 缩略图那一跳失败（sips 不认这个文件等）→ 退回原图再试一次，别让它当场裂掉
+    if (stage === 'thumb') {
+      const abs0 = img.dataset.fsAbs || '';
+      if (!abs0) return;
+      img.dataset.fsStage = 'fs';
+      img.src = '/fs' + encodeURI(abs0);
+      return;
+    }
     if (/^(https?:|data:|blob:)/.test(src) || src.startsWith('/api/') || src.startsWith('/fs/')) return;
     let abs = src;
     if (!abs.startsWith('/')) {
@@ -7511,8 +7560,9 @@ async function init() {
       }
       abs = '/' + stack.filter(Boolean).join('/');
     }
-    img.dataset.fsTried = '1';
-    img.src = '/fs' + encodeURI(abs);
+    img.dataset.fsAbs = abs;
+    if (canThumb(abs)) { img.dataset.fsStage = 'thumb'; img.src = thumbUrl(abs, displayImgWidth()); }
+    else { img.dataset.fsStage = 'fs'; img.src = '/fs' + encodeURI(abs); }
   }, true);
   document.querySelectorAll('#theme-switch .theme-seg button').forEach((b) => { b.onclick = () => applyTheme(b.dataset.skin); });
   await loadRoots();

@@ -28,7 +28,8 @@ contextBridge.exposeInMainWorld('fanboxRec', {
 contextBridge.exposeInMainWorld('fanboxFs', {
   watch: (dir) => ipcRenderer.invoke('fs:watch', { dir }),
   watchSet: (dirs) => ipcRenderer.invoke('fs:watch-set', { dirs }),
-  onChanged: (cb) => { const h = (e, m) => cb(m); ipcRenderer.on('fs:changed', h); return () => ipcRenderer.removeListener('fs:changed', h); },
+  // 主进程按 100ms 窗口合批发 fs:changed-batch，这里展开成单条回调——渲染层的消费方无感
+  onChanged: (cb) => { const h = (e, list) => { for (const m of list || []) cb(m); }; ipcRenderer.on('fs:changed-batch', h); return () => ipcRenderer.removeListener('fs:changed-batch', h); },
 });
 
 contextBridge.exposeInMainWorld('fanboxClipboard', {
