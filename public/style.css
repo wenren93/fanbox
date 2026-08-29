@@ -85,11 +85,11 @@ body {
 [data-theme="editorial"] .grid .item.selected .fname { color: var(--bg); }
 [data-theme="editorial"] .cmdk-panel,
 [data-theme="editorial"] .input-dialog { border: 2px solid var(--text); border-radius: 0; box-shadow: 10px 10px 0 rgba(10, 10, 10, 0.9); backdrop-filter: none; -webkit-backdrop-filter: none; background: var(--bg-2); }
-/* 列表行序号：编辑式日报的「№」标号 */
+/* 列表行序号：编辑式日报的「№」标号。序号和图标各占一条视觉轨道，两位数也不会挤到文件夹。 */
 [data-theme="editorial"] .list .row:not(.list-head) { counter-increment: rowidx; }
-[data-theme="editorial"] .list { counter-reset: rowidx; }
-[data-theme="editorial"] .list .row:not(.list-head) .icon::before { content: counter(rowidx); position: absolute; left: -2px; top: 50%; transform: translateY(-50%); font-family: var(--font-mono); font-size: 9px; font-weight: 700; color: var(--text-faint); }
-[data-theme="editorial"] .list .row .icon { position: relative; }
+[data-theme="editorial"] .list { counter-reset: rowidx; --list-icon-col: 42px; }
+[data-theme="editorial"] .list .row:not(.list-head) .icon::before { content: counter(rowidx); position: absolute; left: 0; width: 12px; text-align: right; top: 50%; transform: translateY(-50%); font-family: var(--font-mono); font-size: 9px; font-weight: 700; color: var(--text-faint); }
+[data-theme="editorial"] .list .row .icon { position: relative; justify-content: flex-end; }
 
 /* 两栏：侧栏 | 主区（预览不再是顶层列，已归入文件管理）；列宽由 JS applyLayout 内联 */
 #app { display: grid; grid-template-columns: 248px 1fr; height: 100vh; }
@@ -358,9 +358,9 @@ kbd {
 .list .row.is-dir .fname { font-weight: 650; }
 
 /* 列表视图 */
-.list { display: flex; flex-direction: column; }
+.list { --list-icon-col: 30px; display: flex; flex-direction: column; }
 .list .row {
-  display: grid; grid-template-columns: 30px 1fr 130px 90px 26px; align-items: center; gap: 10px;
+  display: grid; grid-template-columns: var(--list-icon-col) 1fr 130px 90px 26px; align-items: center; gap: 10px;
   padding: 7px 10px; border-radius: 7px; cursor: pointer; font-size: 13px; position: relative;
 }
 .list .row:hover { background: var(--bg-2); }
@@ -374,9 +374,9 @@ kbd {
 .list-head { color: var(--text-faint); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; cursor: default; }
 .list-head:hover { background: none; }
 /* 文件区被压窄时列让位（#49）：名称优先，先藏「大小」再藏「修改时间」 */
-#file-area.fa-narrow .list .row { grid-template-columns: 30px 1fr 130px 26px; }
+#file-area.fa-narrow .list .row { grid-template-columns: var(--list-icon-col) 1fr 130px 26px; }
 #file-area.fa-narrow .list .row > :nth-child(4) { display: none; }
-#file-area.fa-tight .list .row { grid-template-columns: 30px 1fr 26px; }
+#file-area.fa-tight .list .row { grid-template-columns: var(--list-icon-col) 1fr 26px; }
 #file-area.fa-tight .list .row > :nth-child(3) { display: none; }
 /* 自定义 agent 启动按钮：没有品牌图标时显示两字缩写 */
 .agent-launch .agent-abbr { font-size: 10px; font-weight: 700; letter-spacing: 0.5px; }
