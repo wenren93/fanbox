@@ -6813,9 +6813,10 @@ function igniteCard(top, count) {
 // pty 数据回流（全局一次）
 if (window.fanboxPty) {
   window.fanboxPty.onData(({ id, data }) => { const s = term.sessions.find((x) => x.id === id); if (s) { s.xterm.write(data); term.markBusy(s); } });
-  window.fanboxPty.onExit(({ id }) => {
+  window.fanboxPty.onExit(({ id, autoClose }) => {
     const s = term.sessions.find((x) => x.id === id);
     if (s) {
+      if (autoClose) { term.closeTab(id); return; }
       s.dead = true; s.status = 'dead';
       s.xterm.write('\r\n\x1b[90m[进程已退出 — 回车重开，或 ✕ 关闭]\x1b[0m\r\n');
       term.renderTabs();

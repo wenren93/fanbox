@@ -10,6 +10,7 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const { activeTerminalCount } = require('./terminal-activity');
+const { fullEnv } = require('./wechat/env');
 
 // 复用现有后端：require 即 listen 127.0.0.1:PORT，不自动开浏览器
 process.env.FANBOX_NO_OPEN = '1';
@@ -34,6 +35,7 @@ const AGENT_TOKEN = process.env.FANBOX_AGENT_TOKEN || crypto.randomBytes(24).toS
 const termBufs = new Map();    // id -> 去 ANSI 滚动缓冲（~200KB），/api/agent/read 的数据源
 const termLastOut = new Map(); // id -> 最近输出时间戳，wait 的 idle 判定
 const termWaiters = new Map(); // id -> Set<fn(text)>，wait 的增量输出订阅
+const autoCloseTerminals = new Set(); // 定时任务专用：PTY 退出时连同渲染层标签一起收掉
 
 // ---------- 窗口尺寸/位置记忆 ----------
 const stateFile = () => path.join(app.getPath('userData'), 'window-state.json');
@@ -598,9 +600,12 @@ function recStop(id) {
 }
 
 // ---------- 终端 IPC（node-pty）----------
-ipcMain.handle('pty:spawn', (e, { id, cwd, cols, rows, theme }) => {
+ipcMain.handle('pty:spawn', async (e, { id, cwd, cols, rows, theme }) => {
   if (!pty) return { ok: false, error: 'node-pty 未编译，跑：npm run rebuild' };
-  const shellPath = process.env.SHELL || (process.platform === 'win32' ? 'powershell.exe' : '/bin/zsh');
+  // Finder / Dock 启动的 GUI 进程不会继承用户 shell 的 PATH 和代理变量。
+  // 复用无头 agent 的环境恢复逻辑，否则系统代理已开启时 Codex 仍会裸连并反复超时。
+  const userEnv = await fullEnv();
+  const shellPath = userEnv.SHELL || (process.platform === 'win32' ? 'powershell.exe' : '/bin/zsh');
   const startCwd = cwd && fs.existsSync(cwd) ? cwd : os.homedir();
   // login shell（-l）：GUI 启动的进程只继承精简 PATH，不读 .zprofile/.zlogin，
   // 用户在那里配的 Homebrew/nvm/npm 全局路径（claude 等）就丢了 → 「普通终端能找到、fanbox 找不到」。
@@ -608,7 +613,7 @@ ipcMain.handle('pty:spawn', (e, { id, cwd, cols, rows, theme }) => {
   const shellArgs = process.platform === 'win32' ? [] : ['-l'];
   // GUI 启动的 app 不继承 shell 的 locale，zsh 会把中文路径按字节转义成 \M-^@ 乱码 → 兜底 UTF-8
   const env = {
-    ...process.env, TERM: 'xterm-256color', FANBOX: '1',
+    ...userEnv, TERM: 'xterm-256color', FANBOX: '1',
     // 终端里的 agent 天生知道自己是几号窗口、控制接口在哪、门票是啥——skill 零配置（见 docs/12）
     FANBOX_TERM_ID: id, FANBOX_CTL: `http://127.0.0.1:${PORT}/api/agent`, FANBOX_CTL_TOKEN: AGENT_TOKEN,
   };
@@ -639,13 +644,14 @@ ipcMain.handle('pty:spawn', (e, { id, cwd, cols, rows, theme }) => {
     if (ws) for (const fn of ws) { try { fn(stripped); } catch { /* 单个 waiter 异常不连累别人 */ } }
   });
   p.onExit(({ exitCode }) => {
+    const autoClose = autoCloseTerminals.delete(id);
     terminals.delete(id);
     termTails.delete(id);
     termBufs.delete(id);
     termLastOut.delete(id);
     refreshLidGuard(); // 最后一个终端退出即恢复休眠
     recStop(id);
-    if (win && !win.isDestroyed()) win.webContents.send('pty:exit', { id, exitCode });
+    if (win && !win.isDestroyed()) win.webContents.send('pty:exit', { id, exitCode, autoClose });
   });
   return { ok: true, cwd: startCwd };
 });
@@ -803,6 +809,8 @@ function agentCreate(opts = {}) {
         if ((last && Date.now() - last >= 400) || Date.now() - t0 > 8000) { clearInterval(iv); done(); }
       }, 100);
     });
+    // 必须在敲命令前登记；即使命令瞬间结束，退出事件也能携带自动收窗标记。
+    if (opts.closeWhenDone) autoCloseTerminals.add(r.id);
     const s = agentSend(r.id, String(opts.autorun));
     if (opts.closeWhenDone) {
       // 定时任务是一次性执行窗口：等命令回到裸 shell 或超时后自动收窗。

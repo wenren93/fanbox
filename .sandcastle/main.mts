@@ -1,362 +1,119 @@
-// Parallel Planner — three-phase orchestration loop (Ralph 版本)
+// Sequential Reviewer — implement-then-review loop
 //
-// Ralph 版本特点:
-//   - 最外层循环最大 5 次
-//   - 当 plan 阶段没有发现 issue 时，进入 60s 睡眠后重试
+// This template drives a two-phase workflow per issue:
+//   Phase 1 (Implement): A sonnet agent picks an open issue, works on it
+//                        on a dedicated branch, commits the changes, and signals
+//                        completion.
+//   Phase 2 (Review):    A second sonnet agent reviews the branch diff and either
+//                        approves it or makes corrections directly on the branch.
 //
-// 三个阶段:
-//   Phase 1 (Plan):    分析 open issues，构建依赖图，输出可并行处理的 issue 列表
-//   Phase 2 (Execute): 并行执行每个 issue
-//   Phase 3 (Merge):   合并所有产生提交的分支
+// Both phases share a single sandbox created via createSandbox(), so the
+// implementer and reviewer work on the same explicit branch.
+//
+// The outer loop repeats up to MAX_ITERATIONS times, processing one issue per
+// iteration and stopping early once the backlog is exhausted (an implement
+// phase that produces no commits). This is a middle-complexity option between
+// the simple-loop (no review gate) and the parallel-planner (concurrent
+// execution with a planning phase).
 //
 // Usage:
 //   npx tsx .sandcastle/main.mts
+// Or add to package.json:
+//   "scripts": { "sandcastle": "npx tsx .sandcastle/main.mts" }
 
 import * as sandcastle from "@ai-hero/sandcastle";
-import { podman } from "@ai-hero/sandcastle/sandboxes/podman";
-import { execFile } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
-import { z } from "zod";
-
-// plan 输出的 JSON schema。分支名由模型输出，必须在进入 git 操作前严格校验。
-const issueSchema = z
-  .object({
-    id: z.string().regex(/^\d+$/, "issue id 必须是数字"),
-    title: z.string().trim().min(1, "issue title 不能为空"),
-    branch: z
-      .string()
-      .regex(/^sandcastle\/issue-\d+$/, "branch 必须匹配 sandcastle/issue-{id}"),
-  })
-  .superRefine((issue, ctx) => {
-    if (issue.branch !== `sandcastle/issue-${issue.id}`) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["branch"],
-        message: "branch 必须与 issue id 一致",
-      });
-    }
-  });
-
-const planSchema = z
-  .object({
-    issues: z.array(issueSchema).max(100),
-  })
-  .superRefine((plan, ctx) => {
-    const seenIds = new Set<string>();
-    for (const [index, issue] of plan.issues.entries()) {
-      if (seenIds.has(issue.id)) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["issues", index, "id"],
-          message: `issue ${issue.id} 重复`,
-        });
-      }
-      seenIds.add(issue.id);
-    }
-  });
-
-type PlannedIssue = z.infer<typeof issueSchema>;
+import { noSandbox } from "@ai-hero/sandcastle/sandboxes/no-sandbox";
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
-// 最大循环次数
-const MAX_ITERATIONS = 5;
+// Maximum number of implement→review cycles to run before stopping.
+// Each cycle works on one issue. Raise this to process more issues per run.
+const MAX_ITERATIONS = 10;
 
-// 无 issue 时的睡眠时间（毫秒）
-const SLEEP_MS = 60_000;
-
-// implementer 并发上限——podman machine 内存有限，过多并行 npm install 会 OOM
-const IMPLEMENTER_CONCURRENCY = 2;
-
-// 首波 implementer 错峰启动间隔（毫秒）——避免同秒并发建容器触发 podman API 抖动
-const IMPLEMENTER_STAGGER_MS = 10_000;
-
-// 所有 agent 都需要依赖；只有 planner 和 implementer 需要 vision MCP。
-const installHooks = {
-  sandbox: {
-    onSandboxReady: [
-      { command: "npm install --ignore-scripts", timeoutMs: 300_000 },
-    ],
-  },
+// Hooks run inside the sandbox before the agent starts each iteration.
+// npm install ensures the sandbox always has fresh dependencies.
+const hooks = {
+  sandbox: { onSandboxReady: [{ command: "npm install" }] },
 };
 
-const agentHooks = {
-  sandbox: {
-    onSandboxReady: [
-      ...installHooks.sandbox.onSandboxReady,
-      // 注册 MCP 服务器（自动处理 assets 目录权限问题）
-      { command: "node .sandcastle/setup-mcp.js" },
-    ],
-  },
-};
-
-// Claude/MCP 相关信息复制到隔离 worktree 的文件；这些路径中的密钥文件均被 gitignore。
-const copyToWorktree = [
-  ".claude",
-  ".mcp.json",
-  ".sandcastle/setup-mcp.js",
-  ".sandcastle/.mcp.json",
-];
-
-// planner 需要 MCP，但不应直接修改当前分支；merge-to-head 会使用临时分支并在结束时清理。
-const plannerBranchStrategy = { type: "merge-to-head" as const };
-const mergerBranchStrategy = { type: "merge-to-head" as const };
-
-const execFileAsync = promisify(execFile);
-const SEND_WECHAT_SCRIPT = fileURLToPath(
-  new URL("../scripts/send-wechat-message.js", import.meta.url),
-);
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function notifyMergeCompleted(issues: PlannedIssue[]): Promise<void> {
-  const message = [
-    "✅ Sandcastle 代码合并完成",
-    ...issues.map((issue) => `• ${issue.title}`),
-  ].join("\n");
-
-  try {
-    await execFileAsync(process.execPath, [SEND_WECHAT_SCRIPT, message], {
-      timeout: 30_000,
-    });
-    console.log("微信合并通知已发送。");
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    console.error(`微信合并通知发送失败：${detail}`);
-  }
-}
-
-// planner 没有仓库副作用，遇到瞬态错误自动重试。
-const RETRY_COUNT = 3;
-const RETRY_DELAY_MS = 10_000;
-
-// 瞬态错误特征：网络不可用、API 限流、服务器过载等
-const TRANSIENT_PATTERNS = [
-  /503/,          // Service Unavailable
-  /429/,          // Too Many Requests (rate limit)
-  /ECONNRESET/,
-  /ETIMEDOUT/,
-  /ENOTFOUND/,
-  /EAI_AGAIN/,
-  /socket hang up/,
-  /network/i,
-];
-
-function isTransient(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  return TRANSIENT_PATTERNS.some((p) => p.test(msg));
-}
-
-async function withRetry<T>(
-  label: string,
-  fn: () => Promise<T>,
-  retries = RETRY_COUNT,
-  delayMs = RETRY_DELAY_MS,
-): Promise<T> {
-  let lastErr: unknown;
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      lastErr = err;
-      // 非瞬态错误直接抛出，不浪费重试
-      if (!isTransient(err)) {
-        throw err;
-      }
-      if (attempt < retries) {
-        console.error(
-          `  ✗ ${label} failed (attempt ${attempt}/${retries}): ${err}`,
-        );
-        console.error(`    Retrying in ${delayMs / 1000}s...`);
-        await sleep(delayMs);
-      }
-    }
-  }
-  throw lastErr;
-}
+// Copy node_modules from the host into the worktree before each sandbox
+// starts. Avoids a full npm install from scratch; the hook above handles
+// platform-specific binaries and any packages added since the last copy.
+const copyToWorktree = ["node_modules"];
 
 // ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
 
-const unresolvedIssueIds = new Set<string>();
-
 for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
-  console.log(`\n=== Ralph Iteration ${iteration}/${MAX_ITERATIONS} ===\n`);
+  console.log(`\n=== Iteration ${iteration}/${MAX_ITERATIONS} ===\n`);
 
-  // -------------------------------------------------------------------------
-  // Phase 1: Plan
-  // -------------------------------------------------------------------------
-  const plan = await withRetry("planner", () =>
-    sandcastle.run({
-      hooks: agentHooks,
-      copyToWorktree,
-      sandbox: podman(),
-      branchStrategy: plannerBranchStrategy,
-      name: "planner",
-      maxIterations: 1,
-      agent: sandcastle.claudeCode("stealth/ox-alpha"),
-      promptFile: "./.sandcastle/plan-prompt.md",
-      output: sandcastle.Output.object({ tag: "plan", schema: planSchema }),
-    }),
-  );
+  // Generate a unique branch name for this iteration.
+  const branch = `sandcastle/sequential-reviewer/${Date.now()}`;
 
-  const issues: PlannedIssue[] = plan.output.issues;
+  // Create a single sandbox that both the implementer and reviewer share.
+  // This gives both agents a real, named branch that persists across phases.
+  const sandbox = await sandcastle.createSandbox({
+    branch,
+    sandbox: noSandbox(),
+    hooks,
+    copyToWorktree,
+  });
 
-  if (issues.length === 0) {
-    // 没有发现 issue —— 睡眠后继续下一轮；最后一轮不再无意义地等待。
-    if (iteration < MAX_ITERATIONS) {
-      console.log(
-        `No unblocked issues found. Sleeping ${SLEEP_MS / 1000}s before next iteration...`,
-      );
-      await sleep(SLEEP_MS);
-    } else {
-      console.log("No unblocked issues found.");
-    }
-    continue;
-  }
-
-  console.log(
-    `Planning complete. ${issues.length} issue(s) to work in parallel:`,
-  );
-  for (const issue of issues) {
-    console.log(`  ${issue.id}: ${issue.title} → ${issue.branch}`);
-  }
-
-  // -------------------------------------------------------------------------
-  // Phase 2: Execute
-  // -------------------------------------------------------------------------
-  // 工人池：最多 IMPLEMENTER_CONCURRENCY 个 implementer 同时跑，完成一个补位一个
-  const runImplementer = (issue: PlannedIssue) =>
-    sandcastle.run({
-      hooks: agentHooks,
-      copyToWorktree,
-      sandbox: podman(),
-      branchStrategy: { type: "branch", branch: issue.branch },
+  try {
+    // -----------------------------------------------------------------------
+    // Phase 1: Implement
+    //
+    // A sonnet agent picks the next open issue, writes the
+    // implementation (using RGR: Red → Green → Repeat → Refactor), and
+    // commits the result.
+    //
+    // The agent signals completion via <promise>COMPLETE</promise> when done.
+    // -----------------------------------------------------------------------
+    // One iteration so each outer pass implements a single issue on its own
+    // branch, then hands it to the reviewer. A higher value lets the agent
+    // drain the whole backlog onto this one branch in a single pass, which
+    // defeats the per-issue review.
+    const implement = await sandbox.run({
       name: "implementer",
-      maxIterations: 100,
-      agent: sandcastle.claudeCode("stealth/ox-alpha"),
+      maxIterations: 1,
+      agent: sandcastle.codex("gpt-5.4"),
       promptFile: "./.sandcastle/implement-prompt.md",
+    });
+
+    if (!implement.commits.length) {
+      // No commits means the backlog is empty or every remaining issue is
+      // blocked — there is nothing left to implement or review, so stop.
+      console.log("Implementation agent made no commits. Stopping.");
+      break;
+    }
+
+    console.log(`\nImplementation complete on branch: ${branch}`);
+    console.log(`Commits: ${implement.commits.length}`);
+
+    // -----------------------------------------------------------------------
+    // Phase 2: Review
+    //
+    // A second sonnet agent reviews the diff of the branch produced by
+    // Phase 1. It uses the {{BRANCH}} prompt argument to inspect the right
+    // branch, and either approves or makes corrections directly on the branch.
+    // -----------------------------------------------------------------------
+    await sandbox.run({
+      name: "reviewer",
+      maxIterations: 1,
+      agent: sandcastle.codex("gpt-5.4"),
+      promptFile: "./.sandcastle/review-prompt.md",
       promptArgs: {
-        TASK_ID: issue.id,
-        ISSUE_TITLE: issue.title,
-        BRANCH: issue.branch,
+        BRANCH: branch,
       },
     });
 
-  type ImplementerResult = Awaited<ReturnType<typeof sandcastle.run>>;
-  const settled: PromiseSettledResult<ImplementerResult>[] = new Array(
-    issues.length,
-  );
-
-  let cursor = 0;
-  await Promise.all(
-    Array.from(
-      { length: Math.min(IMPLEMENTER_CONCURRENCY, issues.length) },
-      (_, worker) =>
-        (async () => {
-          if (worker > 0) {
-            await sleep(worker * IMPLEMENTER_STAGGER_MS);
-          }
-          while (cursor < issues.length) {
-            const index = cursor++;
-            try {
-              settled[index] = {
-                status: "fulfilled",
-                value: await runImplementer(issues[index]!),
-              };
-            } catch (err) {
-              settled[index] = { status: "rejected", reason: err };
-            }
-          }
-        })(),
-    ),
-  );
-
-  // 记录失败的 agent
-  for (const [i, outcome] of settled.entries()) {
-    if (outcome.status === "rejected") {
-      unresolvedIssueIds.add(issues[i]!.id);
-      console.error(
-        `  ✗ ${issues[i]!.id} (${issues[i]!.branch}) failed: ${outcome.reason}`,
-      );
-    } else if (outcome.value.commits.length > 0) {
-      unresolvedIssueIds.delete(issues[i]!.id);
-    } else {
-      unresolvedIssueIds.add(issues[i]!.id);
-      console.error(
-        `  ✗ ${issues[i]!.id} (${issues[i]!.branch}) produced no commit`,
-      );
-    }
+    console.log("\nReview complete.");
+  } finally {
+    await sandbox.close();
   }
-
-  // 筛选有提交的分支
-  const completedIssues = settled
-    .map((outcome, i) => ({ outcome, issue: issues[i]! }))
-    .filter(
-      (
-        entry,
-      ): entry is {
-        outcome: PromiseFulfilledResult<
-          Awaited<ReturnType<typeof sandcastle.run>>
-        >;
-        issue: (typeof issues)[number];
-      } =>
-        entry.outcome.status === "fulfilled" &&
-        entry.outcome.value.commits.length > 0,
-    )
-    .map((entry) => entry.issue);
-
-  const completedBranches = completedIssues.map((i) => i.branch);
-
-  console.log(
-    `\nExecution complete. ${completedBranches.length} branch(es) with commits:`,
-  );
-  for (const branch of completedBranches) {
-    console.log(`  ${branch}`);
-  }
-
-  if (completedBranches.length === 0) {
-    console.log("No commits produced. Nothing to merge.");
-    continue;
-  }
-
-  // -------------------------------------------------------------------------
-  // Phase 3: Merge
-  // -------------------------------------------------------------------------
-  // merge 会产生真实 git/Issue 副作用，不对它做自动重试，避免重复合并或关闭 issue。
-  await sandcastle.run({
-    hooks: installHooks,
-    sandbox: podman(),
-    branchStrategy: mergerBranchStrategy,
-    name: "merger",
-    maxIterations: 1,
-    agent: sandcastle.claudeCode("stealth/ox-alpha"),
-    promptFile: "./.sandcastle/merge-prompt.md",
-    promptArgs: {
-      BRANCHES: completedBranches.map((b) => `- ${b}`).join("\n"),
-      ISSUES: completedIssues.map((i) => `- ${i.id}: ${i.title}`).join("\n"),
-    },
-  });
-
-  await notifyMergeCompleted(completedIssues);
-  console.log("\nBranches merged.");
 }
 
-if (unresolvedIssueIds.size > 0) {
-  console.error(
-    `\nCompleted with unresolved issue(s): ${[...unresolvedIssueIds].sort((a, b) => Number(a) - Number(b)).join(", ")}`,
-  );
-  process.exitCode = 1;
-} else {
-  console.log("\nAll done.");
-}
+console.log("\nAll done.");
