@@ -11,6 +11,25 @@ let cached = null; // Promise<env 对象>，只算一次
 const userShell = () => process.env.SHELL || (process.platform === 'win32' ? 'powershell.exe' : '/bin/zsh');
 const PROXY_KEYS = ['https_proxy', 'HTTPS_PROXY', 'http_proxy', 'HTTP_PROXY', 'all_proxy', 'ALL_PROXY'];
 
+function parseSystemProxy(stdout) {
+  const out = String(stdout || '');
+  const grab = (key) => (out.match(new RegExp(`\\b${key} : (\\S+)`)) || [])[1];
+  let url = '';
+  if (grab('HTTPSEnable') === '1' && grab('HTTPSProxy') && grab('HTTPSPort')) {
+    url = `http://${grab('HTTPSProxy')}:${grab('HTTPSPort')}`;
+  } else if (grab('HTTPEnable') === '1' && grab('HTTPProxy') && grab('HTTPPort')) {
+    url = `http://${grab('HTTPProxy')}:${grab('HTTPPort')}`;
+  } else if (grab('SOCKSEnable') === '1' && grab('SOCKSProxy') && grab('SOCKSPort')) {
+    url = `socks5h://${grab('SOCKSProxy')}:${grab('SOCKSPort')}`;
+  }
+  if (!url) return {};
+  const bypass = 'localhost,127.0.0.1,::1';
+  return {
+    http_proxy: url, https_proxy: url, HTTP_PROXY: url, HTTPS_PROXY: url,
+    all_proxy: url, ALL_PROXY: url, no_proxy: bypass, NO_PROXY: bypass,
+  };
+}
+
 // 跑 `$SHELL -ilc 'env'` 抓交互式登录 shell 的完整环境变量（PATH/代理/BASE_URL 等）
 function dumpShellEnv() {
   return new Promise((resolve) => {
@@ -37,14 +56,7 @@ function sysProxyEnv() {
     if (process.platform !== 'darwin') return resolve({});
     execFile('scutil', ['--proxy'], { timeout: 3000 }, (err, stdout) => {
       if (err) return resolve({});
-      const out = String(stdout || '');
-      const grab = (k) => (out.match(new RegExp(`\\b${k} : (\\S+)`)) || [])[1];
-      let url = '';
-      if (grab('HTTPSEnable') === '1') url = `http://${grab('HTTPSProxy')}:${grab('HTTPSPort')}`;
-      else if (grab('HTTPEnable') === '1') url = `http://${grab('HTTPProxy')}:${grab('HTTPPort')}`;
-      else if (grab('SOCKSEnable') === '1') url = `socks5h://${grab('SOCKSProxy')}:${grab('SOCKSPort')}`;
-      if (!url) return resolve({});
-      resolve({ http_proxy: url, https_proxy: url, HTTP_PROXY: url, HTTPS_PROXY: url, all_proxy: url, ALL_PROXY: url });
+      resolve(parseSystemProxy(stdout));
     });
   });
 }
@@ -63,4 +75,4 @@ function fullEnv() {
   return cached;
 }
 
-module.exports = { fullEnv };
+module.exports = { fullEnv, parseSystemProxy };
