@@ -3952,6 +3952,8 @@ skillDiscovery = createSkillDiscovery({
 // 失败只回滚当前阶段并跳过其余阶段（manifest 记录现场供后续处理）。
 const CC_SWITCH_BACKUPS = path.join(HOME, '.cc-switch', 'skill-backups');
 const MIGRATION_DIR = path.join(CONFIG_DIR, 'migration');
+// 硬切换后运行时不再读取 Claude settings.json；一次性迁移仍需清理历史残留。
+const MIGRATION_CLAUDE_SETTINGS = path.join(HOME, '.claude', 'settings.json');
 const MIGRATE_SOURCES = Object.freeze(['repo', 'store', 'workbuddy', 'claude', 'codex', 'ccswitch']);
 // mtime 打平时的胜出优先序：越靠前越是「正牌家」（仓库家族 > 原件仓 > 拷贝 > 备份）。
 // 与合法来源集合当前一致，从它派生，避免两份清单漂移。
@@ -3961,6 +3963,15 @@ const MIGRATE_ROOTS = Object.freeze({
   store: AGENTS_SKILLS, claude: CLAUDE_SKILLS, codex: CODEX_SKILLS, zcode: ZCODE_SKILLS,
   workbuddy: WORKBUDDY_SKILLS, repo: REPO_SKILLS, ccswitchBackups: CC_SWITCH_BACKUPS,
 });
+
+// 仅供迁移扫描/验收读取历史 settings.json；不是 Skills 运行时启停机制。
+async function readMigrationClaudeOverrides() {
+  try {
+    const settings = JSON.parse(await fsp.readFile(MIGRATION_CLAUDE_SETTINGS, 'utf8'));
+    return settings && typeof settings.skillOverrides === 'object' && !Array.isArray(settings.skillOverrides)
+      ? settings.skillOverrides : {};
+  } catch { return {}; }
+}
 
 function isValidSkillName(name) {
   return typeof name === 'string' && !!name && !name.includes('\0')
@@ -4053,7 +4064,7 @@ async function classifyStoreEntry(name) {
 async function migrateScan(winners = {}) {
   const facts = {
     claudeWholeDirLink: null,
-    claudeOverridesResidue: Object.keys(await claudeSkillOverrides()).length,
+    claudeOverridesResidue: Object.keys(await readMigrationClaudeOverrides()).length,
     repoFamilies: [],
     storeDeadLoops: [], storeBrokenLinks: [], storeAliasLinks: [], storeExternalLinks: [],
     codexBrokenLinks: [], codexStoreLinks: [], codexExternalLinks: [],
@@ -4753,16 +4764,16 @@ async function migrateExecute(plan) {
     migrateTestFailure('claude-split');
 
     // 存量启停配置归一（ADR 0005）：settings.json 的 skillOverrides 残留整体清掉
-    const settingsText = await fsp.readFile(CLAUDE_SETTINGS, 'utf8').catch(() => null);
+    const settingsText = await fsp.readFile(MIGRATION_CLAUDE_SETTINGS, 'utf8').catch(() => null);
     if (settingsText !== null) {
       let settings;
       try { settings = JSON.parse(settingsText); } catch { settings = null; }
       if (settings && typeof settings === 'object' && !Array.isArray(settings) && settings.skillOverrides !== undefined) {
-        await backupSkillConfig(CLAUDE_SETTINGS).catch(() => {});
+        await backupSkillConfig(MIGRATION_CLAUDE_SETTINGS).catch(() => {});
         const next = { ...settings };
         delete next.skillOverrides;
-        await atomicWriteText(CLAUDE_SETTINGS, JSON.stringify(next, null, 2) + '\n');
-        undo.push(async () => { await atomicWriteText(CLAUDE_SETTINGS, settingsText).catch(() => {}); });
+        await atomicWriteText(MIGRATION_CLAUDE_SETTINGS, JSON.stringify(next, null, 2) + '\n');
+        undo.push(async () => { await atomicWriteText(MIGRATION_CLAUDE_SETTINGS, settingsText).catch(() => {}); });
         record.actions.push({ action: 'clean-skill-overrides' });
       }
     }
@@ -4892,7 +4903,7 @@ async function migrateExecute(plan) {
         }
       }
     }
-    const overridesClean = Object.keys(await claudeSkillOverrides()).length === 0;
+    const overridesClean = Object.keys(await readMigrationClaudeOverrides()).length === 0;
     const recoverable = !manifest.phases.some((phase) => (phase.actions || []).some((action) => action.action === 'trash-failed'));
 
     criteria = {
