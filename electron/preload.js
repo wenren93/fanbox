@@ -68,6 +68,7 @@ contextBridge.exposeInMainWorld('fanboxUpdate', {
 contextBridge.exposeInMainWorld('fanboxWin', {
   focus: () => ipcRenderer.invoke('win:focus'), // 点通知拉回前台
   trafficLights: (show) => ipcRenderer.invoke('win:traffic', { show }), // 全屏预览时藏/显左上角系统按钮
+  setBadge: (text) => ipcRenderer.invoke('win:badge', { text }), // Dock 角标：几个会话在等你（空串清掉）
 });
 
 // Agent 控制接口（/api/agent/*）的渲染侧配合：main 请求开新终端 tab + 被控 tab 闪标记
@@ -75,11 +76,15 @@ contextBridge.exposeInMainWorld('fanboxAgentCtl', {
   onCreate: (cb) => { const h = (e, m) => cb(m); ipcRenderer.on('agent:term-create', h); return () => ipcRenderer.removeListener('agent:term-create', h); },
   created: (m) => ipcRenderer.send('agent:term-created', m),
   onTouch: (cb) => { const h = (e, m) => cb(m); ipcRenderer.on('agent:touch', h); return () => ipcRenderer.removeListener('agent:touch', h); },
+  // agent 官方 hook 事件 { id, state, event, file?, agent }：hooked 终端的忙/等确认/收工由它驱动，不再刮屏
+  onEvent: (cb) => { const h = (e, m) => cb(m); ipcRenderer.on('agent:event', h); return () => ipcRenderer.removeListener('agent:event', h); },
 });
 
 contextBridge.exposeInMainWorld('fanboxEnv', {
   isDesktopApp: true,
   platform: process.platform,
+  // 写类 /api/* 的门票：主进程经 additionalArguments 递进来。preload 只在主框架跑，预览 iframe（跨源）拿不到
+  ctlToken: (process.argv.find((a) => a.startsWith('--fanbox-ctl-token=')) || '').slice('--fanbox-ctl-token='.length),
 });
 
 // 电源守卫：侧栏「离开电脑」两个开关（合盖继续干活 / 微信遥控不断线），macOS 专属

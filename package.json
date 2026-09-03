@@ -1,6 +1,6 @@
 {
   "name": "fanbox",
-  "version": "2.14.0",
+  "version": "2.15.2",
   "description": "FanBox — the cockpit for coding agents. Command Claude Code or Codex, watch every file and line they change, and take over anytime.",
   "bin": {
     "fanbox": "server.js"
@@ -15,7 +15,7 @@
     "rebuild": "electron-rebuild -f -w node-pty",
     "rebuild:pty": "cd node_modules/node-pty && node-gyp rebuild --target=$(node -p \"require('electron/package.json').version\") --dist-url=https://www.electronjs.org/headers --arch=$PTY_ARCH",
     "build:milkdown": "esbuild src-vendor/milkdown-entry.js --bundle --format=iife --minify --outfile=public/vendor/milkdown/milkdown.js --loader:.svg=dataurl --loader:.woff=file --loader:.woff2=file --loader:.ttf=file --loader:.eot=file --asset-names=[name]",
-    "build:hljs": "esbuild src-vendor/hljs-entry.js --bundle --format=iife --minify --outfile=public/vendor/hljs/highlight.js && cp node_modules/marked/marked.min.js public/vendor/marked/marked.min.js && cp node_modules/highlight.js/styles/github-dark.min.css node_modules/highlight.js/styles/github.min.css public/vendor/hljs/styles/",
+    "build:hljs": "esbuild src-vendor/hljs-entry.js --bundle --format=iife --minify --outfile=public/vendor/hljs/highlight.js && cp node_modules/marked/marked.min.js public/vendor/marked/marked.min.js && cp node_modules/dompurify/dist/purify.min.js public/vendor/dompurify/purify.min.js && cp node_modules/highlight.js/styles/github-dark.min.css node_modules/highlight.js/styles/github.min.css public/vendor/hljs/styles/",
     "sandcastle:codex": "tsx .sandcastle/main.mts",
     "dist": "APPLE_KEYCHAIN_PROFILE=fanbox-notary electron-builder --mac --arm64",
     "dist:x64": "PTY_ARCH=x64 npm run rebuild:pty && APPLE_KEYCHAIN_PROFILE=fanbox-notary electron-builder --mac --x64 && PTY_ARCH=arm64 npm run rebuild:pty",
@@ -28,6 +28,21 @@
       "buildResources": "build",
       "output": "dist"
     },
+    "files": [
+      "**/*",
+      "!.claude{,/**/*}",
+      "!dist{,/**/*}",
+      "!_archive{,/**/*}",
+      "!design-demos{,/**/*}",
+      "!experiments{,/**/*}",
+      "!docs{,/**/*}",
+      "!素材{,/**/*}",
+      "!assets{,/**/*}",
+      "!src-vendor{,/**/*}",
+      "!.icon.html",
+      "!.DS_Store",
+      "!**/.DS_Store"
+    ],
     "asar": true,
     "npmRebuild": false,
     "asarUnpack": [
@@ -44,6 +59,9 @@
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
       "afterSign": "build/notarize.js",
+      "extendInfo": {
+        "NSAppleEventsUsageDescription": "终端里的 agent 需要通过它控制其他 app（截图、取窗口信息、驱动剪映等）。"
+      },
       "target": [
         {
           "target": "dmg"

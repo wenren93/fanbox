@@ -27,5 +27,6 @@ global.__fanboxAgent = {
   token: process.env.FANBOX_AGENT_TOKEN, // 主进程生成后经 fork env 注入，不落盘
   list: call('list'), read: call('read'), send: call('send'),
   create: call('create'), wait: call('wait'), kill: call('kill'),
+  event: call('event'), // agent 官方 hook 事件（/api/agent/event）→ 主进程事实表
 };
 require('../server.js');

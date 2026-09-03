@@ -5,11 +5,10 @@
  * 复用零依赖后端 server.js（文件能力），叠加 node-pty 内嵌终端，
  * 让 TUI coding agent（Claude Code / Codex / Aider…）在界面里直接跑起来。
  */
-const { app, BrowserWindow, ipcMain, shell, nativeImage, Menu, clipboard, dialog, net, session, utilityProcess } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, nativeImage, Menu, clipboard, dialog, net, session, systemPreferences, utilityProcess } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const { activeTerminalCount } = require('./terminal-activity');
 const { fullEnv } = require('./wechat/env');
 
 // 复用现有后端 server.js，但它跑在自己的进程里（见 startBackendServer）。
@@ -38,6 +37,46 @@ const termBufs = new Map();    // id -> 去 ANSI 滚动缓冲（~200KB），/api
 const termLastOut = new Map(); // id -> 最近输出时间戳，wait 的 idle 判定
 const termWaiters = new Map(); // id -> Set<fn(text)>，wait 的增量输出订阅
 const autoCloseTerminals = new Set(); // 定时任务专用：PTY 退出时连同渲染层标签一起收掉
+// id -> { agent, sessionId, state, since, lastEventAt, hooked:true, changed: Map(path -> {n, lastAt, tool}) }
+// agent 官方 hooks 报来的事实（见 writeHookFiles / agentEvent）。有这条记录的终端，忙闲不再刮终端文本
+const termFacts = new Map();
+
+// ---------- Agent 官方 hooks：让 claude/codex 自己汇报「在干活 / 等确认 / 干完了」，取代刮终端文本 ----------
+// 启动时把两份静态文件写到 ~/.fanbox/hooks/：claude 走 `--settings 文件` 叠加（不动用户自己的
+// ~/.claude/settings.json），codex 走 `-c notify=[脚本]`。命令里的 $FANBOX_* 由 pty 环境展开，
+// 所以文件内容对所有终端相同。--noproxy：用户开着系统代理时 curl 127.0.0.1 会被拦掉（实测）。
+const HOOKS_DIR = () => path.join(os.homedir(), '.fanbox', 'hooks');
+const HOOK_CURL = `curl -s --noproxy '*' -m 3 -X POST "$FANBOX_CTL/event" -H "x-fanbox-token: $FANBOX_CTL_TOKEN" -H "x-fanbox-term: $FANBOX_TERM_ID" -H 'content-type: application/json' --data-binary`;
+function writeHookFiles() {
+  try {
+    const dir = HOOKS_DIR();
+    fs.mkdirSync(dir, { recursive: true });
+    // async：hook 在后台跑、不等返回，绝不拖慢 agent；timeout 5s 兜底
+    const on = (matcher) => [{ matcher, hooks: [{ type: 'command', command: `${HOOK_CURL} @- >/dev/null 2>&1 || true`, async: true, timeout: 5 }] }];
+    const hooks = {};
+    for (const ev of ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'Notification', 'Stop', 'SubagentStop', 'SessionEnd']) hooks[ev] = on('*');
+    hooks.PostToolUse = on('Edit|Write|MultiEdit|NotebookEdit|Bash');
+    fs.writeFileSync(path.join(dir, 'claude-settings.json'), JSON.stringify({ hooks }, null, 2) + '\n');
+    // codex 的 notify 是整个数组覆盖：用户 ~/.codex/config.toml 里原有的通知程序（如 Codex Computer Use）
+    // 会被顶掉，所以脚本末尾接力调用它、原参数照传
+    const orig = codexUserNotify();
+    const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+    const sh = ['#!/bin/sh', '# FanBox 启动时生成：把 Codex notify 事件（JSON 是最后一个参数）转发给 FanBox；$FANBOX_* 来自终端环境',
+      'for last; do :; done',
+      `[ -n "$FANBOX_CTL" ] && ${HOOK_CURL} "$last" >/dev/null 2>&1`,
+      orig.length ? `exec ${orig.map(q).join(' ')} "$@"` : 'exit 0', ''].join('\n');
+    const shPath = path.join(dir, 'codex-notify.sh');
+    fs.writeFileSync(shPath, sh);
+    fs.chmodSync(shPath, 0o755);
+  } catch (e) { console.error('[fanbox] hooks 文件写入失败：', e.message); }
+}
+// 只读 ~/.codex/config.toml 顶层的 notify = ["程序", "参数"…]，粗解析够用（不动这个文件）
+function codexUserNotify() {
+  try {
+    const m = fs.readFileSync(path.join(os.homedir(), '.codex', 'config.toml'), 'utf8').match(/^notify\s*=\s*\[([^\]]*)\]/m);
+    return m ? [...m[1].matchAll(/"((?:\\.|[^"\\])*)"/g)].map((x) => x[1].replace(/\\(["\\])/g, '$1')) : [];
+  } catch { return []; }
+}
 
 // ---------- 后端子进程 ----------
 // server.js 跑在 utilityProcess 里（入口 server-child.js）。agent 能力（pty 都活在
@@ -103,6 +142,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      additionalArguments: [`--fanbox-ctl-token=${AGENT_TOKEN}`], // 渲染层写接口的门票，preload 读 argv 暴露为 fanboxEnv.ctlToken
     },
   });
   // 拖动/缩放后防抖记忆，关窗再存一次兜底
@@ -120,10 +160,37 @@ function createWindow() {
   const load = () => win.loadURL(`http://localhost:${PORT}`).catch(() => setTimeout(load, 150));
   setTimeout(load, 250);
 
-  // 外部链接走系统浏览器，不在 app 里开新窗口
+  // 外部链接走系统浏览器；其余协议（file:/javascript:/自定义 scheme）一律不开——页面内容里混进的 window.open 别想开出新窗口
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:/.test(url)) { shell.openExternal(url); return { action: 'deny' }; }
-    return { action: 'allow' };
+    if (/^https?:/.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  // ↑ 只拦得住 window.open / target=_blank。md 正文里 marked 渲染出来的普通 <a href> 走的是
+  // 「当前页导航」，绕过它：整个界面被外站替换掉，而窗口是 hiddenInset 没有地址栏和后退键、
+  // 渲染层连同快捷键一起没了，等于死界面只能强退 app。这里按框架分两档兜住：
+  //   主框架——只准停在 app 自己的入口页（启动加载、⌘R 刷新），其余一律拦下；
+  //   子框架——html 文件预览的 iframe，跳本机文件随它去（出不了预览框），跳外站才拦。
+  // 自己人 = 后端（PORT）和 html 预览的隔离源（PORT+1，见 server.js 的 PREVIEW_PORT）
+  const isOurs = (url) => {
+    try {
+      const u = new URL(url);
+      return (u.hostname === 'localhost' || u.hostname === '127.0.0.1')
+        && (u.port === String(PORT) || u.port === String(PORT + 1));
+    } catch { return false; } // about:blank、非法 URL 都按外部处理
+  };
+  win.webContents.on('will-frame-navigate', (ev) => {
+    const url = ev.url || '';
+    if (ev.isMainFrame) {
+      let atEntry = false;
+      try { const u = new URL(url); atEntry = isOurs(url) && u.port === String(PORT) && (u.pathname === '/' || u.pathname === ''); } catch { /* 非法 URL 直接拦 */ }
+      if (atEntry) return;
+    } else if (isOurs(url)) {
+      return;
+    }
+    ev.preventDefault();
+    // 外站交给系统浏览器；本机的（md 里 [x](./y.md) 这类相对链接会解析成 http://localhost:PORT/y.md）
+    // 只拦不开——扔进浏览器只会得到一个 404 页，更莫名其妙
+    if (!isOurs(url) && /^(https?|mailto|tel):/i.test(url)) shell.openExternal(url).catch(() => { /* 没有可处理的应用就算了 */ });
   });
 
   win.on('closed', () => { win = null; });
@@ -156,6 +223,7 @@ app.whenReady().then(() => {
     try { app.dock.setIcon(nativeImage.createFromPath(path.join(__dirname, '..', 'build', 'icon.png'))); } catch { /* */ }
   }
   app.setName('FanBox');
+  writeHookFiles(); // 每次启动重写，随版本升级自动更新，用户不用管
   startBackendServer(); // utilityProcess 只能在 ready 之后 fork；窗口加载自带重试，等它起
 
   // 后端跑在 localhost，访问它永不该走代理。个别环境（clash 强制系统代理、企业 PAC 把 loopback 也代理）
@@ -353,6 +421,12 @@ ipcMain.handle('win:focus', () => {
   win.focus();
 });
 
+// Dock 角标：渲染层的指挥台算出「几个会话在等你」，窗口被遮住/最小化时还能从 Dock 一眼看到。空串即清空
+ipcMain.handle('win:badge', (e, { text }) => {
+  if (process.platform !== 'darwin' || !app.dock) return;
+  try { app.dock.setBadge(String(text || '')); } catch { /* */ }
+});
+
 // 预览全屏时藏掉左上角红黄绿系统按钮——它和右侧自家关闭图标太像，容易让人误点
 ipcMain.handle('win:traffic', (e, { show }) => {
   if (!win || win.isDestroyed() || typeof win.setWindowButtonVisibility !== 'function') return;
@@ -387,13 +461,23 @@ let wechatConnected = false; // 微信 ClawBot 当前是否连着（bridge 回�
 
 // ---- agent 工作状态检测：前台不是裸 shell = 终端里有东西在跑（和微信 termControl 同一判据）----
 const BARE_SHELL = /^-?(zsh|bash|sh|fish|login)$/i;
-function termBusyAny() {
-  for (const p of terminals.values()) {
+// 正在干活的 agent 终端清单：休眠守卫与退出确认共用同一份判据，两边不会各说各话
+function activeAgentTerms() {
+  const out = [];
+  for (const [id, p] of terminals) {
+    // 有官方 hook 事实的终端只认它说的：claude 空闲等输入时前台进程仍是 claude，旧判据会一直「忙」不让 Mac 睡
+    const f = termFacts.get(id);
+    if (f) {
+      // 等审批也算干活中——任务在半途，杀掉就是半截；等输入/已完成的空闲 agent 不算
+      if (f.state === 'working' || f.state === 'needs_permission') out.push({ id, label: f.agent || (p && p.process) || id });
+      continue;
+    }
     const proc = (p && p.process) || '';
-    if (proc && !BARE_SHELL.test(proc)) return true;
+    if (proc && !BARE_SHELL.test(proc)) out.push({ id, label: proc });
   }
-  return false;
+  return out;
 }
+function termBusyAny() { return activeAgentTerms().length > 0; }
 // 收工不立刻放行休眠：agent 工具调用间隙 / 刚跑完下一句还没起，留 2 分钟缓冲防误判
 const IDLE_GRACE_MS = 2 * 60 * 1000;
 let lastBusyAt = 0;
@@ -516,6 +600,73 @@ ipcMain.handle('power:setLid', async (e, { on } = {}) => {
   return { ...powerPayload(), ...r };
 });
 
+// ---------- 权限体检（macOS）----------
+// 终端里的 agent 要截屏、要控制别的 app，权限算在 FanBox 头上（TCC 的 responsible 就是本 app，
+// node-pty 起的 zsh 会正确继承）。但 TCC 的授权记录是按「服务 + bundle id + 代码签名要求」存的：
+// 换过签名证书之后（开发者账号升级、换 Team），旧记录的签名要求再也匹配不上当前 app，
+// 系统按「从未授权」处理 → 每次都弹窗。而系统设置里那一条仍然打着勾——它只读 auth_value，
+// 从不校验签名要求。于是「明明已经开了」和「每次都被拒」同时成立，肉眼无从分辨，
+// 更要命的是在设置里取关再勾回来只改 auth_value、改不动签名要求，怎么点都没用。
+// 这里主动把真实状态问出来，并给出唯一有效的那条出路：删掉记录重新授权。
+const PERM_SERVICES = ['ScreenCapture', 'Accessibility', 'AppleEvents'];
+function permStatus() {
+  return {
+    screen: systemPreferences.getMediaAccessStatus('screen') === 'granted',
+    a11y: systemPreferences.isTrustedAccessibilityClient(false), // false = 只查询，不弹系统提示
+  };
+}
+function checkPermissions() {
+  const s = permStatus();
+  const ok = (v) => (v ? M('✅ 已生效', '✅ working') : M('❌ 未生效', '❌ not working'));
+  const detail = [
+    `${M('屏幕录制', 'Screen Recording')}：${ok(s.screen)}`,
+    `${M('辅助功能', 'Accessibility')}：${ok(s.a11y)}`,
+  ].join('\n');
+  if (s.screen && s.a11y) {
+    dialog.showMessageBoxSync(win && !win.isDestroyed() ? win : undefined, {
+      type: 'info', message: M('权限正常', 'Permissions OK'), detail,
+    });
+    return;
+  }
+  const choice = dialog.showMessageBoxSync(win && !win.isDestroyed() ? win : undefined, {
+    type: 'warning',
+    buttons: [M('取消', 'Cancel'), M('清除记录并退出', 'Clear records and quit')],
+    defaultId: 1,
+    cancelId: 0,
+    message: M('有权限没生效', 'Some permissions are not working'),
+    detail: `${detail}\n\n` + M(
+      '如果「系统设置 → 隐私与安全性」里 FanBox 明明是打勾的，那是一条换签名后失效的旧记录。'
+      + '在设置里取关再勾回来改不动它——只能删掉记录重新授权。\n\n'
+      + '点「清除记录并退出」会清掉 FanBox 的授权记录并完全退出（屏幕录制权限对已运行的进程不生效，'
+      + '而点左上角红叉只是隐藏窗口、进程还活着，必须真退出）。重新打开后让 agent 再跑一次截屏，'
+      + '这次弹窗点允许，记录就会按当前签名重建。',
+      'If FanBox appears checked under System Settings → Privacy & Security, that is a stale record '
+      + 'left behind by a signing-certificate change. Toggling it there cannot fix it — the record has to be removed.\n\n'
+      + 'Clearing will remove FanBox\'s TCC records and quit completely (screen-recording permission never applies to '
+      + 'an already-running process, and the red close button only hides the window). Reopen, trigger a screenshot '
+      + 'again, and approve the prompt — the record will be rebuilt against the current signature.',
+    ),
+  });
+  if (choice !== 1) return;
+  const failed = [];
+  for (const svc of PERM_SERVICES) {
+    // 记录不存在时 tccutil 也返回成功，多清一个无害
+    try { require('child_process').execFileSync('/usr/bin/tccutil', ['reset', svc, 'com.huashu.fanbox'], { stdio: 'ignore' }); }
+    catch { failed.push(svc); }
+  }
+  if (failed.length) {
+    dialog.showMessageBoxSync(win && !win.isDestroyed() ? win : undefined, {
+      type: 'error', message: M('清除失败', 'Reset failed'),
+      detail: M(`这几项没能清掉：${failed.join('、')}\n手动跑一次：\n`, `Could not reset: ${failed.join(', ')}\nRun manually:\n`)
+        + failed.map((s2) => `tccutil reset ${s2} com.huashu.fanbox`).join('\n'),
+    });
+    return;
+  }
+  quitConfirmed = true; // 已经当面确认过一次了，别再问「还有终端在跑」
+  isQuitting = true;
+  app.quit();
+}
+
 // 原生菜单——关键是 Edit role，终端里的 ⌘C/⌘V 才生效
 function buildMenu() {
   const isMac = process.platform === 'darwin';
@@ -523,6 +674,7 @@ function buildMenu() {
     ...(isMac ? [{ label: 'FanBox', submenu: [
       { role: 'about', label: M('关于 FanBox', 'About FanBox') },
       { label: M('检查更新…', 'Check for Updates…'), click: () => checkUpdate({ manual: true }) },
+      { label: M('权限体检…', 'Check Permissions…'), click: () => checkPermissions() },
       { type: 'separator' },
       { role: 'hide', label: M('隐藏 FanBox', 'Hide FanBox') }, { role: 'hideOthers', label: M('隐藏其他', 'Hide Others') }, { role: 'unhide', label: M('全部显示', 'Show All') },
       { type: 'separator' },
@@ -542,10 +694,21 @@ function buildMenu() {
       { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' },
       { type: 'separator' }, { role: 'togglefullscreen', label: M('全屏', 'Full Screen') },
       ...(isMac ? [{ type: 'separator' }, {
-        // 合盖继续干活：仅在检测到 agent 正在干活时真正生效（智能模式）；勾选状态反映用户意图
+        // 合盖继续干活：仅在检测到 agent 正在干活时真正生效（智能模式）；勾选状态反映用户意图。
+        // 侧栏也有这个开关（高频），两边读同一份 power:state、改完都广播 power:changed，勾选不会打架
         label: lidActive ? M('合盖继续干活（生效中）', 'Keep working with lid closed (active)') : M('合盖继续干活', 'Keep working with lid closed'),
         type: 'checkbox', checked: lidIntent,
         click: (item) => { setLidIntent(item.checked); },
+      }, {
+        // 微信遥控不断线：从侧栏「离开电脑」区块挪进来，和上一项成对。开关本体是下方微信段的
+        // power:setWechat handler（要联动 bridge），这里借渲染层的 preload 桥绕一圈调它，不动那段代码；
+        // 取消 / 失败时 handler 不会重建菜单，所以回来自己 buildMenu 一次把勾选复位
+        label: (wechatStayAwake && wechatConnected) ? M('微信遥控不断线（生效中）', 'Stay awake for WeChat (active)') : M('微信遥控不断线', 'Stay awake for WeChat'),
+        type: 'checkbox', checked: wechatStayAwake,
+        click: (item) => {
+          const p = win && !win.isDestroyed() ? win.webContents.executeJavaScript(`window.fanboxPower && window.fanboxPower.setWechat(${!!item.checked})`, true) : Promise.resolve();
+          p.catch(() => {}).then(() => buildMenu());
+        },
       }] : []),
     ] },
     { role: 'window', label: M('窗口', 'Window'), submenu: [{ role: 'minimize', label: M('最小化', 'Minimize') }, { role: 'zoom' }] },
@@ -559,16 +722,19 @@ app.on('activate', () => {
 let quitConfirmed = false;
 let isQuitting = false; // 真正退出（⌘Q / 菜单退出）才置真；点红叉只隐藏不退出，见 win.on('close')
 app.on('before-quit', (e) => {
-  const activeCount = activeTerminalCount(terminals);
-  if (quitConfirmed || activeCount === 0) { isQuitting = true; return; }
+  // 只拦「agent 正在干活」的情况：开着的裸 shell、停在提示符等输入的 claude 都不算——
+  // 从前按「有没有终端开着」拦，每次退出都要多点一下，久了确认框就成了噪音
+  const active = quitConfirmed ? [] : activeAgentTerms();
+  if (active.length === 0) { isQuitting = true; return; }
   e.preventDefault();
+  const names = active.map((a) => a.label).join('、');
   const choice = dialog.showMessageBoxSync(win && !win.isDestroyed() ? win : undefined, {
     type: 'warning',
     buttons: [M('取消', 'Cancel'), M('退出', 'Quit')],
     defaultId: 0,
     cancelId: 0,
-    message: M(`还有 ${activeCount} 个终端任务在运行`, `${activeCount} terminal task(s) still running`),
-    detail: M('退出会终止正在运行的 agent 任务，确定退出？', 'Quitting will terminate running agent tasks. Quit anyway?'),
+    message: M(`还有 ${active.length} 个 agent 正在干活`, `${active.length} agent(s) still working`),
+    detail: M(`${names}\n\n退出会终止这些任务，确定退出？`, `${names}\n\nQuitting will terminate these tasks. Quit anyway?`),
   });
   if (choice === 1) { quitConfirmed = true; isQuitting = true; app.quit(); }
 });
@@ -693,6 +859,7 @@ ipcMain.handle('pty:spawn', async (e, { id, cwd, cols, rows, theme }) => {
     termTails.delete(id);
     termBufs.delete(id);
     termLastOut.delete(id);
+    termFacts.delete(id);
     refreshLidGuard(); // 最后一个终端退出即恢复休眠
     recStop(id);
     if (win && !win.isDestroyed()) win.webContents.send('pty:exit', { id, exitCode, autoClose });
@@ -811,13 +978,67 @@ async function agentList() {
   for (const [id, p] of terminals) {
     const proc = (p && p.process) || '';
     const cwd = await termCwdByPid(p && p.pid);
+    const f = termFacts.get(id); // hooked 终端的忙闲/状态来自 agent 自己的事件，比看前台进程准
     arr.push({
       id, cwd, name: cwd ? path.basename(cwd) : '', proc,
-      busy: !!proc && !BARE_SHELL_RE.test(proc),
+      busy: f ? f.state === 'working' : !!proc && !BARE_SHELL_RE.test(proc),
+      state: f ? f.state : null, hooked: !!f,
       tail: (termTails.get(id) || '').slice(-500),
     });
   }
   return { ok: true, terminals: arr };
+}
+// 官方 hook 事件入口（/api/agent/event → RPC → 这里）。claude 看 hook_event_name，codex 看 type。
+// 状态机：SessionStart/UserPromptSubmit/PreToolUse → working；Notification permission_prompt → needs_permission；
+// idle_prompt / agent_needs_input → needs_input；Stop / agent_completed → done；SessionEnd → ended（事实随即清掉，
+// 裸 shell 回到旧判据）；codex 的 *turn-complete → done，其他 → working。每个事件都广播给渲染层。
+function agentEvent(termId, body) {
+  const id = String(termId || '');
+  if (!terminals.has(id)) return { ok: false, error: 'no such terminal' };
+  const b = body && typeof body === 'object' ? body : {};
+  // 先认清是谁的事件再建事实：认不出的 body 不能留下一条空「working」，否则这个终端永远算忙
+  const kind = typeof b.hook_event_name === 'string' ? 'claude' : typeof b.type === 'string' ? 'codex' : '';
+  if (!kind) return { ok: false, error: 'unknown event' };
+  const now = Date.now();
+  let f = termFacts.get(id);
+  if (!f) termFacts.set(id, f = { agent: kind, sessionId: '', state: 'working', since: now, lastEventAt: now, hooked: true, changed: new Map() });
+  let event, state = f.state, file = '';
+  if (kind === 'claude') {
+    f.agent = 'claude'; event = b.hook_event_name;
+    if (b.session_id) f.sessionId = String(b.session_id);
+    if (event === 'SessionStart' || event === 'UserPromptSubmit' || event === 'PreToolUse' || event === 'SubagentStop') state = 'working';
+    else if (event === 'Stop') state = 'done';
+    else if (event === 'SessionEnd') state = 'ended';
+    else if (event === 'Notification') {
+      const nt = String(b.notification_type || '');
+      if (nt === 'permission_prompt') state = 'needs_permission';
+      else if (nt === 'idle_prompt' || nt === 'agent_needs_input') state = 'needs_input';
+      else if (nt === 'agent_completed') state = 'done';
+      event += ':' + nt;
+    } else if (event === 'PostToolUse') {
+      state = 'working';
+      const tool = String(b.tool_name || '');
+      const p = b.tool_input && (b.tool_input.file_path || b.tool_input.notebook_path);
+      if (tool !== 'Bash' && typeof p === 'string' && p) { // Bash 不记文件：改了什么它自己也说不清
+        file = p;
+        const c = f.changed.get(p) || { n: 0, lastAt: 0, tool };
+        c.n++; c.lastAt = now; c.tool = tool;
+        if (!f.changed.has(p) && f.changed.size >= 500) f.changed.delete(f.changed.keys().next().value);
+        f.changed.set(p, c);
+      }
+    }
+  } else {
+    f.agent = 'codex'; event = b.type;
+    if (b['thread-id']) f.sessionId = String(b['thread-id']);
+    state = /turn-(complete|ended)/.test(event) ? 'done' : 'working';
+  }
+  const changed = state !== f.state;
+  if (changed) f.since = now;
+  f.state = state; f.lastEventAt = now;
+  if (win && !win.isDestroyed()) win.webContents.send('agent:event', { id, state, event, file: file || undefined, agent: f.agent });
+  if (state === 'ended') termFacts.delete(id);
+  if (changed) refreshLidGuard(); // 收工/开工立刻结算电源守卫，不等 30s 轮询
+  return { ok: true, id, state };
 }
 function agentRead(id, lines) {
   if (!terminals.has(id)) return { ok: false, error: 'no such terminal' };
@@ -920,7 +1141,7 @@ function agentKill(id) {
   catch (e) { return { ok: false, error: String(e && e.message || e) }; }
 }
 // server.js 在子进程里经 RPC 桥调这组能力（见 startBackendServer）；token 走 fork env
-const agentImpl = { list: agentList, read: agentRead, send: agentSend, create: agentCreate, wait: agentWait, kill: agentKill };
+const agentImpl = { list: agentList, read: agentRead, send: agentSend, create: agentCreate, wait: agentWait, kill: agentKill, event: agentEvent };
 
 // ---------- 录制文件管理 IPC ----------
 // 列表：读每个 .cast 的头行拿元信息 + 文件大小/时长（末事件时间），按新→旧。失败的文件跳过不报错。
@@ -1200,6 +1421,13 @@ async function flushWatch() {
   }));
   const out = keep.filter(Boolean);
   if (out.length && win && !win.isDestroyed()) win.webContents.send('fs:changed-batch', out);
+  // 被监听的目录自己被删/改名了：FSEvents 只会报几条事件，watcher 不会自己关，从前就永远留在表里
+  // （watch-set 见表里有就跳过，目录回来了也不会重新挂）。这里顺着这批事件的目录查一遍，没了就摘掉
+  for (const dir of new Set(batch.map((m) => m.dir))) {
+    if (fs.existsSync(dir)) continue;
+    const w = watchers.get(dir);
+    if (w) { try { w.close(); } catch { /* */ } watchers.delete(dir); }
+  }
 }
 function startWatch(dir) {
   if (watchers.has(dir) || !dir || !fs.existsSync(dir)) return;
@@ -1213,6 +1441,9 @@ function startWatch(dir) {
       watchPending.push({ dir, filename: name });
       if (!watchTimer) watchTimer = setTimeout(flushWatch, 100);
     });
+    // FSWatcher 是 EventEmitter：EMFILE（fd 用光）这类错误异步走 'error' 事件，没人听就是主进程未捕获异常，
+    // 整个 app 跟着崩。听到就把这只关掉、从表里摘除，下次 watch-set 会重试
+    w.on('error', () => { try { w.close(); } catch { /* */ } if (watchers.get(dir) === w) watchers.delete(dir); });
     watchers.set(dir, w);
   } catch { /* 无权限等，跳过该目录 */ }
 }
