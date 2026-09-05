@@ -63,6 +63,8 @@ contextBridge.exposeInMainWorld('fanboxUpdate', {
   open: (url) => ipcRenderer.invoke('update:open', { url }),
   download: (version) => ipcRenderer.invoke('update:download', { version }), // #26 应用内下载对应架构 dmg
   onProgress: (cb) => { const h = (e, m) => cb(m); ipcRenderer.on('update:progress', h); return () => ipcRenderer.removeListener('update:progress', h); },
+  install: () => ipcRenderer.invoke('update:install'), // #26 全自动：后台下载同架构 zip，resolve 时已可重启安装
+  restart: () => ipcRenderer.invoke('update:restart'),
 });
 
 contextBridge.exposeInMainWorld('fanboxWin', {

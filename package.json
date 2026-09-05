@@ -1,6 +1,6 @@
 {
   "name": "fanbox",
-  "version": "2.15.2",
+  "version": "2.16.1",
   "description": "FanBox — the cockpit for coding agents. Command Claude Code or Codex, watch every file and line they change, and take over anytime.",
   "bin": {
     "fanbox": "server.js"
@@ -17,8 +17,8 @@
     "build:milkdown": "esbuild src-vendor/milkdown-entry.js --bundle --format=iife --minify --outfile=public/vendor/milkdown/milkdown.js --loader:.svg=dataurl --loader:.woff=file --loader:.woff2=file --loader:.ttf=file --loader:.eot=file --asset-names=[name]",
     "build:hljs": "esbuild src-vendor/hljs-entry.js --bundle --format=iife --minify --outfile=public/vendor/hljs/highlight.js && cp node_modules/marked/marked.min.js public/vendor/marked/marked.min.js && cp node_modules/dompurify/dist/purify.min.js public/vendor/dompurify/purify.min.js && cp node_modules/highlight.js/styles/github-dark.min.css node_modules/highlight.js/styles/github.min.css public/vendor/hljs/styles/",
     "sandcastle:codex": "tsx .sandcastle/main.mts",
-    "dist": "APPLE_KEYCHAIN_PROFILE=fanbox-notary electron-builder --mac --arm64",
-    "dist:x64": "PTY_ARCH=x64 npm run rebuild:pty && APPLE_KEYCHAIN_PROFILE=fanbox-notary electron-builder --mac --x64 && PTY_ARCH=arm64 npm run rebuild:pty",
+    "dist": "APPLE_KEYCHAIN_PROFILE=fanbox-notary electron-builder --mac --arm64 --publish never",
+    "dist:x64": "PTY_ARCH=x64 npm run rebuild:pty && APPLE_KEYCHAIN_PROFILE=fanbox-notary electron-builder --mac --x64 --publish never && PTY_ARCH=arm64 npm run rebuild:pty",
     "dist:local": "SKIP_NOTARIZE=true electron-builder --mac --arm64"
   },
   "build": {
@@ -65,9 +65,19 @@
       "target": [
         {
           "target": "dmg"
+        },
+        {
+          "target": "zip"
         }
       ]
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "alchaincyf",
+        "repo": "fanbox"
+      }
+    ],
     "dmg": {
       "title": "FanBox",
       "writeUpdateInfo": false
@@ -84,6 +94,7 @@
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",
     "js-yaml": "^4.3.1",
+    "electron-updater": "^6.8.9",
     "node-pty": "^1.0.0",
     "qrcode": "^1.5.4"
   },

@@ -295,9 +295,9 @@ function startShotWatch() {
   } catch { /* 无权限等，静默放弃 */ }
 }
 
-// ---------- 更新检测：查 GitHub Releases，有新版本通知渲染层引导下载 ----------
-// 现阶段只做「检测 + 引导」：Apple Development 签名过不了 Squirrel.Mac 的校验，
-// electron-updater 全自动更新要等升级 Developer ID 后再换
+// ---------- 更新检测：查 GitHub Releases，有新版本通知渲染层 ----------
+// 有没有新版仍靠下面的 GitHub 查询（老 Release 没有 latest-mac.yml，只有这条路知道）；
+// 能不能自动装由 probeAutoUpdate 用 electron-updater 回答（#26），装不了退回应用内下载 dmg
 function cmpVer(a, b) {
   const pa = String(a).replace(/^v/, '').split('.').map(Number);
   const pb = String(b).replace(/^v/, '').split('.').map(Number);
@@ -344,19 +344,27 @@ async function checkUpdate(opts) {
   updRetry = 0;
   const newer = cmpVer(info.tag, app.getVersion()) > 0;
   if (newer) {
-    pendingUpdate = { version: info.tag.replace(/^v/, ''), url: info.url };
     latestAssets = Array.isArray(info.assets) ? info.assets : null;
+    // 探测完再落 pendingUpdate：渲染层启动时会主动 get() 一次，探测中途给它 auto:false 会先弹出 dmg 胶囊，
+    // 随后真正的推送因为「胶囊已存在」被跳过，用户就见不到「更新」按钮
+    const auto = await probeAutoUpdate();
+    pendingUpdate = { version: info.tag.replace(/^v/, ''), url: info.url, auto };
     if (win && !win.isDestroyed()) win.webContents.send('update:available', pendingUpdate);
   }
   if (manual) {
     const owner = win && !win.isDestroyed() ? win : undefined;
     if (newer) {
+      const auto = pendingUpdate.auto;
       const c = dialog.showMessageBoxSync(owner, {
-        type: 'info', buttons: [M('去下载', 'Download'), M('取消', 'Cancel')], defaultId: 0, cancelId: 1,
+        type: 'info', buttons: [auto ? M('更新', 'Update') : M('去下载', 'Download'), M('取消', 'Cancel')], defaultId: 0, cancelId: 1,
         message: M(`发现新版本 v${pendingUpdate.version}`, `New version v${pendingUpdate.version} available`),
-        detail: M(`当前版本 v${app.getVersion()}。点「去下载」打开发布页，下载后替换 /Applications 里的旧版即可。`, `You are on v${app.getVersion()}. "Download" opens the release page; replace the old app in /Applications.`),
+        detail: auto
+          ? M(`当前版本 v${app.getVersion()}。点「更新」在后台下载，下完重启一次就换好了。`, `You are on v${app.getVersion()}. "Update" downloads in the background; restart once to finish.`)
+          : M(`当前版本 v${app.getVersion()}。点「去下载」打开发布页，下载后替换 /Applications 里的旧版即可。`, `You are on v${app.getVersion()}. "Download" opens the release page; replace the old app in /Applications.`),
       });
-      if (c === 0) shell.openExternal(pendingUpdate.url);
+      // 自动更新：让渲染层弹出胶囊并直接开始下载（manual 绕过「这个版本不再提醒」）
+      if (c === 0 && auto && win && !win.isDestroyed()) win.webContents.send('update:available', { ...pendingUpdate, manual: true, start: true });
+      else if (c === 0) shell.openExternal(pendingUpdate.url);
     } else {
       dialog.showMessageBoxSync(owner, {
         type: 'info', buttons: [M('好', 'OK')], message: M('已是最新版本', 'You are up to date'),
@@ -367,6 +375,47 @@ async function checkUpdate(opts) {
 }
 ipcMain.handle('update:open', (e, { url }) => { if (/^https:\/\/github\.com\//.test(String(url))) shell.openExternal(url); });
 ipcMain.handle('update:get', () => pendingUpdate);
+
+// #26 全自动更新：electron-updater 读 Release 里的 latest-mac.yml，下载同架构 zip，Squirrel.Mac 原地换包，
+// 重启即完成（没点「重启安装」的话，下次退出 app 时也会装上）。2.4.1 起是 Developer ID 签名 + 公证，签名校验过得了。
+// 只在打包后的 app 里生效；开发实例和依赖缺失时只剩 dmg 下载。
+// 联调用：FANBOX_UPDATE_FEED=http://127.0.0.1:端口/ 指向放着 latest-mac.yml + zip 的目录，不用真发 Release
+const sendUpd = (m) => { if (win && !win.isDestroyed()) win.webContents.send('update:progress', m); };
+let updReady = false, updInstalling = false;
+let autoUpdater = null;
+try {
+  ({ autoUpdater } = require('electron-updater'));
+  autoUpdater.autoDownload = false;
+  autoUpdater.logger = null;
+  if (process.env.FANBOX_UPDATE_FEED) autoUpdater.setFeedURL({ provider: 'generic', url: process.env.FANBOX_UPDATE_FEED });
+  autoUpdater.on('download-progress', (p) => sendUpd({ state: 'downloading', pct: Math.floor(p.percent || 0) }));
+  autoUpdater.on('update-downloaded', () => { updReady = true; sendUpd({ state: 'ready' }); });
+} catch { /* 没装 electron-updater 就走 dmg */ }
+// 这个 Release 能不能自动装：拿得到 yml，且有当前架构能用的 zip（Intel 机器上 arm64 包不算，electron-updater 也会排除它）
+async function probeAutoUpdate() {
+  if (!autoUpdater || !app.isPackaged) return false;
+  try {
+    const r = await autoUpdater.checkForUpdates();
+    if (!r || !r.isUpdateAvailable) return false;
+    const arm = process.arch === 'arm64';
+    return (r.updateInfo.files || []).some((f) => /\.zip$/i.test(f.url) && (arm || !/arm64/i.test(f.url)));
+  } catch { return false; }
+}
+ipcMain.handle('update:install', async () => {
+  if (!autoUpdater || !pendingUpdate || !pendingUpdate.auto) return { ok: false, error: 'no-auto' };
+  if (updReady) return { ok: true, ready: true };
+  if (updInstalling) return { ok: false, error: 'busy' };
+  updInstalling = true;
+  try { await autoUpdater.downloadUpdate(); updReady = true; return { ok: true, ready: true }; }
+  catch (err) { const msg = String((err && err.message) || err); sendUpd({ state: 'error', error: msg }); return { ok: false, error: msg }; }
+  finally { updInstalling = false; }
+});
+ipcMain.handle('update:restart', () => {
+  if (!updReady || !autoUpdater) return { ok: false };
+  isQuitting = true; // 和菜单退出同款：红叉只是隐藏窗口，这里要真退。agent 正在干活时 before-quit 照常拦一道确认
+  autoUpdater.quitAndInstall();
+  return { ok: true };
+});
 
 // #26 应用内下载更新：按当前架构拼 dmg 资产地址（发布产物统一 FanBox-<版本>-<arch>.dmg），
 // 下到 ~/Downloads 后直接打开挂载，拖进 Applications 即完成。全自动安装（Squirrel）仍要等 Developer ID 签名

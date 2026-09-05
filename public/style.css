@@ -192,7 +192,9 @@ kbd {
 .side-link:hover { background: var(--bg-3); color: var(--text); }
 .side-link svg { flex-shrink: 0; }
 
-/* 合盖继续干活：工具簇里唯一的开关行，行高与 .side-link 对齐，右侧一个状态点 + 拨杆 */
+/* 合盖继续干活：工具簇里唯一的开关行，行高与 .side-link 对齐，右侧一个状态点 + 拨杆。
+   ⚠️ .pw-switch 不只这里用——定时任务面板每条任务的启用/停用开关复用同一套 class（app.js cronPanel.render）。
+   2.15.0 做减法时把侧栏开关连同这段 CSS 一起删了，定时任务的开关跟着变成 0×0 隐形，看不见也点不到。删改前先 grep。 */
 .pw-row { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 7px; cursor: pointer; user-select: none; color: var(--text-dim); transition: 0.12s; }
 .pw-row.hidden { display: none; }
 .pw-row:hover { background: var(--bg-3); color: var(--text); }
@@ -1413,7 +1415,7 @@ body { transition: background-color 0.28s ease, color 0.28s ease; }
 .update-pill .up-go:hover { filter: brightness(1.06); }
 .update-pill .up-x { border: none; background: none; color: var(--text-dim); cursor: pointer; font-size: 12px; padding: 2px 4px; }
 .update-pill .up-x:hover { color: var(--text); }
-.update-pill .up-dl:disabled { opacity: 0.75; cursor: default; }
+.update-pill .up-go:disabled { opacity: 0.75; cursor: default; }
 .update-pill .up-page { border: 1px solid var(--border); background: none; color: var(--text-dim); border-radius: 999px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
 .update-pill .up-page:hover { color: var(--text); border-color: var(--text-dim); }
 

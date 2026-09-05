@@ -20,10 +20,32 @@
 
 ### Removed
 - **Skills 硬切换删除清单**（docs/16 §3）：替代接口全部就位后删净旧机制——退役逐项启停端点 `/api/skills/toggle`（连同 claude-settings / codex-config / directory 三策略代码，Claude 不再读写 settings.json 的 skillOverrides、Codex 不再经旧端点投影 config.toml）与拷贝式导入端点 `/api/skills/import`（连同 `SKILL_IMPORT_TARGETS`、扫描项上的 `importTargets` 目标列表和前端「导入到…」入口与目标选择器）。接入一律走单一 `/api/skills/link` 四列分发，外部内容进原件仓只剩发现页安装与收编两个门；WorkBuddy 的 `skills_disabled` 停用位照常工作，历史 `skills/_disabled` 目录保持只读识别并引导收编
+
+## [2.16.1] - 2026-09-04
+
+### 修复
+- **2.16.0 里「更新」按钮大多数时候显示成「下载更新」**：主进程在探测「能不能自动装」还没跑完时就把带 auto:false 的状态暴露给了渲染层，而窗口一获得焦点就会触发一次检查，正好撞上渲染层初始化去拉更新状态——于是先画出的是 dmg 那颗按钮，随后带 auto:true 的推送因「胶囊已存在」被跳过。现在探测完成后才落状态。自动更新通道本身没问题：2.15.2 的测试包对着线上 2.16.0 走完「更新 → 下载 → 重启安装」，包内版本正确换成 2.16.0。装了 2.16.0 的用户这次会看到「下载更新」（dmg 那条路照常能用），从 2.16.1 起才是全自动
+
+
+
+### 新增
+- **应用内一键更新：后台下载、重启即换好**（#26）：右下角新版本胶囊上的按钮从「下载更新」变成「更新」——点一下，electron-updater 在后台拉当前架构的 zip（胶囊上显示百分比），下完按钮变「重启安装」，点了 Squirrel.Mac 原地换包并重新打开；没点的话下次退出 app 时也会自动装上。菜单「检查更新…」同样走这条路。2.4.1 起就是 Developer ID 签名加公证，签名校验早就过得了，这笔账拖了两个月。老 Release 没有 latest-mac.yml、或者这个 Release 没发当前架构的包（Intel 机器上 arm64 包不算）时，自动退回原来的「下载 dmg 到「下载」文件夹」；下载中途失败也退回那条路，不会卡住。本版本自己还得手动装一次，从下个版本起生效
+- **发版产物多了 zip、blockmap 和 latest-mac.yml**：electron-builder 的 mac target 加了 zip（自动更新读的是 zip 不是 dmg），`publish` 段只用来生成 app-update.yml / latest-mac.yml，`dist` 脚本带 `--publish never` 不在本机直传。发版向导的 `gh release create` 已把三样一起挂上；手动发版记得 dmg、zip、zip.blockmap、latest-mac.yml 四个都传，缺 yml 老版本就只能手动下 dmg
+- **⌘K 里全文搜索改成一键开关**（PR #51，@jhoncao）：搜索框右侧多了「▤ 搜内容」胶囊，点一下或按 ⇧Tab 就切到全文搜索（含 PDF、截图 OCR），直接输关键词即可，不用再先敲「内容:」前缀；前缀写法仍然兼容。placeholder 和空态提示随模式切换
+- **⌘⇧M 一键铺满 / 还原终端**（PR #53，@jhoncao）：焦点在终端里敲 agent 时也响应；终端收着时按下先打开再铺满。只认 ⌘ 组合，Ctrl+Shift+M 留给终端里的 TUI。「…」菜单里的「终端铺满」项标上了快捷键
+- **`.jsonl` 按文本打开和编辑**（PR #46，@ajia1206）：Claude Code / Codex 的会话日志、各种 NDJSON 数据文件此前被当成未知二进制，只能看文件名。现在预览、编辑器 JSON 高亮、图标都按 JSON 处理，`/api/raw` 以 `application/x-ndjson` 提供
+- **Skills 透视识别「skill 合集仓库」**（PR #11，@Wenjunyun123）：superpowers 这类仓库根目录没有 SKILL.md、真正的 skill 在 `skills/*/SKILL.md` 下，之前整个仓库被标成「缺 SKILL.md——不是有效 skill」。现在会往下一层扫出里面的 skill，条目标签带上合集名；普通的缺 SKILL.md 目录照旧告警。注意 Claude Code 自己并不递归加载这类嵌套目录，这里只是把它们列出来
+
+### 变更
+- **删到废纸篓 / 用系统打开 / 在访达显示 / 系统终端打开，改为 `execFile` 传参数组**（PR #58，@anupamme）：原来是拼命令行字符串交给 shell，路径经 `shellQuote` 转义本身没有注入漏洞，但改成参数直传后不再依赖转义正确，semgrep 也不再报 `detect-child-process`。带单引号的文件名删除实测正常
+
 ## [2.15.2] - 2026-09-03
 
 ### 变更
 - **「合盖继续干活」开关回到侧栏**：上一版做减法时把它和「微信遥控不断线」一起收进了原生「视图」菜单，但这个开关是出门前顺手一勾的高频动作，藏进菜单等于每次要多两步找。现在它单独回到侧栏「工具」组最后一行，行内一个绿点标明此刻是不是真的拦着休眠，悬停出解释卡（含「现在几个终端在跑、有没有 agent 在干活」的实时判定）。低频的「微信遥控不断线」留在「视图」菜单，两处读同一份状态，勾选永远一致
+
+### 修复
+- **定时任务的启用/停用开关消失（2.15.0、2.15.1 受影响）**：2.15.0 做减法删掉侧栏两个电源开关时，把 `.pw-row / .pw-switch / .pw-dot` 整块 CSS 一并删了，而定时任务面板里每条任务左边的开关复用同一套 class——CSS 一没，那个 `<label>` 就成了 0×0 的空元素，看不见也点不到，任务只能删不能停。调度逻辑与 `/api/cron/toggle` 一直是好的。本版把这段 CSS 带了回来，并在它上面写明被两处共用，避免下次做减法再删
 
 ## [2.15.1] - 2026-09-03
 

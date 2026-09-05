@@ -80,7 +80,7 @@ const EXT_KIND = {
   c: ['code', '#7b9ae8'], cpp: ['code', '#7b9ae8'], h: ['code', '#7b9ae8'], php: ['code', '#9a7be8'],
   vue: ['code', '#5bd6a0'], sh: ['code', '#9aa3b2'], bash: ['code', '#9aa3b2'], lua: ['code', '#5b9ae8'],
   html: ['code', '#e87b5b'], htm: ['code', '#e87b5b'], css: ['code', '#5b9ae8'], scss: ['code', '#e85b9a'],
-  json: ['json', '#e8c95b'], json5: ['json', '#e8c95b'], yml: ['json', '#d65b9a'], yaml: ['json', '#d65b9a'],
+  json: ['json', '#e8c95b'], jsonl: ['json', '#e8c95b'], json5: ['json', '#e8c95b'], yml: ['json', '#d65b9a'], yaml: ['json', '#d65b9a'],
   toml: ['json', '#9a7be8'], ini: ['json', '#9aa3b2'], env: ['json', '#e8c95b'], xml: ['code', '#9aa3b2'],
   md: ['text', '#7bc9e8'], markdown: ['text', '#7bc9e8'], txt: ['text', '#9aa3b2'], log: ['text', '#9aa3b2'],
   csv: ['data', '#5bd6a0'], tsv: ['data', '#5bd6a0'], sql: ['data', '#e8a85b'],
@@ -149,7 +149,7 @@ const DOC_TYPES = {
   md: ['MD', 7, '#3B82F6', '#2E68C8'], markdown: ['MD', 7, '#3B82F6', '#2E68C8'],
   html: ['&lt;&gt;', 7, '#E8662A', '#C4541F'], htm: ['&lt;&gt;', 7, '#E8662A', '#C4541F'],
   css: ['CSS', 5, '#2D6FD6', '#2459AC'], scss: ['SCSS', 4, '#CF649A', '#A94E7C'], less: ['LESS', 4, '#2D5B8A', '#244A70'],
-  json: ['{ }', 7, '#A6824C', '#856A3E'], json5: ['{ }', 7, '#A6824C', '#856A3E'],
+  json: ['{ }', 7, '#A6824C', '#856A3E'], jsonl: ['{ }', 7, '#A6824C', '#856A3E'], json5: ['{ }', 7, '#A6824C', '#856A3E'],
   yml: ['YML', 5, '#9C5BD6', '#7E49AC'], yaml: ['YAML', 4.2, '#9C5BD6', '#7E49AC'], toml: ['TOML', 4.2, '#9C5BD6', '#7E49AC'],
   xml: ['XML', 5, '#5E8A3E', '#4A6E31'], svg: ['SVG', 5, '#E8923A', '#C4761F'],
   csv: ['CSV', 5, '#1FAE5A', '#188F4A'], tsv: ['TSV', 5, '#1FAE5A', '#188F4A'],
@@ -2673,29 +2673,44 @@ function truncNote() {
 
 // ---------- 命令面板 ----------
 const cmdk = {
-  results: [], active: 0, timer: null, scopeAll: true,
+  results: [], active: 0, timer: null, scopeAll: true, contentMode: false,
   open() {
     $('#cmdk').classList.remove('hidden');
     this.updateScopeLabel();
+    this.updateModeLabel();
     const inp = $('#cmdk-input');
     inp.value = '';
     inp.focus();
-    $('#cmdk-results').innerHTML = '<div class="cmdk-loading">输入开始搜索 · 文件名模糊匹配，「内容:」搜全文（含 PDF、截图里的文字）</div>';
+    $('#cmdk-results').innerHTML = `<div class="cmdk-loading">${this.emptyHint()}</div>`;
     this.results = [];
     this.active = 0;
   },
   close() { $('#cmdk').classList.add('hidden'); },
   toggleScope() { this.scopeAll = !this.scopeAll; this.updateScopeLabel(); this.search($('#cmdk-input').value); },
+  // 全文搜索开关：点「搜内容」或 ⇧Tab 即切换，不用再手输「内容:」前缀（前缀仍兼容）
+  toggleMode() { this.contentMode = !this.contentMode; this.updateModeLabel(); this.search($('#cmdk-input').value); },
   root() { return this.scopeAll ? state.home : (state.cwd || state.home); },
   updateScopeLabel() {
     $('#cmdk-scope').textContent = this.scopeAll ? '全机（主目录及以下）' : '当前目录 ' + tilde(state.cwd || state.home);
     $('#scope-toggle').textContent = this.scopeAll ? '⤢ 全机' : '▢ 当前目录';
     $('#scope-toggle').classList.toggle('on', this.scopeAll);
   },
+  updateModeLabel() {
+    $('#mode-toggle').classList.toggle('on', this.contentMode);
+    $('#cmdk-input').placeholder = this.contentMode
+      ? '搜文件内容（全文，含 PDF、截图里的文字）…'
+      : '按文件名搜索…   用 “内容:” 前缀搜文件内容，如 “内容:useState”';
+    if (!$('#cmdk-input').value.trim()) $('#cmdk-results').innerHTML = `<div class="cmdk-loading">${this.emptyHint()}</div>`;
+  },
+  emptyHint() {
+    return this.contentMode
+      ? '输入开始搜索 · 全文搜索（含 PDF、截图里的文字）'
+      : '输入开始搜索 · 文件名模糊匹配，点「搜内容」或用「内容:」前缀搜全文（含 PDF、截图里的文字）';
+  },
   search(q) {
     clearTimeout(this.timer);
-    if (!q.trim()) { $('#cmdk-results').innerHTML = '<div class="cmdk-loading">输入开始搜索</div>'; return; }
-    const isContent = /^(内容[:：]|content:)/i.test(q);
+    if (!q.trim()) { $('#cmdk-results').innerHTML = `<div class="cmdk-loading">${this.emptyHint()}</div>`; return; }
+    const isContent = this.contentMode || /^(内容[:：]|content:)/i.test(q);
     $('#cmdk-results').innerHTML = '<div class="cmdk-loading">搜索中…</div>';
     this.timer = setTimeout(async () => {
       const root = this.root();
@@ -3384,7 +3399,7 @@ function bindEvents() {
   // 终端「…」：低频工具按当前状态给动词，菜单项自己说明会发生什么
   $('#term-more').onclick = (ev) => (ev.stopPropagation(), popupMenuAt(ev.currentTarget, [
     { label: follow.on ? '停止文件跟随' : '开启文件跟随', fn: () => setFileFollow(!follow.on) },
-    { label: term.maximized ? '还原终端' : '终端铺满', fn: () => term.toggleMax() },
+    { label: term.maximized ? '还原终端（⌘⇧M）' : '终端铺满（⌘⇧M）', fn: () => term.toggleMax() },
     { label: term.dock === 'bottom' ? '布局改为左右' : '布局改为上下', fn: () => term.setDock(term.dock === 'bottom' ? 'right' : 'bottom') },
     { label: state.muted ? '开启提示音' : '关闭提示音', fn: () => { state.muted = !state.muted; localStorage.setItem('fb_muted', state.muted ? '1' : '0'); if (!state.muted) playChime('tick'); } },
     { label: '终端录像', fn: () => player.open() },
@@ -3483,6 +3498,7 @@ function bindEvents() {
   document.addEventListener('click', (e) => { if (!e.target.closest('#context-menu')) closeContextMenu(); });
   window.addEventListener('blur', closeContextMenu);
   $('#scope-toggle').onclick = () => cmdk.toggleScope();
+  $('#mode-toggle').onclick = () => { cmdk.toggleMode(); $('#cmdk-input').focus(); };
 
   $('#toggle-hidden').checked = state.showHidden;
   $('#toggle-hidden').onchange = (e) => { state.showHidden = e.target.checked; localStorage.setItem('fb_hidden', state.showHidden ? '1' : '0'); renderFiles(); };
@@ -3521,11 +3537,19 @@ function bindEvents() {
     const lbOpen = !!document.querySelector('.lightbox');
     if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'g' || e.key === 'G')) { e.preventDefault(); gotoPath.open(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); cmdkOpen ? cmdk.close() : cmdk.open(); return; }
+    // ⌘⇧M 终端铺满/还原（只认 ⌘，Ctrl 组合留给终端里的 TUI）；终端收着时先打开再铺满
+    if (e.metaKey && e.shiftKey && (e.key === 'm' || e.key === 'M')) {
+      if (!term.available()) return; // 浏览器版没有内嵌终端
+      e.preventDefault();
+      if ($('#terminal-panel').classList.contains('hidden')) { term.open(); term.toggleMax(true); }
+      else term.toggleMax();
+      return;
+    }
     if (cmdkOpen) {
       if (e.key === 'Escape') cmdk.close();
       else if (e.key === 'ArrowDown') { e.preventDefault(); cmdk.move(1); }
       else if (e.key === 'ArrowUp') { e.preventDefault(); cmdk.move(-1); }
-      else if (e.key === 'Tab') { e.preventDefault(); cmdk.toggleScope(); }
+      else if (e.key === 'Tab') { e.preventDefault(); e.shiftKey ? cmdk.toggleMode() : cmdk.toggleScope(); }
       else if (e.key === 'Enter') { e.preventDefault(); cmdk.choose(cmdk.active, e.metaKey || e.ctrlKey); }
       return;
     }
@@ -4747,6 +4771,7 @@ const term = {
         return false;
       }
       if (cmd && e.altKey && e.code === 'KeyL') return false; // ⌘⌥L 跳「下一个在等你的」：不给 xterm，冒泡到全局快捷键
+    if (cmd && e.shiftKey && e.code === 'KeyM') return false; // ⌘⇧M 终端铺满/还原：同上，冒泡到全局快捷键（PR #53）
       return true;
     });
 
@@ -6864,7 +6889,7 @@ const mona = {
   lang(ex) {
     const m = {
       js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript',
-      json: 'json', json5: 'json', jsonc: 'json', md: 'markdown', markdown: 'markdown', html: 'html', htm: 'html', vue: 'html',
+      json: 'json', jsonl: 'json', json5: 'json', jsonc: 'json', md: 'markdown', markdown: 'markdown', html: 'html', htm: 'html', vue: 'html',
       css: 'css', scss: 'scss', less: 'less', py: 'python', go: 'go', rs: 'rust', java: 'java', rb: 'ruby', php: 'php',
       c: 'c', cpp: 'cpp', cc: 'cpp', h: 'cpp', hpp: 'cpp', cs: 'csharp', sh: 'shell', bash: 'shell', zsh: 'shell',
       yml: 'yaml', yaml: 'yaml', toml: 'ini', ini: 'ini', conf: 'ini', xml: 'xml', sql: 'sql', swift: 'swift', lua: 'lua', kt: 'kotlin', dart: 'dart', r: 'r',
@@ -8080,39 +8105,67 @@ async function init() {
   maybeShowGuide();
   bindUpdateNotice();
 }
-// 新版本提示：主进程查到 GitHub 有新 Release 时右下角弹胶囊，引导去下载页（不强更不打扰）
+// 新版本提示：主进程查到 GitHub 有新 Release 时右下角弹胶囊（不强更不打扰）。
+// 三档：能自动装（Release 带 latest-mac.yml + 同架构 zip）→「更新」后台下载、下完「重启安装」；
+// 不能自动装但有 dmg →「下载更新」到 ~/Downloads 打开挂载；老 preload →「去下载」开发布页
 function bindUpdateNotice() {
   if (!window.fanboxUpdate) return;
-  const show = ({ version, url }) => {
-    if (localStorage.getItem('fb_skip_ver') === version || document.querySelector('.update-pill')) return;
+  const show = ({ version, url, auto, manual, start }) => {
+    if (!manual && localStorage.getItem('fb_skip_ver') === version) return;
+    const old = document.querySelector('.update-pill');
+    if (old) { if (!manual) return; old.remove(); } // 菜单「检查更新…」触发的要重画（可能已被 ✕ 掉）
     const bar = document.createElement('div');
     bar.className = 'update-pill';
+    const canAuto = !!auto && typeof window.fanboxUpdate.install === 'function';
     const canDl = typeof window.fanboxUpdate.download === 'function'; // 老 preload 没这桥，降级只留发布页
     bar.innerHTML = `<span class="up-msg">新版本 v${escapeHtml(version)} 已发布</span>`
-      + (canDl ? '<button class="up-go up-dl">下载更新</button><button class="up-page">发布页</button>' : '<button class="up-go">去下载</button>')
+      + (canAuto ? '<button class="up-go up-auto">更新</button><button class="up-page">发布页</button>'
+        : canDl ? '<button class="up-go up-dl">下载更新</button><button class="up-page">发布页</button>'
+          : '<button class="up-go">去下载</button>')
       + '<button class="up-x" title="这个版本不再提醒">✕</button>';
     document.body.appendChild(bar);
-    // #26 一键下载：主进程按当前架构下对应 dmg 到 ~/Downloads 并打开挂载，拖一下完成更新
+    const msg = bar.querySelector('.up-msg');
+    // 进度只喂给「正在下载」的那颗按钮（自动更新和 dmg 下载共用同一条推送）；胶囊撤掉时解绑
+    const off = window.fanboxUpdate.onProgress ? window.fanboxUpdate.onProgress((m) => {
+      const btn = bar.querySelector('.up-go:disabled');
+      if (m.state === 'downloading' && btn) btn.textContent = m.pct >= 0 ? `下载中 ${m.pct}%` : '下载中…';
+    }) : null;
+    const dismiss = () => { if (off) off(); bar.remove(); };
+    const au = bar.querySelector('.up-auto');
+    if (au) {
+      // #26 全自动：主进程 electron-updater 下载，resolve 即可重启换包；不点「重启安装」，退出 app 时也会装上
+      au.onclick = async () => {
+        au.disabled = true; au.textContent = '下载中…';
+        const r = await window.fanboxUpdate.install().catch(() => ({ ok: false }));
+        if (r && r.ok) {
+          msg.textContent = `v${version} 已下载，重启即完成更新`;
+          au.disabled = false; au.textContent = '重启安装';
+          au.onclick = () => window.fanboxUpdate.restart();
+        } else {
+          // 自动更新走不通（网络断了、包没发全）就退回 dmg 那条路，别让人卡在这
+          toast('自动更新失败，改为下载安装包', true);
+          dismiss(); show({ version, url, auto: false, manual: true });
+        }
+      };
+      if (start) au.click();
+    }
     const dl = bar.querySelector('.up-dl');
     if (dl) {
+      // 一键下载：主进程按当前架构下对应 dmg 到 ~/Downloads 并打开挂载，拖一下完成更新
       dl.onclick = async () => {
         dl.disabled = true; dl.textContent = '下载中…';
         const r = await window.fanboxUpdate.download(version).catch(() => ({ ok: false }));
-        if (r && r.ok) { bar.querySelector('.up-msg').textContent = '已下载并打开 dmg，拖进 Applications 完成更新'; dl.remove(); }
+        if (r && r.ok) { msg.textContent = '已下载并打开 dmg，拖进 Applications 完成更新'; dl.remove(); }
         else {
           dl.disabled = false; dl.textContent = '下载更新';
           // no-asset：这个 Release 没发当前架构的 dmg，主进程已经把发布页开出来了
           toast(r && r.error === 'no-asset' ? `这个版本没有 ${r.arch} 安装包，已打开发布页` : '下载失败，去发布页手动下吧', true);
         }
       };
-      if (window.fanboxUpdate.onProgress) window.fanboxUpdate.onProgress((m) => {
-        if (m.state === 'downloading' && dl.disabled) dl.textContent = m.pct >= 0 ? `下载中 ${m.pct}%` : '下载中…';
-      });
-      bar.querySelector('.up-page').onclick = () => window.fanboxUpdate.open(url);
-    } else {
-      bar.querySelector('.up-go').onclick = () => { window.fanboxUpdate.open(url); bar.remove(); };
     }
-    bar.querySelector('.up-x').onclick = () => { localStorage.setItem('fb_skip_ver', version); bar.remove(); };
+    if (au || dl) bar.querySelector('.up-page').onclick = () => window.fanboxUpdate.open(url);
+    else bar.querySelector('.up-go').onclick = () => { window.fanboxUpdate.open(url); dismiss(); };
+    bar.querySelector('.up-x').onclick = () => { localStorage.setItem('fb_skip_ver', version); dismiss(); };
   };
   window.fanboxUpdate.onAvailable(show);
   // 主进程启动 6 秒就推送，init 加载大目录时这里可能还没注册监听——补拉一次，错过的推送不丢

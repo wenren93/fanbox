@@ -175,10 +175,11 @@
       <div class="cmdk-input-wrap">
         <span class="cmdk-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#9aa3b2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
         <input id="cmdk-input" placeholder="按文件名搜索…   用 “内容:” 前缀搜文件内容，如 “内容:useState”" autocomplete="off" />
+        <button id="mode-toggle" class="scope-toggle" title="按内容全文搜索（⇧Tab）">▤ 搜内容</button>
         <button id="scope-toggle" class="scope-toggle on" title="切换搜索范围（Tab）">⤢ 全机</button>
         <kbd>ESC</kbd>
       </div>
-      <div id="cmdk-hint" class="cmdk-hint">范围：<b id="cmdk-scope"></b> · Tab 切换范围 · ↑↓ 选择 · ↵ 打开 · ⌘↵ 在编辑器打开</div>
+      <div id="cmdk-hint" class="cmdk-hint">范围：<b id="cmdk-scope"></b> · Tab 切换范围 · ⇧Tab 搜内容 · ↑↓ 选择 · ↵ 打开 · ⌘↵ 在编辑器打开</div>
       <ul id="cmdk-results" class="cmdk-results"></ul>
     </div>
   </div>

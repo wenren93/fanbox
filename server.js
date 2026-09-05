@@ -34,7 +34,7 @@ const IGNORE_DIRS = new Set([
 ]);
 
 const TEXT_EXT = new Set([
-  'txt', 'md', 'markdown', 'js', 'jsx', 'ts', 'tsx', 'mts', 'cts', 'mjs', 'cjs', 'json', 'json5',
+  'txt', 'md', 'markdown', 'js', 'jsx', 'ts', 'tsx', 'mts', 'cts', 'mjs', 'cjs', 'json', 'jsonl', 'json5',
   'html', 'htm', 'css', 'scss', 'less', 'py', 'rb', 'go', 'rs', 'java', 'kt', 'swift',
   'c', 'h', 'cpp', 'hpp', 'cc', 'm', 'mm', 'sh', 'bash', 'zsh', 'fish', 'sql', 'yml',
   'yaml', 'toml', 'ini', 'env', 'conf', 'xml', 'svg', 'vue', 'astro', 'php', 'lua',
@@ -51,7 +51,7 @@ const ARCHIVE_EXT = new Set(['zip', 'jar', 'tar', 'tgz', 'gz', 'bz2', 'xz', '7z'
 const MIME = {
   html: 'text/html; charset=utf-8', htm: 'text/html; charset=utf-8',
   js: 'application/javascript; charset=utf-8', css: 'text/css; charset=utf-8',
-  json: 'application/json; charset=utf-8', svg: 'image/svg+xml',
+  json: 'application/json; charset=utf-8', jsonl: 'application/x-ndjson; charset=utf-8', svg: 'image/svg+xml',
   png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
   webp: 'image/webp', bmp: 'image/bmp', ico: 'image/x-icon', avif: 'image/avif',
   mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', m4v: 'video/mp4',
@@ -492,19 +492,21 @@ function trashPath(p) {
     try { target = resolvePath(p); } catch { return resolve({ ok: false, error: '非法路径' }); }
     let isDir = false;
     try { isDir = fs.lstatSync(target).isDirectory(); } catch { return resolve({ ok: false, error: '文件不存在' }); }
-    let cmd;
+    let bin, args;
     if (PLATFORM === 'darwin') {
       // 路径走 argv，不拼进单引号 AppleScript 字面量——避免含 ' 的文件名删除失败/注入
       // POSIX file 必须 as alias 强转，否则 Finder 解析不了报 -1728
-      cmd = `osascript -e 'on run argv' -e 'tell application "Finder" to delete (POSIX file (item 1 of argv) as alias)' -e 'end run' ${shellQuote(target)}`;
+      bin = 'osascript';
+      args = ['-e', 'on run argv', '-e', 'tell application "Finder" to delete (POSIX file (item 1 of argv) as alias)', '-e', 'end run', target];
     } else if (PLATFORM === 'win32') {
       const method = isDir ? 'DeleteDirectory' : 'DeleteFile';
-      const ps = target.replace(/'/g, "''");
-      cmd = `powershell -NoProfile -Command "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::${method}('${ps}','OnlyErrorDialogs','SendToRecycleBin')"`;
+      bin = 'powershell';
+      args = ['-NoProfile', '-Command', `Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::${method}('${target.replace(/'/g, "''")}','OnlyErrorDialogs','SendToRecycleBin')`];
     } else {
-      cmd = `gio trash ${shellQuote(target)} || trash-put ${shellQuote(target)} || trash ${shellQuote(target)}`;
+      bin = 'sh';
+      args = ['-c', 'gio trash "$1" || trash-put "$1" || trash "$1"', '--', target];
     }
-    exec(cmd, (err) => {
+    execFile(bin, args, (err) => {
       if (!err) return resolve({ ok: true });
       let msg = err.message;
       // Finder 自动化未授权（-1743/-600）给人话
@@ -702,7 +704,7 @@ async function releasePrepare(b) {
   if (b.doDist) steps.push('npm run dist');
   steps.push('git add -A', `git commit -m ${shellQuote(`v${version}: ${title || '发版'}`)}`);
   if (b.doPush) steps.push('git push');
-  if (b.doRelease) steps.push(`gh release create v${version} --title ${shellQuote(`v${version}${title ? ' · ' + title : ''}`)} --notes-file ${shellQuote(notesFile)}${b.doDist ? ` dist/*${version}*.dmg` : ''}`);
+  if (b.doRelease) steps.push(`gh release create v${version} --title ${shellQuote(`v${version}${title ? ' · ' + title : ''}`)} --notes-file ${shellQuote(notesFile)}${b.doDist ? ` dist/*${version}*.dmg dist/*${version}*.zip* dist/latest-mac.yml` : ''}`); // zip + blockmap + yml 是应用内自动更新（electron-updater）读的，缺一个老版本就只能手动下 dmg
   return { ok: true, cmd: steps.join(' && ') };
 }
 
@@ -1522,10 +1524,11 @@ function openInOS(target, withApp) {
     if (withApp === 'terminal') {
       // 在该目录（文件则取其所在目录）打开系统终端，找回项目后一键去跑
       const dir = (() => { try { return fs.statSync(target).isDirectory() ? target : path.dirname(target); } catch { return path.dirname(target); } })();
-      if (PLATFORM === 'darwin') cmd = `open -a Terminal ${shellQuote(dir)}`;
-      else if (PLATFORM === 'win32') cmd = `start "" cmd /K cd /d "${dir}"`;
-      else cmd = `x-terminal-emulator --working-directory=${shellQuote(dir)} || gnome-terminal --working-directory=${shellQuote(dir)} || xterm`;
-      exec(cmd, (err) => resolve(err ? { ok: false, error: err.message } : { ok: true, with: 'terminal' }));
+      let tBin, tArgs;
+      if (PLATFORM === 'darwin') { tBin = 'open'; tArgs = ['-a', 'Terminal', dir]; }
+      else if (PLATFORM === 'win32') { tBin = 'cmd.exe'; tArgs = ['/c', 'start', '', 'cmd', '/K', 'cd', '/d', dir]; }
+      else { tBin = 'sh'; tArgs = ['-c', 'x-terminal-emulator --working-directory="$1" || gnome-terminal --working-directory="$1" || xterm', '--', dir]; }
+      execFile(tBin, tArgs, (err) => resolve(err ? { ok: false, error: err.message } : { ok: true, with: 'terminal' }));
       return;
     }
     if (withApp === 'editor') {
@@ -1546,18 +1549,18 @@ function openInOS(target, withApp) {
 
 function openDefault(target, withApp) {
   return new Promise((resolve) => {
-    let cmd;
+    let bin, args;
     if (PLATFORM === 'darwin') {
-      if (withApp === 'reveal') cmd = `open -R ${shellQuote(target)}`;
-      else cmd = `open ${shellQuote(target)}`;
+      if (withApp === 'reveal') { bin = 'open'; args = ['-R', target]; }
+      else { bin = 'open'; args = [target]; }
     } else if (PLATFORM === 'win32') {
-      if (withApp === 'reveal') cmd = `explorer /select,"${target}"`;
-      else cmd = `start "" "${target}"`;
+      if (withApp === 'reveal') { bin = 'explorer.exe'; args = ['/select,' + target]; }
+      else { bin = 'cmd.exe'; args = ['/c', 'start', '', target]; }
     } else {
-      if (withApp === 'reveal') cmd = `xdg-open ${shellQuote(path.dirname(target))}`;
-      else cmd = `xdg-open ${shellQuote(target)}`;
+      if (withApp === 'reveal') { bin = 'xdg-open'; args = [path.dirname(target)]; }
+      else { bin = 'xdg-open'; args = [target]; }
     }
-    exec(cmd, (err) => {
+    execFile(bin, args, (err) => {
       if (err) resolve({ ok: false, error: err.message });
       else resolve({ ok: true, with: withApp || 'default' });
     });
@@ -2447,6 +2450,20 @@ function skillFrontmatter(txt) {
   return { name, desc };
 }
 
+async function scanNestedSkillBundle(fp, source, label, out, disabled) {
+  const nestedRoot = path.join(fp, 'skills');
+  let nestedNames;
+  try { nestedNames = await fsp.readdir(nestedRoot, { withFileTypes: true }); } catch { return false; }
+  let hasSkills = false;
+  for (const x of nestedNames) {
+    if (!x.isDirectory() || x.name.startsWith('.')) continue;
+    try { await fsp.access(path.join(nestedRoot, x.name, 'SKILL.md')); hasSkills = true; break; } catch { /* not a skill */ }
+  }
+  if (!hasSkills) return false;
+  await scanSkillRoot(nestedRoot, source, `${label}/${path.basename(fp)}`, out, disabled);
+  return true;
+}
+
 async function scanSkillRoot(root, source, label, out, disabled = false, meta = null) {
   let names;
   try { names = await fsp.readdir(root, { withFileTypes: true }); } catch { return; }
@@ -2501,6 +2518,7 @@ async function scanSkillRoot(root, source, label, out, disabled = false, meta = 
         }
       }
     } catch {
+      if (await scanNestedSkillBundle(fp, source, label, out, disabled)) continue;
       item.skillName = item.name;
       item.residue = true;
       item.issues.push('缺 SKILL.md——不是有效 skill');
