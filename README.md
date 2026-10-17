@@ -240,8 +240,8 @@ SANDCASTLE_BRANCH=one/my-task CODEX_MODEL=gpt-5.6-sol CODEX_EFFORT=high \
   Discover contacts skills.sh directly from your Mac only after explicit submission. It receives the query and fixed result limit—not your local Skills, project path, target Agent, or install history. FanBox retains only the latest successful query and up to 20 results for 24 hours, with no search-history log or new product telemetry.
 - 发起“检查并安装”时，GitHub Git 服务收到公开仓库地址以解析 HEAD；GitHub codeload 收到仓库与完整 40 位 commit SHA 以下载固定归档。FanBox 不发送 GitHub 凭证，不支持私有仓库，不执行外部脚本、安装依赖或调用 Agent 审查远端内容。\
   Check and Install sends the public repository address to GitHub's Git service to resolve HEAD, then sends the repository and full 40-character commit SHA to GitHub codeload for a pinned archive. FanBox sends no GitHub credentials, does not support private repositories, and never runs external scripts, installs dependencies, or asks an Agent to judge remote content.
-- 其他现有可选出网行为仍包括 Claude 用量接口和 GitHub Release 更新检查。\
-  Other existing optional outbound calls remain the Claude usage API and GitHub Release update check.
+- 其他现有可选出网行为包括 Claude 与 Codex 官方额度接口，以及 GitHub Release 更新检查。本地 token 日志只在本机统计。\
+  Other existing optional outbound calls are the official Claude and Codex quota endpoints and the GitHub Release update check. Local token logs are processed on-device.
 - Markdown 渲染先过 DOMPurify，页面带 CSP（脚本只认本地文件、不放行内联与 eval）；所有写类接口要带每次启动随机生成、不落盘的 token，本机其他进程直接 curl 也进不来。  
   Markdown goes through DOMPurify and the page ships a CSP (local scripts only, no inline/eval); every write endpoint requires a per-launch random token that never touches disk, so other local processes can't drive it.
 - HTML 预览在隔离 origin 的沙箱 iframe 里渲染，预览不可信网页也碰不到终端能力。  

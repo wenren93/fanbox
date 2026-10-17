@@ -1,6 +1,6 @@
 {
   "name": "fanbox",
-  "version": "2.16.1",
+  "version": "2.17.0",
   "description": "FanBox — the cockpit for coding agents. Command Claude Code or Codex, watch every file and line they change, and take over anytime.",
   "bin": {
     "fanbox": "server.js"
@@ -10,7 +10,7 @@
     "start": "node server.js",
     "app": "electron .",
     "wechat:send": "node scripts/send-wechat-message.js",
-    "test": "node --test test/*.test.js",
+    "test": "node --test test/*.test.js tests/*.test.js",
     "typecheck": "tsc -p tsconfig.sandcastle.json",
     "rebuild": "electron-rebuild -f -w node-pty",
     "rebuild:pty": "cd node_modules/node-pty && node-gyp rebuild --target=$(node -p \"require('electron/package.json').version\") --dist-url=https://www.electronjs.org/headers --arch=$PTY_ARCH",
@@ -35,6 +35,8 @@
       "!_archive{,/**/*}",
       "!design-demos{,/**/*}",
       "!experiments{,/**/*}",
+      "!tests{,/**/*}",
+      "!发布{,/**/*}",
       "!docs{,/**/*}",
       "!素材{,/**/*}",
       "!assets{,/**/*}",
