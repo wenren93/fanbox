@@ -90,6 +90,25 @@ function codexUserNotify() {
 // agentImpl（定义在 agent 各方法之后）真执行，再按 id 回 {type:'agent:reply'}。
 let backendProc = null;
 let backendRestarts = 0;
+// cron 实现随 server.js 留在子进程，而微信 bridge 在主进程读 global.__fanboxCron，
+// 这里放一座主→子的 RPC 代理补上拆进程缺的半座桥：调用发 {type:'cron:call', id, method, args}，
+// 子进程按 id 回 {type:'cron:reply'}。子进程不在时立即失败，bridge 会把错误折进微信回执。
+const cronWaiters = new Map(); // id -> resolve
+let cronSeq = 0;
+function callBackendCron(method, args) {
+  const child = backendProc;
+  if (!child) return Promise.resolve({ ok: false, error: '后端进程未就绪' });
+  return new Promise((resolve) => {
+    const id = ++cronSeq;
+    cronWaiters.set(id, resolve);
+    try { child.postMessage({ type: 'cron:call', id, method, args }); }
+    catch { cronWaiters.delete(id); resolve({ ok: false, error: '后端进程未就绪' }); }
+  });
+}
+global.__fanboxCron = {
+  list: (...args) => callBackendCron('list', args),
+  action: (...args) => callBackendCron('action', args),
+};
 function startBackendServer() {
   backendProc = utilityProcess.fork(path.join(__dirname, 'server-child.js'), [], {
     serviceName: 'fanbox-server',
@@ -100,7 +119,13 @@ function startBackendServer() {
   // 活过 5 秒 = 这次启动是成功的，重启计数清零；否则偶发崩溃隔几天攒满 5 次会误判「起不来」
   const settled = setTimeout(() => { backendRestarts = 0; }, 5000);
   child.on('message', async (m) => {
-    if (!m || m.type !== 'agent:call') return;
+    if (!m) return;
+    if (m.type === 'cron:reply') {
+      const resolve = cronWaiters.get(m.id);
+      if (resolve) { cronWaiters.delete(m.id); resolve(m.result); }
+      return;
+    }
+    if (m.type !== 'agent:call') return;
     let result;
     try { result = await agentImpl[m.method](...(m.args || [])); }
     catch (e) { result = { ok: false, error: String((e && e.message) || e) }; }
@@ -109,6 +134,9 @@ function startBackendServer() {
   child.on('exit', (code) => {
     clearTimeout(settled);
     if (backendProc === child) backendProc = null;
+    // 在途 cron 调用随子进程退出一并落空，别让 bridge 的 Promise 悬死
+    for (const resolve of cronWaiters.values()) resolve({ ok: false, error: '后端进程重启中' });
+    cronWaiters.clear();
     if (isQuitting || code === 0) return;
     if (backendRestarts++ < 5) { setTimeout(startBackendServer, 300 * backendRestarts); return; }
     // 连拉 5 次都活不成，最常见是端口被占（另一个 FanBox / 裸跑的 node server.js）。

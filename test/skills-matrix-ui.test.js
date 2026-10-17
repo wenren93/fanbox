@@ -122,13 +122,12 @@ test('Project and plugin skills live in a bottom collapse keeping their legacy f
   assert.match(view, /await this\.runAnnex\(\{ project: it\.projectRoot \|\| state\.cwd, name: it\.name \}\);/);
 });
 
-test('Row drawer exposes origin, per-column mechanism details, WB refresh, reveal and uninstall', () => {
+test('Row drawer exposes origin, WB refresh, reveal and uninstall', () => {
   const { view } = skillsViewSource();
   assert.match(view, /rowDrawerHtml\(it\) \{/);
   assert.match(view, /<dt>原件路径<\/dt><dd class="mono">\$\{escapeHtml\(tilde\(it\.dir\)\)\}<\/dd>/);
   assert.match(view, /<dt>来源<\/dt><dd>\$\{escapeHtml\(\(it\.provenance && it\.provenance\.label\) \|\| originText\)\}<\/dd>/);
-  assert.match(view, /<dl class="sk-link-matrix">\$\{detailRows\}<\/dl>/);
-  assert.match(view, /config\.toml 无禁用条目 = 默认启用（Codex 原生扫描原件仓）/);
+  assert.doesNotMatch(view, /sk-link-matrix/);
   assert.match(view, /data-act="refresh-wb"/);
   assert.match(view, /async refreshWorkBuddyCopy\(it\) \{[\s\S]{0,600}for \(const on of \[false, true\]\) \{\s*const r = await apiPost\('\/api\/skills\/link',\s*\{\s*name: it\.name, agent: 'workbuddy', on \}\);/);
   assert.match(view, /data-act="reveal" \$\{this\.busy \? 'disabled' : ''\}>在文件区显示<\/button>/);
@@ -151,7 +150,7 @@ test('Broken links surface as a row-level warning with a reveal entry point', ()
   assert.match(view, /<div class="sk-row-alert">⚠ \$\{escapeHtml\(bad\.msg\)\}/);
   assert.match(view, /a\.kind === 'broken-link' \|\| a\.kind === 'dead-loop'\) && a\.agent !== 'store'\)/);
   assert.match(view, /data-act="reveal-anomaly" data-path="\$\{escapeHtml\(anomaly\.path\)\}">查看<\/button>/);
-  assert.match(js, /const SKILL_HEALTH_SHORT = \{[\s\S]*?'broken-link': '断链',[\s\S]*?'wb-drift': 'WB拷贝落后',[\s\S]*?\};/);
+  assert.match(js, /const SKILL_HEALTH_SHORT = \{[\s\S]*?'broken-link': '断链',[\s\S]*?'wb-drift': 'WorkBuddy 拷贝落后',[\s\S]*?\};/);
 });
 
 test('Externally modified FanBox installs offer recheck and reinstall takeover, foreign originals do not', () => {
@@ -192,5 +191,4 @@ test('Matrix styles cover unified lit/grey icons, agent tabs, stock fade and the
   assert.match(css, /\.sk-atab\.on\s*\{\s*border-color:\s*var\(--accent\);\s*background:\s*var\(--accent-soft\);/);
   assert.match(css, /\.sk-others\s*\{\s*margin-top:\s*26px;\s*\}/);
   assert.match(css, /\.sk-orow\s*\{[^}]*grid-template-columns:\s*24px minmax\(0, 1fr\) 118px/s);
-  assert.match(css, /\.sk-link-matrix\s*\{\s*display:\s*grid;\s*grid-template-columns:\s*112px minmax\(0, 1fr\);/);
 });

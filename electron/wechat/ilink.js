@@ -7,7 +7,12 @@ const path = require('path');
 const LOGIN_BASE = 'https://ilinkai.weixin.qq.com'; // 二维码登录恒用主域名
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'; // 媒体字节流上传到 CDN（不是主域名）
 const BOT_TYPE = '3';
-const CHANNEL_VERSION = '1.0.11';
+// 与腾讯官方 openclaw-weixin v2.4.6 对齐：该版本同时决定
+// iLink-App-ClientVersion 和 base_info.channel_version。
+const ILINK_APP_ID = 'bot';
+const CHANNEL_VERSION = '2.4.6';
+const TYPING_TICKET_TTL_MS = 24 * 60 * 60 * 1000;
+const typingTicketCache = new Map();
 // 按扩展名判定走图片消息还是文件消息（微信里图片能直接预览，其余当文件附件）
 const IMG_EXT = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp']);
 
@@ -22,7 +27,10 @@ function wechatUin() {
   return Buffer.from(String(n), 'utf-8').toString('base64');
 }
 function commonHeaders() {
-  return { 'iLink-App-ClientVersion': clientVersion(CHANNEL_VERSION) };
+  return {
+    'iLink-App-Id': ILINK_APP_ID,
+    'iLink-App-ClientVersion': clientVersion(CHANNEL_VERSION),
+  };
 }
 function postHeaders(token) {
   const h = { ...commonHeaders(), 'Content-Type': 'application/json', AuthorizationType: 'ilink_bot_token', 'X-WECHAT-UIN': wechatUin() };
@@ -68,8 +76,15 @@ async function pollQrStatus(baseUrl, qrcode, verifyCode, signal) {
 // ---------- 收发 ----------
 async function getUpdates(account, getUpdatesBuf, timeoutMs, signal) {
   const url = `${account.baseUrl}/ilink/bot/getupdates`;
-  const r = await httpJson(url, { headers: postHeaders(account.token), body: { get_updates_buf: getUpdatesBuf || '', base_info: baseInfo() }, timeoutMs: timeoutMs || 35000, signal });
-  return r.json || { ret: 0, msgs: [], get_updates_buf: getUpdatesBuf };
+  try {
+    const r = await httpJson(url, { headers: postHeaders(account.token), body: { get_updates_buf: getUpdatesBuf || '', base_info: baseInfo() }, timeoutMs: timeoutMs || 35000, signal });
+    return r.json || { ret: 0, msgs: [], get_updates_buf: getUpdatesBuf };
+  } catch (e) {
+    // 长轮询到点是正常控制流，不是网络故障。返回空结果让 bridge 立即续拉；
+    // 若把 AbortError 当失败，前两次会制造 2s 收信空窗，连续三次后会放大到 30s。
+    if (e && e.name === 'AbortError') return { ret: 0, msgs: [], get_updates_buf: getUpdatesBuf };
+    throw e;
+  }
 }
 function buildTextReq(toUserId, text, contextToken) {
   return { msg: {
@@ -77,7 +92,8 @@ function buildTextReq(toUserId, text, contextToken) {
     client_id: crypto.randomBytes(8).toString('hex'),
     message_type: 2, message_state: 2,
     item_list: [{ type: 1, text_item: { text } }],
-    context_token: contextToken || '',
+    // 没有会话上下文时省略字段，和官方客户端的可选字段语义一致。
+    context_token: contextToken || undefined,
   }, base_info: baseInfo() };
 }
 async function sendText(account, toUserId, text, contextToken) {
@@ -87,10 +103,18 @@ async function sendText(account, toUserId, text, contextToken) {
 // 正在输入指示（可选体验）
 async function sendTyping(account, userId, on) {
   try {
-    const cfg = await httpJson(`${account.baseUrl}/ilink/bot/getconfig`, { headers: postHeaders(account.token), body: { ilink_user_id: userId, base_info: baseInfo() }, timeoutMs: 8000 });
-    const ticket = cfg.json && cfg.json.typing_ticket;
+    const cacheKey = `${account.baseUrl}\0${account.accountId || ''}\0${userId}`;
+    const cached = typingTicketCache.get(cacheKey);
+    let ticket = cached && cached.expiresAt > Date.now() ? cached.ticket : '';
+    if (!ticket) {
+      typingTicketCache.delete(cacheKey);
+      const cfg = await httpJson(`${account.baseUrl}/ilink/bot/getconfig`, { headers: postHeaders(account.token), body: { ilink_user_id: userId, base_info: baseInfo() }, timeoutMs: 8000 });
+      ticket = cfg.json && cfg.json.typing_ticket;
+      if (ticket) typingTicketCache.set(cacheKey, { ticket, expiresAt: Date.now() + TYPING_TICKET_TTL_MS });
+    }
     if (!ticket) return;
-    await httpJson(`${account.baseUrl}/ilink/bot/sendtyping`, { headers: postHeaders(account.token), body: { ilink_user_id: userId, typing_ticket: ticket, status: on ? 1 : 2, base_info: baseInfo() }, timeoutMs: 8000 });
+    const sent = await httpJson(`${account.baseUrl}/ilink/bot/sendtyping`, { headers: postHeaders(account.token), body: { ilink_user_id: userId, typing_ticket: ticket, status: on ? 1 : 2, base_info: baseInfo() }, timeoutMs: 8000 });
+    if (!sent.ok || (sent.json && ((sent.json.ret && sent.json.ret !== 0) || (sent.json.errcode && sent.json.errcode !== 0)))) typingTicketCache.delete(cacheKey);
   } catch { /* 输入指示失败无所谓 */ }
 }
 
@@ -148,7 +172,7 @@ async function sendMedia(account, toUserId, filePath, contextToken) {
     : { type: 4, file_item: { media, file_name: path.basename(filePath), len: String(rawsize) } };
   const body = { msg: {
     from_user_id: '', to_user_id: toUserId, client_id: crypto.randomBytes(8).toString('hex'),
-    message_type: 2, message_state: 2, item_list: [item], context_token: contextToken || '',
+    message_type: 2, message_state: 2, item_list: [item], context_token: contextToken || undefined,
   }, base_info: baseInfo() };
   const r = await httpJson(`${account.baseUrl}/ilink/bot/sendmessage`, { headers: postHeaders(account.token), body, timeoutMs: 20000 });
   if (!r.ok) throw new Error(`sendmessage(media) HTTP ${r.status}`);

@@ -1685,10 +1685,6 @@ body { transition: background-color 0.28s ease, color 0.28s ease; }
 .sk-health.error { color: #b5483a; }
 .sk-row-alert { margin-top: 3px; display: flex; gap: 8px; align-items: center; font-size: 10.5px; color: #b5483a; overflow-wrap: anywhere; }
 .sk-row-alert button { flex: none; border: 1px solid color-mix(in srgb, #b5483a 45%, var(--border)); border-radius: 5px; background: transparent; color: #b5483a; font-size: 10px; padding: 1px 7px; cursor: pointer; }
-.sk-link-matrix { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 7px 14px; margin: 12px 0 0; padding: 11px 12px; border: 1px solid var(--rule); border-radius: 8px; background: var(--bg); font-size: 11.5px; }
-.sk-link-matrix dt { display: flex; align-items: center; gap: 7px; color: var(--text-dim); }
-.sk-link-matrix dt .sk-ic { width: 20px; height: 20px; font-size: 9.5px; cursor: default; }
-.sk-link-matrix dd { margin: 0; min-width: 0; color: var(--text-dim); overflow-wrap: anywhere; }
 .fd-cut.bad { color: #b5483a; }
 /* 扫描异常处置卡（收编 / 查看入口，docs/14） */
 .sk-anoms { margin: 14px 0 4px; border: 1px solid color-mix(in srgb, var(--yellow) 38%, var(--rule)); border-radius: 9px; background: color-mix(in srgb, var(--yellow) 7%, transparent); padding: 4px 10px; }

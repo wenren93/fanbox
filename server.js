@@ -3008,7 +3008,7 @@ async function skillsDataV2(opts = {}) {
   }
 
   // 来源 chip + 已被外部修改：来源记录存在才是 FanBox 安装件；仓内无记录实体
-  // 是迁移后的常态，统一标作「本机收编 / 外部装入」且不提供同源更新。
+  // 是迁移后的常态，统一标作「外来原件」且不提供同源更新。
   await Promise.all(rows.map(async (row) => {
     if (row.origin === 'repo') {
       row.provenance = { kind: 'repo', label: '仓库', updateable: false };
@@ -3022,7 +3022,7 @@ async function skillsDataV2(opts = {}) {
     const record = skillDiscovery && ((await skillDiscovery.sourceRecord(storeEntry).catch(() => null))
       || (await skillDiscovery.sourceRecord(row.dir).catch(() => null)));
     if (!record) {
-      row.provenance = { kind: 'foreign', label: '本机收编 / 外部装入', updateable: false };
+      row.provenance = { kind: 'foreign', label: '外来原件', updateable: false };
       return;
     }
     row.provenance = {

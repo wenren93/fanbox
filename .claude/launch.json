@@ -1,0 +1,28 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "fanbox",
+      "url": "http://localhost:4567"
+    },
+    {
+      "name": "start",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "start"
+      ],
+      "port": 4567
+    },
+    {
+      "name": "web",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "FANBOX_PORT=${PORT:-4577} exec node server.js"
+      ],
+      "port": 4577,
+      "autoPort": true
+    }
+  ]
+}

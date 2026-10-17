@@ -25,11 +25,29 @@ find_running_pid() {
   return 1
 }
 
+# 监听端口的可能是 Electron 辅助进程，System Events 无法激活它们；
+# 沿父进程链向上找到 .app bundle 的主可执行进程（GUI 主进程）。
+find_app_pid() {
+  local pid="$1" parent executable
+  while [[ "$pid" =~ ^[0-9]+$ && "$pid" != "1" ]]; do
+    executable="$(ps -o args= -p "$pid" 2>/dev/null || true)"
+    executable="${executable%% *}"
+    if [[ "$executable" == *.app/Contents/MacOS/* && "$executable" != */Frameworks/* ]]; then
+      printf '%s\n' "$pid"
+      return 0
+    fi
+    parent="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+    pid="$parent"
+  done
+  return 1
+}
+
 if RUNNING_PID="$(find_running_pid)"; then
   echo "FanBox 已在运行，正在打开应用窗口……"
-  kill -CONT "$RUNNING_PID"
-  if [[ "$(uname -s)" == "Darwin" ]] && command -v osascript >/dev/null 2>&1; then
-    osascript -e "tell application \"System Events\" to set frontmost of first process whose unix id is $RUNNING_PID to true"
+  APP_PID="$(find_app_pid "$RUNNING_PID" || true)"
+  kill -CONT "${APP_PID:-$RUNNING_PID}"
+  if [[ "$(uname -s)" == "Darwin" ]] && command -v osascript >/dev/null 2>&1 && [[ -n "$APP_PID" ]]; then
+    osascript -e "tell application \"System Events\" to set frontmost of first process whose unix id is $APP_PID to true"
   fi
   exit 0
 fi

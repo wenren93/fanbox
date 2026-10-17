@@ -5589,7 +5589,7 @@ const SKILL_ORIGIN_BADGES = {
 const SKILL_HEALTH_SHORT = {
   'broken-link': '断链',
   'dead-loop': '死环',
-  'wb-drift': 'WB拷贝落后',
+  'wb-drift': 'WorkBuddy 拷贝落后',
   'externally-modified': '已被外部修改',
   'desc-missing': '缺描述',
   'desc-over-cut': '描述超截断',
@@ -6620,7 +6620,7 @@ const skillsView = {
         </button>
       </div>
       ${this.anomaliesHtml()}
-      <div class="sk-thead"><span></span><span>Skill / 描述</span><div class="sk-mtx-head">${SKILL_MATRIX_COLUMNS.map((c) => `<button class="sym ${c.id} sk-colhead" data-col-head="${c.id}" title="整列批量 · ${escapeHtml(c.label)}：${escapeHtml(c.mech)}" aria-label="整列批量 ${escapeHtml(c.label)}" aria-haspopup="dialog">${c.sym}</button>`).join('')}</div><span class="r">触发</span><span>健康</span><span class="r">更新</span><span></span></div>`;
+      <div class="sk-thead"><span></span><span>Skill / 描述</span><div class="sk-mtx-head">${SKILL_MATRIX_COLUMNS.map((c) => `<button class="sym ${c.id} sk-colhead" data-col-head="${c.id}" title="整列批量 · ${escapeHtml(c.label)}：${escapeHtml(c.mech)}" aria-label="整列批量 ${escapeHtml(c.label)}" aria-haspopup="dialog">${c.sym}</button>`).join('')}</div><span class="r">触发</span><span class="r">健康</span><span class="r">更新</span><span></span></div>`;
     if (this.batchMode) h += this.batchBarHtml();
     if (!rows.length) h += `<div class="sk-empty">${this.query ? `没有找到“${escapeHtml(this.query)}”` : '当前筛选下没有原件'}</div>`;
     rows.forEach((it) => {
@@ -6704,16 +6704,6 @@ const skillsView = {
       repo: '仓库家族（fanbox/.agents/skills，git 是唯一真源）',
       external: '外部原件（外部工具自管：只取消接入、绝不删内容）',
     }[it.origin] || it.origin;
-    const detailRows = SKILL_MATRIX_COLUMNS.map((c) => {
-      const st = ((it.agents || {})[c.id]) || {};
-      const detail = {
-        claude: st.on ? `相对软链已建：~/.claude/skills/${it.name} → ~/.agents/skills/${it.name}` : '未建链（~/.claude/skills 下没有指向原件仓的相对链）',
-        codex: st.on ? 'config.toml 无禁用条目 = 默认启用（Codex 原生扫描原件仓）' : 'config.toml 已写 enabled=false 选择器（重启 Codex 生效）',
-        zcode: st.on ? 'config.json 未禁用 = 默认启用' : 'config.json 已写 enable:false',
-        workbuddy: st.on ? `拷贝在 ~/.workbuddy/skills/${it.name}${st.drift ? '（落后于原件——可在下方刷新拷贝）' : ''}` : '无激活拷贝（停用拷贝移入同级 skills_disabled）',
-      }[c.id];
-      return `<dt><span class="sk-ic ${c.id} ${st.on ? 'lit' : ''}">${c.sym}</span>${c.label}</dt><dd>${escapeHtml(detail)}</dd>`;
-    }).join('');
     const wbOn = ((it.agents || {}).workbuddy || {}).on;
     const externallyModified = health.some((x) => x.code === 'externally-modified');
     return `<div class="sk-detail">
@@ -6721,11 +6711,10 @@ const skillsView = {
         <div class="fd">${escapeHtml(it.desc || '（无 description）')}</div>
         ${health.map((x) => `<div class="fd-cut ${x.level === 'error' ? 'bad' : ''}">⚠ ${escapeHtml(x.msg)}</div>`).join('')}
         ${it.descLen > cut ? `<div class="fd-cut">⚠ description 共 ${(it.descLen || 0).toLocaleString()} 字符，第 ${(cut || 0).toLocaleString()} 字符之后模型看不见——靠后段触发词的场景不会触发</div>` : ''}
-        <dl class="sk-link-matrix">${detailRows}</dl>
         <div class="fd-acts">
           <button data-act="invoke" class="primary" ${this.busy ? 'disabled' : ''}>▶ 终端调用</button>
           <button data-act="edit" ${this.busy ? 'disabled' : ''}>编辑 SKILL.md</button>
-          ${wbOn ? `<button data-act="refresh-wb" ${this.busy || this.linkBusy.has(`${it.dir}:workbuddy`) ? 'disabled' : ''} title="取消接入（旧拷贝进 skills_disabled 可恢复）后从原件重新拷入">刷新 WB 拷贝</button>` : ''}
+          ${wbOn ? `<button data-act="refresh-wb" ${this.busy || this.linkBusy.has(`${it.dir}:workbuddy`) ? 'disabled' : ''} title="把 WorkBuddy 里的旧拷贝移入 skills_disabled（可恢复），再从原件重新拷入一份">重新拷贝到 WorkBuddy</button>` : ''}
           ${externallyModified ? `<button data-act="recheck-source" ${this.busy ? 'disabled' : ''}>重新检查</button>` : ''}
           ${externallyModified && it.provenance && it.provenance.updateable ? `<button data-act="reinstall-source" ${this.busy ? 'disabled' : ''}>重装接管</button>` : ''}
           <button data-act="reveal" ${this.busy ? 'disabled' : ''}>在文件区显示</button>

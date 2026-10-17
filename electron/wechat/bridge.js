@@ -69,9 +69,11 @@ const WX_TERM_PROTOCOL = [
 // ClawBot 的定时任务协议：由 bridge 代为调用 FanBox 内部实现，不要求无头 Agent 持有终端控制 token。
 const WX_CRON_PROTOCOL = [
   '用户明确要求设置、查看或预览定时任务时，使用下面的结构化标记，不要把标记展示给用户：',
+  '<cron action="list"></cron>（查询当前任务列表与启用状态）',
   '<cron action="preview">{"schedule":{"type":"cron","expr":"0 9 * * *"}}</cron>',
   '<cron action="save">{"name":"任务名","cwd":"/绝对路径","agent":"claude","prompt":"要执行的事情","schedule":{"type":"cron","expr":"0 9 * * *"}}</cron>',
   'agent 只能是 claude、codex 或 shell；schedule 支持 cron、at、every。创建前先根据用户意图预览时间；full:true 只有用户明确要求时才使用。ClawBot 不能删除、停用或立即执行任务。',
+  '这套标记每个会话每一轮都可用，由 FanBox 代为执行，不依赖任何 token 或权限注入；任务列表以实时查询结果为准，不要凭记忆作答，更不要声称缺少权限或建议新开会话。',
 ].join('\n');
 
 // 终端输入规范化：① 把 agent 按协议写的字面转义（\n \r \t）还原成控制符；
@@ -99,6 +101,7 @@ const bridge = {
   pollAbort: null,
   msgQueue: {},                    // cid -> 待处理入站消息队列（轮询只入队、不阻塞，worker 串行消费）
   draining: {},                    // cid -> 该会话的 worker 是否在跑（同会话不并发，避免跑乱 session）
+  receivedAt: new WeakMap(),       // 原始消息 -> 本机拉取时刻，用于拆分服务端接收与排队耗时
   avail: null,                     // { codex, claude } CLI 可用性缓存
   expired: false,                  // 已连过但 token 失效（轮询/探活发现）→ 当作未连，需重新扫码
   onConnChange: null,              // 连接态变化回调（主进程用来联动「离开不待机」电源守卫）
@@ -224,7 +227,7 @@ const bridge = {
 
   // 跑一轮大脑：按 target 选 driver，带上该会话的工作目录与（claude 的）续话 session
   // onProgress：可选，driver 流式跑时把「正在干啥」回调出来，用于微信实时播报
-  async runAgent(cid, text, onProgress) {
+  async runAgent(cid, text, onProgress, timing) {
     const c = this.conv(cid);
     // 压缩后留的「上次进度摘要」：换了新 session，把它播种进去让 agent 无缝接着干，用一次就清
     let recap = '';
@@ -248,7 +251,7 @@ const bridge = {
     c.lastTokens = tk;
     c.ctxPeak = Math.max(c.ctxPeak || 0, tk); // 进度条用的「上下文水位」：取峰值单调爬升，避免单轮 usage 抖动让条来回跳
     if (r.cost) c.totalCost = (c.totalCost || 0) + r.cost;
-    this.logRun(cid, r); // 一行流水：耗时/重试次数/是否超时，排查链路问题时直接 cat
+    this.logRun(cid, r, timing); // 一行流水：接收/排队/大脑耗时，排查链路问题时直接 cat
     this.persistConvos();
     // 抽出 <memory> ops 确定性落盘（去污染），把记忆块从展示里剥掉
     const { clean, ops } = memory.extractOps(raw);
@@ -273,7 +276,14 @@ const bridge = {
       if (!result || !result.ok) { notices.push(`定时任务操作失败：${result && result.error ? result.error : '未知错误'}`); continue; }
       const task = result.task || {};
       if (op.action === 'list') {
-        notices.push(`当前共有 ${(result.tasks || []).length} 个定时任务`);
+        const tasks = result.tasks || [];
+        if (!tasks.length) { notices.push('当前没有定时任务'); continue; }
+        const brief = tasks.map((t) => {
+          const status = t.enabled ? '启用' : '停用';
+          const next = t.enabled && t.nextRun ? `，下次 ${new Date(t.nextRun).toLocaleString('zh-CN', { hour12: false })}` : '';
+          return `${t.name || '未命名'}（${status}${next}）`;
+        }).join('；');
+        notices.push(`当前共有 ${tasks.length} 个定时任务：${brief}`);
       } else if (op.action === 'preview') {
         const times = (result.times || []).map((t) => new Date(t).toLocaleString('zh-CN', { hour12: false }));
         notices.push(times.length ? `预计执行时间：${times.join('、')}` : '没有可预览的执行时间');
@@ -406,6 +416,7 @@ const bridge = {
     if (!msg || msg.message_type !== 1) return;   // 只处理用户发来的
     const from = msg.from_user_id;
     if (!from) return;
+    this.receivedAt.set(msg, Date.now());
     (this.msgQueue[from] = this.msgQueue[from] || []).push(msg);
     this.drainQueue(from);
   },
@@ -425,11 +436,12 @@ const bridge = {
     try { fs.appendFileSync(f('inbound-media.log'), JSON.stringify(msg) + '\n'); } catch { /* */ }
   },
   // 每轮大脑的耗时流水：定位卡顿/超时是网络还是别的，不用再事后取证。
-  logRun(cid, r) {
+  logRun(cid, r, timing) {
     try {
       const sec = ((r.ms || 0) / 1000).toFixed(1);
       const tag = r.timedOut ? 'TIMEOUT' : 'ok';
-      const line = `${new Date().toISOString()}\t${this.target}\t${cid}\t${sec}s\t重试${r.attempts || 1}\t${tag}\ttokens=${r.tokens || 0}`;
+      const extra = timing ? `\treceive=${timing.receiveMs == null ? '?' : timing.receiveMs}ms\tqueue=${timing.queueMs}ms` : '';
+      const line = `${new Date().toISOString()}\t${this.target}\t${cid}\t${sec}s\t重试${r.attempts || 1}\t${tag}\ttokens=${r.tokens || 0}${extra}`;
       fs.appendFileSync(f('runs.log'), line + '\n');
     } catch { /* */ }
   },
@@ -463,6 +475,14 @@ const bridge = {
     if (msg.message_type !== 1) return;           // 只处理用户发来的
     const from = msg.from_user_id;
     if (!from) return;
+    const startedAt = Date.now();
+    const pulledAt = this.receivedAt.get(msg) || startedAt;
+    this.receivedAt.delete(msg);
+    const createdAt = Number(msg.create_time_ms);
+    const timing = {
+      receiveMs: Number.isFinite(createdAt) && createdAt > 0 ? Math.max(0, pulledAt - createdAt) : null,
+      queueMs: Math.max(0, startedAt - pulledAt),
+    };
     const { text, medias } = ilink.contentFromMsg(msg);
     if (!text && !medias.length) return;          // 真空消息才丢
     this.activeCid = from;
@@ -492,7 +512,7 @@ const bridge = {
     this.push(from, 'user', text || placeholders.join(''), imgPaths.length ? { images: imgPaths } : null);
     const live = this.startLiveness(from, msg.context_token);
     let reply;
-    try { reply = await this.runAgent(from, (text || '（无文字说明）') + mediaNote, live.onProgress); }
+    try { reply = await this.runAgent(from, (text || '（无文字说明）') + mediaNote, live.onProgress, timing); }
     catch (e) { reply = `（出错）${String(e && e.message || e).slice(0, 300)}`; }
     finally { live.stop(); }
     const { clean, files } = extractFiles(reply);

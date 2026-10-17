@@ -99,7 +99,7 @@ async function main(argv = process.argv.slice(2)) {
   console.log(JSON.stringify({ ok: true, dryRun: !!args.dryRun, accountPath, toUserId, message }));
   if (args.dryRun) return 0;
 
-  const result = await ilink.sendText(account, toUserId, message, args.contextToken || '');
+  const result = await ilink.sendText(account, toUserId, message, args.contextToken);
   if (!result.ok || result.json?.errcode || (result.json?.ret != null && result.json.ret !== 0)) {
     throw new Error(`发送失败（HTTP ${result.status}）：${JSON.stringify(result.json || {})}`);
   }

@@ -209,7 +209,7 @@ test('refresh v2 scans rows from the original store with four-column access valu
 
     const plain = byName.get('plain');
     assert.ok(plain, 'plain row missing');
-    assert.deepEqual(plain.provenance, { kind: 'foreign', label: '本机收编 / 外部装入', updateable: false });
+    assert.deepEqual(plain.provenance, { kind: 'foreign', label: '外来原件', updateable: false });
     assert.equal(plain.agents.codex.on, true);
     assert.equal(plain.agents.zcode.on, true);
     assert.equal(plain.agents.claude.on, false);
